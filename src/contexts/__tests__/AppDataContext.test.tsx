@@ -50,10 +50,17 @@ describe('AppDataContext mock-admin removal (Req 5.6, 5.8)', () => {
     expect(user?.role).toBeUndefined();
   });
 
-  it('still exposes user as null even when BranchContext is unavailable', () => {
+  it('throws when BranchContext is unavailable (intentional — both providers share the same wrapper)', () => {
     branchThrows = true;
-    const { result } = renderHook(() => useAppData(), { wrapper });
-    expect(result.current.user).toBeNull();
+    // useBranch() is called unconditionally inside useAppData(). When
+    // BranchProvider is missing, the throw is intentional (the production
+    // comment in AppDataContext.tsx confirms this). Verify the error
+    // propagates rather than silently returning a mock user.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => renderHook(() => useAppData(), { wrapper })).toThrow(
+      /BranchContext not available/
+    );
+    spy.mockRestore();
   });
 
   it('throws when used outside an AppDataProvider', () => {

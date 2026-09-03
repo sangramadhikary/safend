@@ -24,7 +24,7 @@ const validFormData = () => ({
   staff_name: fc.string({ minLength: 1, maxLength: 50 }).filter((s) => s.trim().length > 0),
   post_id: fc.uuid().map((id) => id),
   post_name: fc.string({ minLength: 1, maxLength: 50 }).filter((s) => s.trim().length > 0),
-  violation_date: fc.date({
+  violation_date: fc.date({ noInvalidDate: true,
     min: new Date('2020-01-01'),
     max: new Date(),
   }).map((d) => d.toISOString().split('T')[0]),
@@ -76,7 +76,7 @@ describe('Property 4: Form validation rejects invalid submissions', () => {
   it('rejects future dates for violation_date', () => {
     fc.assert(
       fc.property(
-        fc.date({ min: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), max: new Date('2030-12-31') }),
+        fc.date({ noInvalidDate: true, min: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), max: new Date('2030-12-31') }),
         fc.uuid(),
         fc.uuid(),
         fc.string({ minLength: 1, maxLength: 50 }).filter((s) => s.trim().length > 0),

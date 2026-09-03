@@ -18,19 +18,24 @@ import { POST } from '../../../app/api/attendance/checkin/route';
 // **Validates: Requirements 6.9**
 
 const nonNumericArb = fc.string({ minLength: 1, maxLength: 40 }).map((value) => `invalid:${value}`);
+// The route distinguishes two rejection reasons (see route.ts / checkinSchema.ts):
+//   - a MISSING coordinate is a generic `validation` error (reason: 'validation')
+//   - a PRESENT but non-numeric / out-of-range coordinate is `invalid_location`
+// Both must return 400 and create no record. We carry the expected reason with
+// each generated case so the assertion matches the real behavior.
 const invalidCoordinateArb = fc.oneof(
-  fc.constant({ field: 'gps_lat' as const, value: undefined }),
-  fc.constant({ field: 'gps_lng' as const, value: undefined }),
-  nonNumericArb.map((value) => ({ field: 'gps_lat' as const, value })),
-  nonNumericArb.map((value) => ({ field: 'gps_lng' as const, value })),
+  fc.constant({ field: 'gps_lat' as const, value: undefined, expectedReason: 'validation' as const }),
+  fc.constant({ field: 'gps_lng' as const, value: undefined, expectedReason: 'validation' as const }),
+  nonNumericArb.map((value) => ({ field: 'gps_lat' as const, value, expectedReason: 'invalid_location' as const })),
+  nonNumericArb.map((value) => ({ field: 'gps_lng' as const, value, expectedReason: 'invalid_location' as const })),
   fc.oneof(
     fc.double({ min: 90.000_000_000_1, max: 1e9, noNaN: true, noDefaultInfinity: true }),
     fc.double({ min: -1e9, max: -90.000_000_000_1, noNaN: true, noDefaultInfinity: true }),
-  ).map((value) => ({ field: 'gps_lat' as const, value })),
+  ).map((value) => ({ field: 'gps_lat' as const, value, expectedReason: 'invalid_location' as const })),
   fc.oneof(
     fc.double({ min: 180.000_000_000_1, max: 1e9, noNaN: true, noDefaultInfinity: true }),
     fc.double({ min: -1e9, max: -180.000_000_000_1, noNaN: true, noDefaultInfinity: true }),
-  ).map((value) => ({ field: 'gps_lng' as const, value })),
+  ).map((value) => ({ field: 'gps_lng' as const, value, expectedReason: 'invalid_location' as const })),
 );
 
 function requestFor(field: 'gps_lat' | 'gps_lng', value: unknown, clientId: number): NextRequest {
@@ -52,13 +57,13 @@ describe('Property 17: Server-side coordinate rejection', () => {
   it('rejects every missing, non-numeric, or out-of-range coordinate without creating a record', async () => {
     let clientId = 0;
     await fc.assert(
-      fc.asyncProperty(invalidCoordinateArb, async ({ field, value }) => {
+      fc.asyncProperty(invalidCoordinateArb, async ({ field, value, expectedReason }) => {
         const response = await POST(requestFor(field, value, clientId++));
 
         expect(response.status).toBe(400);
         await expect(response.json()).resolves.toMatchObject({
           ok: false,
-          reason: 'invalid_location',
+          reason: expectedReason,
           field,
         });
         expect(fromSpy).not.toHaveBeenCalled();

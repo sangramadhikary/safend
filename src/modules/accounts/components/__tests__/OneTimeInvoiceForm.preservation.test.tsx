@@ -249,7 +249,10 @@ describe('Property 2: Preservation — Net Payable formula', () => {
       }),
       { numRuns: 8 },
     );
-  }, 20000);
+    // Each of the 8 runs mounts the full dialog and drives a Radix Select
+    // interaction; under parallel-worker contention this can exceed the
+    // default and the previous 20s budget, so allow up to 60s.
+  }, 60000);
 });
 
 describe('Property 2: Preservation — new-client / no-work-order-selected sessions', () => {
@@ -312,7 +315,9 @@ describe('Property 2: Preservation — editEntry pre-fill is notes-only', () => 
       }),
       { numRuns: 15 },
     );
-  }, 20000);
+    // 15 full-dialog mounts in edit mode; allow headroom for parallel-worker
+    // contention during the full suite run.
+  }, 60000);
 });
 
 describe('Property 2: Preservation — legacy (unscoped) rows for the same client remain visible', () => {
@@ -364,5 +369,6 @@ describe('Property 2: Preservation — legacy (unscoped) rows for the same clien
       ),
       { numRuns: 10 },
     );
-  }, 20000);
+    // 10 full-dialog mounts; allow headroom under parallel-worker contention.
+  }, 60000);
 });

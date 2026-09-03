@@ -27,7 +27,7 @@ const penaltyRecordArb: fc.Arbitrary<PenaltyRecord> = fc.record({
   staff_name: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
   post_id: fc.uuid(),
   post_name: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
-  violation_date: fc.date({
+  violation_date: fc.date({ noInvalidDate: true,
     min: new Date('2020-01-01'),
     max: new Date(),
   }).map(d => d.toISOString().split('T')[0]),
@@ -43,8 +43,8 @@ const penaltyRecordArb: fc.Arbitrary<PenaltyRecord> = fc.record({
   hr_notes: fc.option(fc.string({ minLength: 1, maxLength: 100 }), { nil: null }),
   related_entity_id: fc.option(fc.uuid(), { nil: null }),
   related_entity_type: fc.option(fc.constantFrom('patrol', 'incident'), { nil: null }),
-  created_at: fc.date({ min: new Date('2020-01-01'), max: new Date() }).map(d => d.toISOString()),
-  updated_at: fc.date({ min: new Date('2020-01-01'), max: new Date() }).map(d => d.toISOString()),
+  created_at: fc.date({ noInvalidDate: true, min: new Date('2020-01-01'), max: new Date() }).map(d => d.toISOString()),
+  updated_at: fc.date({ noInvalidDate: true, min: new Date('2020-01-01'), max: new Date() }).map(d => d.toISOString()),
 });
 
 /**

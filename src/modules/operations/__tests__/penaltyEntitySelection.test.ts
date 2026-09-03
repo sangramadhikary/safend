@@ -34,7 +34,7 @@ const operationalPostArb = fc.record({
 
 // Generator: valid supporting form fields to build a complete penalty form submission
 const validFormFieldsArb = fc.record({
-  violation_date: fc.date({
+  violation_date: fc.date({ noInvalidDate: true,
     min: new Date('2020-01-01'),
     max: new Date(),
   }).map(d => d.toISOString().split('T')[0]),

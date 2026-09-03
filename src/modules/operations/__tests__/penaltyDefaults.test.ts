@@ -31,7 +31,7 @@ const newPenaltyInputArb = fc.record({
   staff_name: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
   post_id: fc.uuid(),
   post_name: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
-  violation_date: fc.date({
+  violation_date: fc.date({ noInvalidDate: true,
     min: new Date('2020-01-01'),
     max: new Date(),
   }).map(d => d.toISOString().split('T')[0]),

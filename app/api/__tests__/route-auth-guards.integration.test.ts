@@ -1,4 +1,11 @@
 // Integration tests for the server-side auth/role guards added to the
+// @vitest-environment node
+//
+// This is a server-side integration suite: it loads real API route handlers,
+// which pull in server-only code. It runs in the `node` environment (overriding
+// the global jsdom default). The `server-only` marker package is aliased to a
+// no-op in vitest.config.ts so importing server modules does not throw here.
+//
 // privileged API routes (task 10.2), exercised here through their real route
 // handlers (task 10.4).
 //

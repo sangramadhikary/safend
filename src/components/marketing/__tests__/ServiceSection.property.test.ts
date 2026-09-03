@@ -50,10 +50,13 @@ const invalidServiceEntryArb: fc.Arbitrary<ServiceEntry> = fc.oneof(
     description: fc.string({ minLength: 1, maxLength: 500 }),
     icon: fc.option(fc.constantFrom('Shield', 'Home', 'Users', 'ShieldAlert'), { nil: undefined }),
   }),
-  // Name too long (>60 chars)
+  // Name too long (>60 chars). Build from non-whitespace characters so that
+  // trimming (as isValidEntry does) cannot shorten it to a valid length —
+  // otherwise a whitespace-padded 61-char string could trim to <=60 and be
+  // considered valid, making this "invalid" case flakily pass validation.
   fc.record({
     id: fc.uuid(),
-    name: fc.string({ minLength: 61, maxLength: 100 }),
+    name: fc.array(fc.constantFrom('a', 'b', 'c', 'X', '9'), { minLength: 61, maxLength: 100 }).map(a => a.join('')),
     description: fc.string({ minLength: 1, maxLength: 500 }),
     icon: fc.option(fc.constantFrom('Shield', 'Home', 'Users', 'ShieldAlert'), { nil: undefined }),
   }),
@@ -64,11 +67,12 @@ const invalidServiceEntryArb: fc.Arbitrary<ServiceEntry> = fc.oneof(
     description: fc.constant(''),
     icon: fc.option(fc.constantFrom('Shield', 'Home', 'Users', 'ShieldAlert'), { nil: undefined }),
   }),
-  // Description too long (>500 chars)
+  // Description too long (>500 chars). Non-whitespace characters so trimming
+  // cannot bring it back within the valid bound (see the name case above).
   fc.record({
     id: fc.uuid(),
-    name: fc.string({ minLength: 1, maxLength: 60 }),
-    description: fc.string({ minLength: 501, maxLength: 600 }),
+    name: fc.string({ minLength: 1, maxLength: 60 }).filter(s => s.trim().length > 0),
+    description: fc.array(fc.constantFrom('a', 'b', 'c', 'X', '9'), { minLength: 501, maxLength: 600 }).map(a => a.join('')),
     icon: fc.option(fc.constantFrom('Shield', 'Home', 'Users', 'ShieldAlert'), { nil: undefined }),
   }),
   // Whitespace-only name

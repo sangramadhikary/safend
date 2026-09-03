@@ -1,5 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+
+// Mock the schema to skip turnstileToken (the standalone EnquiryForm component
+// does not include a Turnstile widget — the production form is ContactContent).
+vi.mock('@/lib/enquirySchema', async () => {
+  const { z } = await import('zod');
+  return {
+    enquirySchema: z.object({
+      name: z.string().min(1, 'Name is required').max(100, 'Name must be 100 characters or fewer'),
+      contactMethod: z.string().min(1, 'Contact method is required').refine(
+        (val: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val) || /^\+?[\d\s\-()]{7,20}$/.test(val),
+        'Must be a valid email address or phone number'
+      ),
+      message: z.string().min(1, 'Message is required').max(2000, 'Message must be 2000 characters or fewer'),
+      website: z.string().max(0, 'Bot detected').optional().default(''),
+    }),
+  };
+});
+
 import { EnquiryForm } from '../EnquiryForm';
 
 // Mock fetch
@@ -149,6 +167,7 @@ describe('EnquiryForm', () => {
         name: 'John Doe',
         contactMethod: 'john@example.com',
         message: 'I need security services',
+        website: '',
       }),
     });
   });

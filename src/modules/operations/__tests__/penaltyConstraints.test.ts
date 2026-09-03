@@ -99,9 +99,22 @@ describe('Property 9: Database constraint enforcement', () => {
       fc.property(
         fc.integer({ min: 1, max: 3650 }),
         (daysInFuture) => {
-          const futureDate = new Date();
-          futureDate.setDate(futureDate.getDate() + daysInFuture);
-          const futureDateStr = futureDate.toISOString().split('T')[0];
+          // The schema parses `new Date(val)` (UTC midnight) and compares it to
+          // local end-of-day. Near the day boundary a date 1 calendar day ahead
+          // in UTC can still fall within "today" in a timezone ahead of UTC,
+          // making a +1 offset ambiguous. Anchor the future date to UTC "today"
+          // and add a full day of margin so the value is unambiguously future
+          // regardless of the runner's timezone.
+          const base = new Date();
+          const utcToday = Date.UTC(
+            base.getUTCFullYear(),
+            base.getUTCMonth(),
+            base.getUTCDate(),
+          );
+          // +1 day baseline guarantees it is past local end-of-day everywhere,
+          // then add the generated offset.
+          const futureMs = utcToday + (daysInFuture + 1) * 24 * 60 * 60 * 1000;
+          const futureDateStr = new Date(futureMs).toISOString().split('T')[0];
           const data = { ...validFormData(), violation_date: futureDateStr };
           const result = penaltyFormSchema.safeParse(data);
           expect(result.success).toBe(false);

@@ -30,11 +30,19 @@ const malformedPayload = fc.oneof(
   validPostId.map((postId) => `${postId}x`),
 );
 
+// A "not-attendance" code uses a scheme the parser does not recognise at all.
+// Note: `safend-attendance:v2:...` is NOT included here — the parser now
+// supports a v2 signed format, so those are classified as `ok`/`malformed`,
+// never `not-attendance`. Only genuinely foreign schemes belong here.
 const nonAttendanceCode = fc.oneof(
   fc
     .string({ maxLength: 100 })
-    .filter((raw) => !raw.trim().startsWith(codePrefix)),
-  fc.string({ maxLength: 100 }).map((payload) => `${ATTENDANCE_SCHEME}:v2:${payload}`),
+    .filter(
+      (raw) =>
+        !raw.trim().startsWith(codePrefix) &&
+        !raw.trim().startsWith(`${ATTENDANCE_SCHEME}:v2:`),
+    ),
+  // Different scheme name entirely (case-sensitive prefix mismatch).
   fc.string({ maxLength: 100 }).map((payload) => `SAFEND-ATTENDANCE:${ATTENDANCE_VERSION}:${payload}`),
 );
 
