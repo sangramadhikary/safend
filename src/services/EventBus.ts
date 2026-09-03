@@ -1,3 +1,4 @@
+'use client';
 
 type EventCallback = (payload?: any) => void;
 

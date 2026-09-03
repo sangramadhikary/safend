@@ -1,3 +1,4 @@
+'use client';
 
 import React, { useEffect } from "react";
 import {
@@ -12,7 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Loader } from "lucide-react";
-import { SoundBus } from "@/services/SoundService";
+import { getSoundBus } from "@/services/SoundService";
 
 interface ConfirmationDialogProps {
   isOpen: boolean;
@@ -41,19 +42,23 @@ export function ConfirmationDialog({
 }: ConfirmationDialogProps) {
   // Play notification sound when dialog opens
   useEffect(() => {
-    if (isOpen) {
-      SoundBus.play('notification');
+    if (isOpen && typeof window !== 'undefined') {
+      getSoundBus().play('notification');
     }
   }, [isOpen]);
 
   const handleConfirm = () => {
-    // Play appropriate sound for action type
-    SoundBus.play(variant === 'destructive' ? 'delete' : 'success');
+    // Play appropriate sound for action type (only on client)
+    if (typeof window !== 'undefined') {
+      getSoundBus().play(variant === 'destructive' ? 'delete' : 'success');
+    }
     onConfirm();
   };
 
   const handleCancel = () => {
-    SoundBus.play('click');
+    if (typeof window !== 'undefined') {
+      getSoundBus().play('click');
+    }
     onClose();
   };
 

@@ -1,972 +1,471 @@
+'use client';
 
 import { useState, useEffect } from "react";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Search, Edit, Trash2, Save, Shield, RefreshCw, Copy } from "lucide-react";
-import { useToast } from "@/components/ui/use-toast";
-import { RoleEditForm } from "./forms/RoleEditForm";
-import { RoleAssignmentForm, RoleAssignmentData } from "./forms/RoleAssignmentForm";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
+import { Shield, Plus, Pencil, Trash2, Users, Save, RefreshCw } from "lucide-react";
+import { supabaseClient } from "@/integrations/supabase/client";
 import { getAllUsers, updateUserRoles } from "@/utils/firebaseUserManagement";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { auditActions } from "@/utils/auditLog";
-import { generatePassword } from "@/utils/firebaseUserManagement";
+
+// Modules in the system
+const MODULES = ['Dashboard', 'Sales', 'Operations', 'Accounts', 'HR', 'Office Admin', 'Reports', 'Control Centre'] as const;
+// Permissions per module
+const PERMISSIONS = ['view', 'create', 'edit', 'delete', 'export'] as const;
 
 interface Role {
   id: string;
   name: string;
   description: string;
-  userCount: number;
-  status: "active" | "inactive";
+  is_system: boolean;
+  permissions: Record<string, string[]>; // { "Sales": ["view", "create", "edit"], ... }
+  created_at: string;
+}
+
+interface UserRow {
+  uid: string;
+  name: string;
+  email: string;
+  roles: string[];
+  branch: string;
 }
 
 export function RolePermissionManager() {
-  const [activeTab, setActiveTab] = useState("roles");
-  const [searchTerm, setSearchTerm] = useState("");
   const { toast } = useToast();
-  
-  // Role form state
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [loadingRoles, setLoadingRoles] = useState(true);
+  const [loadingUsers, setLoadingUsers] = useState(true);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
-  const [isAddingRole, setIsAddingRole] = useState(false);
-  const [isRoleDialogOpen, setIsRoleDialogOpen] = useState(false);
-  const [roleToDelete, setRoleToDelete] = useState<string | null>(null);
-  
-  // Role assignment state
-  const [isAssignmentFormOpen, setIsAssignmentFormOpen] = useState(false);
-  const [selectedAssignment, setSelectedAssignment] = useState<RoleAssignmentData | null>(null);
-  const [roleAssignments, setRoleAssignments] = useState<RoleAssignmentData[]>([]);
-  const [isLoadingUsers, setIsLoadingUsers] = useState(true);
-  
-  // User credentials edit state
-  const [isEditCredentialsOpen, setIsEditCredentialsOpen] = useState(false);
-  const [selectedUserForEdit, setSelectedUserForEdit] = useState<any>(null);
-  const [newEmail, setNewEmail] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  
-  // Load users from Firebase
-  useEffect(() => {
-    loadUsersFromFirebase();
-  }, []);
 
-  const loadUsersFromFirebase = async () => {
-    setIsLoadingUsers(true);
-    try {
-      const users = await getAllUsers();
-      const assignments: any[] = users.map(user => ({
-        id: user.uid,
-        userId: user.uid,
-        userName: user.name,
-        userEmail: user.email,
-        branchId: user.branchId,
-        branchName: user.branch,
-        roles: user.roles,
-        assignedBy: "Admin",
-        assignedDate: user.createdAt
-      }));
-      setRoleAssignments(assignments);
-    } catch (error) {
-      console.error('Error loading users:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load users",
-        variant: "destructive"
-      });
-    } finally {
-      setIsLoadingUsers(false);
-    }
-  };
+  // Dialog states
+  const [roleDialogOpen, setRoleDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [roleToDelete, setRoleToDelete] = useState<Role | null>(null);
+  const [editingRole, setEditingRole] = useState<Partial<Role>>({ name: '', description: '', permissions: {} });
+  const [isNewRole, setIsNewRole] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  const handleRoleChange = async (userId: string, newRole: string) => {
+  useEffect(() => { fetchRoles(); fetchUsers(); }, []);
+
+  const fetchRoles = async () => {
+    setLoadingRoles(true);
     try {
-      // Find user to get old role and name
-      const user = roleAssignments.find((a: any) => a.userId === userId);
-      const oldRole = user?.roles[0] || 'unknown';
-      const userName = user?.userName || 'Unknown User';
-      
-      const result = await updateUserRoles(userId, [newRole]);
-      if (result.success) {
-        await loadUsersFromFirebase();
-        // Log role change
-        await auditActions.roleChanged(userName, oldRole, newRole);
-        toast({
-          title: "Role Updated",
-          description: `User role changed to ${newRole.toUpperCase()}`
-        });
+      const { data, error } = await supabaseClient.from('roles').select('*').order('created_at', { ascending: true });
+      if (error) {
+        // Table may not exist — use defaults
+        console.warn('Roles table not available, using defaults');
+        setRoles(getDefaultRoles());
+        return;
+      }
+      if (data && data.length > 0) {
+        setRoles(data.map((r: any) => ({
+          id: r.id,
+          name: r.name,
+          description: r.description || '',
+          is_system: r.is_system || false,
+          permissions: r.permissions || {},
+          created_at: r.created_at,
+        })));
       } else {
-        toast({
-          title: "Error",
-          description: result.error || "Failed to update role",
-          variant: "destructive"
-        });
+        setRoles(getDefaultRoles());
       }
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to update user role",
-        variant: "destructive"
-      });
+    } catch {
+      setRoles(getDefaultRoles());
+    } finally {
+      setLoadingRoles(false);
     }
   };
 
-  const handleEditUserCredentials = (user: any) => {
-    setSelectedUserForEdit(user);
-    setNewEmail(user.userEmail || '');
-    setNewPassword('');
-    setIsEditCredentialsOpen(true);
+  const fetchUsers = async () => {
+    setLoadingUsers(true);
+    try {
+      const data = await getAllUsers();
+      setUsers(data.map((u: any) => ({ uid: u.uid, name: u.name, email: u.email, roles: u.roles || [], branch: u.branch || '' })));
+    } catch { setUsers([]); }
+    finally { setLoadingUsers(false); }
   };
 
-  const handleGeneratePassword = () => {
-    const password = generatePassword();
-    setNewPassword(password);
-    toast({
-      title: "Password Generated",
-      description: "New password has been generated"
-    });
+  // Select first role by default
+  useEffect(() => {
+    if (roles.length > 0 && !selectedRole) setSelectedRole(roles[0]);
+  }, [roles]);
+
+  const handleCreateRole = () => {
+    setIsNewRole(true);
+    setEditingRole({ name: '', description: '', permissions: {} });
+    setRoleDialogOpen(true);
   };
 
-  const handleCopyPassword = () => {
-    navigator.clipboard.writeText(newPassword);
-    toast({
-      title: "Password Copied",
-      description: "Password copied to clipboard"
-    });
-  };
-
-  const handleSaveCredentials = async () => {
-    if (!selectedUserForEdit) return;
-
-    // Note: Firebase Auth doesn't allow email/password updates from client
-    // This would need Firebase Admin SDK on backend
-    // For now, we'll just show a message
-    toast({
-      title: "Update Credentials",
-      description: "Email: " + newEmail + " | Password: " + (newPassword || "Not changed"),
-    });
-
-    setIsEditCredentialsOpen(false);
-    setSelectedUserForEdit(null);
-    setNewEmail('');
-    setNewPassword('');
-  };
-  
-  // Permission matrix state
-  const [selectedRoleForPermissions, setSelectedRoleForPermissions] = useState<string>("r1");
-  const [unsavedChanges, setUnsavedChanges] = useState(false);
-  
-  // Mock role data
-  const [roles, setRoles] = useState<Role[]>([
-    { 
-      id: "r1", 
-      name: "Branch Admin", 
-      description: "Full control over branch operations",
-      userCount: 2,
-      status: "active"
-    },
-    { 
-      id: "r2", 
-      name: "HR Manager", 
-      description: "Full access to HR module",
-      userCount: 3,
-      status: "active"
-    },
-    { 
-      id: "r3", 
-      name: "Sales Executive", 
-      description: "Sales module with limited rights",
-      userCount: 5,
-      status: "active"
-    }
-  ]);
-  
-  // Filter roles based on search term
-  const filteredRoles = searchTerm 
-    ? roles.filter(role => 
-        role.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-        role.description.toLowerCase().includes(searchTerm.toLowerCase())
-      )
-    : roles;
-  
-  // Modules for permission matrix
-  const modules = ["Control Centre", "Sales", "Operations", "Accounts", "HR", "Office Admin", "Reports"];
-  
-  // Operations for permission matrix
-  const operations = ["View", "Create", "Edit", "Delete", "Export", "Approve"];
-  
-  // Permission matrix state - initialized with some permissions for Branch Admin
-  const [permissionMatrix, setPermissionMatrix] = useState<Record<string, Record<string, boolean>>>({
-    "Control Centre": { "View": true, "Create": true, "Edit": false, "Delete": false, "Export": true, "Approve": false },
-    "Sales": { "View": true, "Create": false, "Edit": false, "Delete": false, "Export": true, "Approve": false },
-    "Operations": { "View": true, "Create": false, "Edit": false, "Delete": false, "Export": true, "Approve": false },
-    "Accounts": { "View": false, "Create": false, "Edit": false, "Delete": false, "Export": false, "Approve": false },
-    "HR": { "View": false, "Create": false, "Edit": false, "Delete": false, "Export": false, "Approve": false },
-    "Office Admin": { "View": false, "Create": false, "Edit": false, "Delete": false, "Export": false, "Approve": false },
-    "Reports": { "View": true, "Create": false, "Edit": false, "Delete": false, "Export": true, "Approve": false },
-  });
-  
   const handleEditRole = (role: Role) => {
-    setSelectedRole(role);
-    setIsAddingRole(false);
-    setIsRoleDialogOpen(true);
+    setIsNewRole(false);
+    setEditingRole({ ...role });
+    setRoleDialogOpen(true);
   };
-  
-  const handleDeleteRole = (roleId: string) => {
-    setRoleToDelete(roleId);
-  };
-  
-  const confirmDeleteRole = () => {
-    if (!roleToDelete) return;
-    
-    const updatedRoles = roles.filter(r => r.id !== roleToDelete);
-    setRoles(updatedRoles);
-    
-    toast({
-      title: "Role Deleted",
-      description: "Role has been removed from the system",
-    });
-    
-    setRoleToDelete(null);
-  };
-  
-  const handleAddRole = () => {
-    setSelectedRole(null);
-    setIsAddingRole(true);
-    setIsRoleDialogOpen(true);
-  };
-  
-  const handleSaveRole = (roleData: Partial<Role>) => {
-    if (isAddingRole) {
-      // Generate a unique ID for the new role
-      const newId = `r${roles.length + 1}`;
-      
-      const newRole: Role = {
-        id: newId,
-        name: roleData.name || '',
-        description: roleData.description || '',
-        userCount: 0,
-        status: roleData.status as "active" | "inactive" || "active"
-      };
-      
-      setRoles([...roles, newRole]);
-      
-      toast({
-        title: "Role Created",
-        description: `${newRole.name} has been created successfully`,
-      });
-    } else if (selectedRole) {
-      // Update existing role
-      const updatedRoles = roles.map(r => {
-        if (r.id === selectedRole.id) {
-          return {
-            ...r,
-            ...roleData,
-          };
-        }
-        return r;
-      });
-      
-      setRoles(updatedRoles);
-      
-      toast({
-        title: "Role Updated",
-        description: `${roleData.name} has been updated successfully`,
-      });
+
+  const handleSaveRole = async () => {
+    if (!editingRole.name) {
+      toast({ title: "Error", description: "Role name is required", variant: "destructive" });
+      return;
     }
-    
-    setIsRoleDialogOpen(false);
-    setIsAddingRole(false);
-    setSelectedRole(null);
-  };
-  
-  const handlePermissionChange = (module: string, operation: string, checked: boolean) => {
-    setPermissionMatrix(prev => ({
-      ...prev,
-      [module]: {
-        ...prev[module],
-        [operation]: checked
+    setSaving(true);
+    try {
+      if (isNewRole) {
+        const { data, error } = await supabaseClient.from('roles').insert({
+          name: editingRole.name,
+          description: editingRole.description || '',
+          permissions: editingRole.permissions || {},
+          is_system: false,
+        }).select().single();
+        if (error) throw error;
+        if (data) setRoles([...roles, { ...data, permissions: data.permissions || {} }]);
+        toast({ title: "Role Created", description: `${editingRole.name} has been created` });
+      } else {
+        const { error } = await supabaseClient.from('roles').update({
+          name: editingRole.name,
+          description: editingRole.description || '',
+          permissions: editingRole.permissions || {},
+        }).eq('id', editingRole.id);
+        if (error) throw error;
+        setRoles(roles.map(r => r.id === editingRole.id ? { ...r, ...editingRole } as Role : r));
+        if (selectedRole?.id === editingRole.id) setSelectedRole({ ...selectedRole, ...editingRole } as Role);
+        toast({ title: "Role Updated", description: `${editingRole.name} has been updated` });
       }
-    }));
-    
-    setUnsavedChanges(true);
-  };
-  
-  const handleApplyPermissionChanges = () => {
-    // In a real app, this would call an API to update permissions
-    toast({
-      title: "Permissions Updated",
-      description: "Role permissions have been updated in the system",
-    });
-    
-    setUnsavedChanges(false);
-  };
-
-  // Role assignment handlers
-  const handleAddAssignment = () => {
-    setSelectedAssignment(null);
-    setIsAssignmentFormOpen(true);
-  };
-
-  const handleEditAssignment = (assignment: RoleAssignmentData) => {
-    setSelectedAssignment(assignment);
-    setIsAssignmentFormOpen(true);
-  };
-
-  const handleSaveAssignment = (assignmentData: RoleAssignmentData) => {
-    if (selectedAssignment) {
-      // Update existing assignment
-      setRoleAssignments(prev => 
-        prev.map(item => 
-          item.id === selectedAssignment.id 
-            ? { ...assignmentData, id: item.id } 
-            : item
-        )
-      );
-    } else {
-      // Create new assignment
-      const newId = `ra${roleAssignments.length + 1}`;
-      setRoleAssignments(prev => [
-        ...prev, 
-        { ...assignmentData, id: newId }
-      ]);
+    } catch (err: any) {
+      // If table doesn't exist, update local state only
+      if (isNewRole) {
+        const newRole: Role = { id: `local-${Date.now()}`, name: editingRole.name!, description: editingRole.description || '', is_system: false, permissions: editingRole.permissions || {}, created_at: new Date().toISOString() };
+        setRoles([...roles, newRole]);
+      } else {
+        setRoles(roles.map(r => r.id === editingRole.id ? { ...r, ...editingRole } as Role : r));
+      }
+      toast({ title: isNewRole ? "Role Created" : "Role Updated", description: `${editingRole.name} (saved locally)` });
+    } finally {
+      setSaving(false);
+      setRoleDialogOpen(false);
     }
-
-    setIsAssignmentFormOpen(false);
-    setSelectedAssignment(null);
   };
-  
-  const selectedRoleForMatrix = roles.find(r => r.id === selectedRoleForPermissions) || roles[0];
 
-  // Helper to render role names instead of IDs in assignment table
-  const getRoleNames = (roleIds: string[]) => {
-    return roleIds.map(id => {
-      const role = roles.find(r => r.id === id);
-      return role ? role.name : id;
-    });
+  const handleDeleteRole = (role: Role) => {
+    if (role.is_system) { toast({ title: "Cannot Delete", description: "System roles cannot be deleted", variant: "destructive" }); return; }
+    setRoleToDelete(role);
+    setDeleteDialogOpen(true);
   };
+
+  const confirmDelete = async () => {
+    const target = roleToDelete;
+    if (!target) return;
+    setDeleteDialogOpen(false);
+    setRoleToDelete(null);
+    try {
+      await supabaseClient.from('roles').delete().eq('id', target.id);
+    } catch { /* continue */ }
+    setRoles(prev => prev.filter(r => r.id !== target.id));
+    if (selectedRole?.id === target.id) setSelectedRole(roles.find(r => r.id !== target.id) || null);
+    toast({ title: "Role Deleted" });
+  };
+
+  // Permission matrix toggle
+  const togglePermission = async (module: string, permission: string) => {
+    if (!selectedRole) return;
+    const current = selectedRole.permissions[module] || [];
+    const updated = current.includes(permission)
+      ? current.filter(p => p !== permission)
+      : [...current, permission];
+    const newPermissions = { ...selectedRole.permissions, [module]: updated };
+    const updatedRole = { ...selectedRole, permissions: newPermissions };
+    setSelectedRole(updatedRole);
+    setRoles(roles.map(r => r.id === selectedRole.id ? updatedRole : r));
+
+    // Persist
+    try {
+      await supabaseClient.from('roles').update({ permissions: newPermissions }).eq('id', selectedRole.id);
+    } catch { /* local only */ }
+  };
+
+  const toggleAllForModule = (module: string) => {
+    if (!selectedRole) return;
+    const current = selectedRole.permissions[module] || [];
+    const allGranted = PERMISSIONS.every(p => current.includes(p));
+    const updated = allGranted ? [] : [...PERMISSIONS];
+    const newPermissions = { ...selectedRole.permissions, [module]: updated };
+    const updatedRole = { ...selectedRole, permissions: newPermissions };
+    setSelectedRole(updatedRole);
+    setRoles(roles.map(r => r.id === selectedRole.id ? updatedRole : r));
+    try { supabaseClient.from('roles').update({ permissions: newPermissions }).eq('id', selectedRole.id); } catch {}
+  };
+
+  // Assign role to user
+  const handleUserRoleChange = async (userId: string, newRole: string) => {
+    const result = await updateUserRoles(userId, [newRole]);
+    if (result.success) {
+      setUsers(users.map(u => u.uid === userId ? { ...u, roles: [newRole] } : u));
+      toast({ title: "Role Assigned", description: `User role changed to ${newRole}` });
+    } else {
+      toast({ title: "Error", description: result.error || "Failed", variant: "destructive" });
+    }
+  };
+
+  const usersForRole = selectedRole ? users.filter(u => u.roles.includes(selectedRole.name.toLowerCase()) || (selectedRole.name.toLowerCase() === 'admin' && u.roles.includes('admin'))) : [];
 
   return (
     <div className="space-y-6">
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="w-full grid grid-cols-3">
-          <TabsTrigger value="roles">Roles</TabsTrigger>
-          <TabsTrigger value="permissions">Permission Matrix</TabsTrigger>
-          <TabsTrigger value="assignments">Role Assignments</TabsTrigger>
-        </TabsList>
-        
-        <TabsContent value="roles" className="space-y-6 mt-6">
-          <Card className="control-centre-card">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <div>
-                <CardTitle className="text-xl font-bold">Users by Role</CardTitle>
-                <CardDescription>
-                  View all users organized by their assigned roles
-                </CardDescription>
-              </div>
-              <Button 
-                variant="outline" 
-                size="icon" 
-                onClick={loadUsersFromFirebase}
-                disabled={isLoadingUsers}
-              >
-                <RefreshCw className={`h-4 w-4 ${isLoadingUsers ? "animate-spin" : ""}`} />
-              </Button>
-            </CardHeader>
-            
-            <CardContent>
-              {isLoadingUsers ? (
-                <div className="flex items-center justify-center py-12">
-                  <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-                  <span className="ml-2 text-muted-foreground">Loading users...</span>
-                </div>
-              ) : (
-                <ScrollArea className="h-[500px]">
-                  <div className="space-y-6">
-                    {/* Admin Role */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <Badge className="bg-black text-white text-sm px-3 py-1">ADMIN</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          ({roleAssignments.filter((a: any) => a.roles.includes('admin')).length} users)
-                        </span>
-                      </div>
-                      <div className="border rounded-lg">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Name</TableHead>
-                              <TableHead>Email</TableHead>
-                              <TableHead>Branch</TableHead>
-                              <TableHead>Created</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {roleAssignments.filter((a: any) => a.roles.includes('admin')).length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
-                                  No admin users
-                                </TableCell>
-                              </TableRow>
-                            ) : (
-                              roleAssignments.filter((a: any) => a.roles.includes('admin')).map((user: any) => (
-                                <TableRow key={user.id}>
-                                  <TableCell className="font-medium">{user.userName}</TableCell>
-                                  <TableCell>{user.userEmail}</TableCell>
-                                  <TableCell>{user.branchName}</TableCell>
-                                  <TableCell className="text-sm text-muted-foreground">
-                                    {new Date(user.assignedDate).toLocaleDateString()}
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6">
+        {/* LEFT: Role List */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Roles</h3>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCreateRole}>
+              <Plus className="h-3.5 w-3.5 mr-1" /> New Role
+            </Button>
+          </div>
 
-                    {/* Sales Role */}
+          {loadingRoles ? (
+            <div className="space-y-2">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
+          ) : (
+            <div className="space-y-1">
+              {roles.map(role => (
+                <button
+                  key={role.id}
+                  onClick={() => setSelectedRole(role)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg border transition-all ${
+                    selectedRole?.id === role.id
+                      ? 'bg-safend-red/5 border-safend-red/30 ring-1 ring-safend-red/20'
+                      : 'border-transparent hover:bg-muted/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
                     <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <Badge className="bg-red-600 text-white text-sm px-3 py-1">SALES</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          ({roleAssignments.filter((a: any) => a.roles.includes('sales')).length} users)
-                        </span>
-                      </div>
-                      <div className="border rounded-lg">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Name</TableHead>
-                              <TableHead>Email</TableHead>
-                              <TableHead>Branch</TableHead>
-                              <TableHead>Created</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {roleAssignments.filter((a: any) => a.roles.includes('sales')).length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
-                                  No sales users
-                                </TableCell>
-                              </TableRow>
-                            ) : (
-                              roleAssignments.filter((a: any) => a.roles.includes('sales')).map((user: any) => (
-                                <TableRow key={user.id}>
-                                  <TableCell className="font-medium">{user.userName}</TableCell>
-                                  <TableCell>{user.userEmail}</TableCell>
-                                  <TableCell>{user.branchName}</TableCell>
-                                  <TableCell className="text-sm text-muted-foreground">
-                                    {new Date(user.assignedDate).toLocaleDateString()}
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
+                      <p className={`text-sm font-medium ${selectedRole?.id === role.id ? 'text-safend-red' : ''}`}>{role.name}</p>
+                      <p className="text-xs text-muted-foreground truncate">{role.description}</p>
                     </div>
-
-                    {/* Operations Role */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <Badge className="bg-blue-600 text-white text-sm px-3 py-1">OPERATIONS</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          ({roleAssignments.filter((a: any) => a.roles.includes('operations')).length} users)
-                        </span>
-                      </div>
-                      <div className="border rounded-lg">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Name</TableHead>
-                              <TableHead>Email</TableHead>
-                              <TableHead>Branch</TableHead>
-                              <TableHead>Created</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {roleAssignments.filter((a: any) => a.roles.includes('operations')).length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
-                                  No operations users
-                                </TableCell>
-                              </TableRow>
-                            ) : (
-                              roleAssignments.filter((a: any) => a.roles.includes('operations')).map((user: any) => (
-                                <TableRow key={user.id}>
-                                  <TableCell className="font-medium">{user.userName}</TableCell>
-                                  <TableCell>{user.userEmail}</TableCell>
-                                  <TableCell>{user.branchName}</TableCell>
-                                  <TableCell className="text-sm text-muted-foreground">
-                                    {new Date(user.assignedDate).toLocaleDateString()}
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </div>
-
-                    {/* HR Role */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <Badge className="bg-green-600 text-white text-sm px-3 py-1">HR</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          ({roleAssignments.filter((a: any) => a.roles.includes('hr')).length} users)
-                        </span>
-                      </div>
-                      <div className="border rounded-lg">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Name</TableHead>
-                              <TableHead>Email</TableHead>
-                              <TableHead>Branch</TableHead>
-                              <TableHead>Created</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {roleAssignments.filter((a: any) => a.roles.includes('hr')).length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
-                                  No HR users
-                                </TableCell>
-                              </TableRow>
-                            ) : (
-                              roleAssignments.filter((a: any) => a.roles.includes('hr')).map((user: any) => (
-                                <TableRow key={user.id}>
-                                  <TableCell className="font-medium">{user.userName}</TableCell>
-                                  <TableCell>{user.userEmail}</TableCell>
-                                  <TableCell>{user.branchName}</TableCell>
-                                  <TableCell className="text-sm text-muted-foreground">
-                                    {new Date(user.assignedDate).toLocaleDateString()}
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </div>
-
-                    {/* Accounts Role */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <Badge className="bg-purple-600 text-white text-sm px-3 py-1">ACCOUNTS</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          ({roleAssignments.filter((a: any) => a.roles.includes('accounts')).length} users)
-                        </span>
-                      </div>
-                      <div className="border rounded-lg">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Name</TableHead>
-                              <TableHead>Email</TableHead>
-                              <TableHead>Branch</TableHead>
-                              <TableHead>Created</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {roleAssignments.filter((a: any) => a.roles.includes('accounts')).length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
-                                  No accounts users
-                                </TableCell>
-                              </TableRow>
-                            ) : (
-                              roleAssignments.filter((a: any) => a.roles.includes('accounts')).map((user: any) => (
-                                <TableRow key={user.id}>
-                                  <TableCell className="font-medium">{user.userName}</TableCell>
-                                  <TableCell>{user.userEmail}</TableCell>
-                                  <TableCell>{user.branchName}</TableCell>
-                                  <TableCell className="text-sm text-muted-foreground">
-                                    {new Date(user.assignedDate).toLocaleDateString()}
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </div>
-
-                    {/* Reports Role */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <Badge className="bg-orange-600 text-white text-sm px-3 py-1">REPORTS</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          ({roleAssignments.filter((a: any) => a.roles.includes('reports')).length} users)
-                        </span>
-                      </div>
-                      <div className="border rounded-lg">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Name</TableHead>
-                              <TableHead>Email</TableHead>
-                              <TableHead>Branch</TableHead>
-                              <TableHead>Created</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {roleAssignments.filter((a: any) => a.roles.includes('reports')).length === 0 ? (
-                              <TableRow>
-                                <TableCell colSpan={4} className="text-center py-4 text-muted-foreground">
-                                  No reports users
-                                </TableCell>
-                              </TableRow>
-                            ) : (
-                              roleAssignments.filter((a: any) => a.roles.includes('reports')).map((user: any) => (
-                                <TableRow key={user.id}>
-                                  <TableCell className="font-medium">{user.userName}</TableCell>
-                                  <TableCell>{user.userEmail}</TableCell>
-                                  <TableCell>{user.branchName}</TableCell>
-                                  <TableCell className="text-sm text-muted-foreground">
-                                    {new Date(user.assignedDate).toLocaleDateString()}
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </div>
+                    {role.is_system && <Badge variant="outline" className="text-[9px] shrink-0 hidden">System</Badge>}
                   </div>
-                </ScrollArea>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-        
-        <TabsContent value="permissions" className="mt-6">
-          <Card className="control-centre-card">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <div>
-                <CardTitle className="text-xl font-bold">Permission Matrix</CardTitle>
-                <CardDescription>
-                  Define fine-grained permissions for each role
-                </CardDescription>
-              </div>
-              <div className="flex gap-2">
-                <select 
-                  className="p-2 border rounded-md" 
-                  value={selectedRoleForPermissions}
-                  onChange={(e) => setSelectedRoleForPermissions(e.target.value)}
-                >
-                  {roles.map(role => (
-                    <option key={role.id} value={role.id}>{role.name}</option>
-                  ))}
-                </select>
-                <Button 
-                  variant="default" 
-                  className="gap-2"
-                  onClick={handleApplyPermissionChanges}
-                  disabled={!unsavedChanges}
-                >
-                  <Save className="h-4 w-4" />
-                  Save Changes
-                </Button>
-              </div>
-            </CardHeader>
-            
-            <CardContent className="overflow-x-auto">
-              <ScrollArea className="h-[400px]">
-                <table className="permission-matrix w-full">
-                  <thead>
-                    <tr>
-                      <th className="text-left p-3 border-b">Module / Action</th>
-                      {operations.map(op => (
-                        <th key={op} className="text-center p-3 border-b">{op}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {modules.map(module => (
-                      <tr key={module} className="border-b">
-                        <td className="text-left p-3 font-medium">{module}</td>
-                        {operations.map(op => (
-                          <td key={`${module}-${op}`} className="text-center p-3">
-                            <Switch 
-                              checked={permissionMatrix[module]?.[op] || false}
-                              onCheckedChange={(checked) => handlePermissionChange(module, op, checked)}
-                            />
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </ScrollArea>
-            </CardContent>
-            <CardFooter className="border-t p-4 flex justify-between">
-              <div className="flex items-center">
-                <Shield className="h-5 w-5 text-red-600 mr-2" />
-                <span className="text-sm text-muted-foreground">
-                  Casbin policy will be updated in real-time
-                </span>
-              </div>
-              <Button 
-                variant="default"
-                onClick={handleApplyPermissionChanges}
-                disabled={!unsavedChanges}
-              >
-                Apply Changes
-              </Button>
-            </CardFooter>
-          </Card>
-        </TabsContent>
-        
-        <TabsContent value="assignments" className="mt-6">
-          <Card className="control-centre-card">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <div>
-                <CardTitle className="text-xl font-bold">User Roles & Permissions</CardTitle>
-                <CardDescription>
-                  Manage user roles - all users created in User Manager appear here
-                </CardDescription>
-              </div>
-              <Button 
-                variant="outline" 
-                size="icon" 
-                onClick={loadUsersFromFirebase}
-                disabled={isLoadingUsers}
-              >
-                <RefreshCw className={`h-4 w-4 ${isLoadingUsers ? "animate-spin" : ""}`} />
-              </Button>
-            </CardHeader>
-            <CardContent>
-              {isLoadingUsers ? (
-                <div className="flex items-center justify-center py-12">
-                  <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-                  <span className="ml-2 text-muted-foreground">Loading users...</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* RIGHT: Permission Matrix + Users */}
+        <div className="space-y-6">
+          {selectedRole ? (
+            <>
+              {/* Role header */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    <Shield className="h-5 w-5 text-safend-red" />
+                    {selectedRole.name}
+                  </h2>
+                  <p className="text-sm text-muted-foreground">{selectedRole.description}</p>
                 </div>
-              ) : (
-                <ScrollArea className="h-[400px]">
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => handleEditRole(selectedRole)}>
+                    <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+                  </Button>
+                  {!selectedRole.is_system && (
+                    <Button variant="outline" size="sm" className="text-red-600 hover:text-red-700 hover:bg-red-50" onClick={() => handleDeleteRole(selectedRole)}>
+                      <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Permission Matrix */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base">Permissions</CardTitle>
+                  <CardDescription>Click checkboxes to grant or revoke access for this role</CardDescription>
+                </CardHeader>
+                <CardContent className="p-0">
                   <Table>
                     <TableHeader>
-                      <TableRow>
-                        <TableHead>User Name</TableHead>
-                        <TableHead>Email</TableHead>
-                        <TableHead>Branch</TableHead>
-                        <TableHead>Current Role</TableHead>
-                        <TableHead>Change Role</TableHead>
-                        <TableHead>Actions</TableHead>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="w-[160px]">Module</TableHead>
+                        {PERMISSIONS.map(p => (
+                          <TableHead key={p} className="text-center capitalize text-xs w-[80px]">{p}</TableHead>
+                        ))}
+                        <TableHead className="text-center text-xs w-[60px]">All</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {roleAssignments.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={6} className="text-center py-6 text-muted-foreground">
-                            No users found. Create users in User Manager first.
-                          </TableCell>
-                        </TableRow>
-                      ) : (
-                        roleAssignments.map((assignment: any) => (
-                          <TableRow key={assignment.id}>
-                            <TableCell className="font-medium">{assignment.userName}</TableCell>
-                            <TableCell className="text-sm text-muted-foreground">
-                              {assignment.userEmail || 'N/A'}
-                            </TableCell>
-                            <TableCell>{assignment.branchName}</TableCell>
-                            <TableCell>
-                              <Badge className="bg-red-600 text-white">
-                                {assignment.roles[0]?.toUpperCase() || 'No Role'}
-                              </Badge>
-                            </TableCell>
-                            <TableCell>
-                              <Select
-                                value={assignment.roles[0] || ''}
-                                onValueChange={(value) => handleRoleChange(assignment.userId, value)}
-                              >
-                                <SelectTrigger className="w-[150px]">
-                                  <SelectValue placeholder="Select role" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="admin">Admin</SelectItem>
-                                  <SelectItem value="sales">Sales</SelectItem>
-                                  <SelectItem value="operations">Operations</SelectItem>
-                                  <SelectItem value="hr">HR</SelectItem>
-                                  <SelectItem value="accounts">Accounts</SelectItem>
-                                  <SelectItem value="reports">Reports</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </TableCell>
-                            <TableCell>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleEditUserCredentials(assignment)}
-                              >
-                                <Edit className="h-3 w-3 mr-1" />
-                                Edit
-                              </Button>
+                      {MODULES.map(module => {
+                        const modulePerms = selectedRole.permissions[module] || [];
+                        const allChecked = PERMISSIONS.every(p => modulePerms.includes(p));
+                        return (
+                          <TableRow key={module}>
+                            <TableCell className="font-medium text-sm">{module}</TableCell>
+                            {PERMISSIONS.map(perm => (
+                              <TableCell key={perm} className="text-center">
+                                <Checkbox
+                                  checked={modulePerms.includes(perm)}
+                                  onCheckedChange={() => togglePermission(module, perm)}
+                                />
+                              </TableCell>
+                            ))}
+                            <TableCell className="text-center">
+                              <Checkbox
+                                checked={allChecked}
+                                onCheckedChange={() => toggleAllForModule(module)}
+                              />
                             </TableCell>
                           </TableRow>
-                        ))
-                      )}
+                        );
+                      })}
                     </TableBody>
                   </Table>
-                </ScrollArea>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-      
-      {/* Role Edit Form */}
-      <RoleEditForm
-        role={selectedRole}
-        isOpen={isRoleDialogOpen}
-        onClose={() => {
-          setIsRoleDialogOpen(false);
-          setIsAddingRole(false);
-          setSelectedRole(null);
-        }}
-        onSave={handleSaveRole}
-        isNew={isAddingRole}
-      />
-      
-      {/* Role Assignment Form */}
-      <RoleAssignmentForm
-        isOpen={isAssignmentFormOpen}
-        onClose={() => {
-          setIsAssignmentFormOpen(false);
-          setSelectedAssignment(null);
-        }}
-        onSave={handleSaveAssignment}
-        existingAssignment={selectedAssignment}
-      />
-      
-      {/* Edit User Credentials Dialog */}
-      <Dialog open={isEditCredentialsOpen} onOpenChange={setIsEditCredentialsOpen}>
-        <DialogContent className="sm:max-w-[500px]">
+                </CardContent>
+              </Card>
+
+              {/* Users with this role */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Users className="h-4 w-4" /> Users with this role
+                    <Badge variant="outline" className="text-xs ml-1">{usersForRole.length}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {usersForRole.length === 0 ? (
+                    <p className="text-sm text-muted-foreground text-center py-4">No users assigned to this role</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {usersForRole.map(u => (
+                        <div key={u.uid} className="flex items-center justify-between py-2 px-3 rounded-lg bg-muted/30">
+                          <div>
+                            <p className="text-sm font-medium">{u.name || u.email}</p>
+                            <p className="text-xs text-muted-foreground">{u.email}{u.branch ? ` · ${u.branch}` : ''}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          ) : (
+            <div className="text-center py-20 text-muted-foreground">
+              <Shield className="h-10 w-10 mx-auto mb-3 opacity-30" />
+              <p>Select a role to manage its permissions</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* All Users — quick role assignment */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base">Quick Role Assignment</CardTitle>
+              <CardDescription>Change any user's role from here</CardDescription>
+            </div>
+            <Button variant="outline" size="sm" onClick={fetchUsers} disabled={loadingUsers}>
+              <RefreshCw className={`h-3.5 w-3.5 mr-1 ${loadingUsers ? 'animate-spin' : ''}`} /> Refresh
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {loadingUsers ? (
+            <div className="p-6 text-center text-sm text-muted-foreground">Loading users...</div>
+          ) : users.length === 0 ? (
+            <div className="p-6 text-center text-sm text-muted-foreground">No users found. Create users in User Manager.</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted/30">
+                  <TableHead>Name</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Branch</TableHead>
+                  <TableHead>Role</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {users.map(user => (
+                  <TableRow key={user.uid}>
+                    <TableCell className="font-medium text-sm">{user.name || '—'}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{user.email}</TableCell>
+                    <TableCell className="text-sm">{user.branch || '—'}</TableCell>
+                    <TableCell>
+                      <Select value={user.roles[0] || ''} onValueChange={(v) => handleUserRoleChange(user.uid, v)}>
+                        <SelectTrigger className="w-[140px] h-8 text-xs"><SelectValue placeholder="Assign" /></SelectTrigger>
+                        <SelectContent>
+                          {roles.map(r => <SelectItem key={r.id} value={r.name.toLowerCase()}>{r.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Create/Edit Role Dialog */}
+      <Dialog open={roleDialogOpen} onOpenChange={setRoleDialogOpen}>
+        <DialogContent className="sm:max-w-[450px]">
           <DialogHeader>
-            <DialogTitle>Edit User Credentials</DialogTitle>
-            <DialogDescription>
-              Update email and password for {selectedUserForEdit?.userName}
-            </DialogDescription>
+            <DialogTitle>{isNewRole ? 'Create Role' : 'Edit Role'}</DialogTitle>
           </DialogHeader>
-          
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="edit-email">Email Address</Label>
-              <Input
-                id="edit-email"
-                type="email"
-                value={newEmail}
-                onChange={(e) => setNewEmail(e.target.value)}
-                placeholder="Enter new email"
-              />
-              <p className="text-xs text-muted-foreground">
-                User will need to login with the new email
-              </p>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label className="text-xs">Role Name *</Label>
+              <Input className="mt-1" placeholder="e.g. Branch Manager" value={editingRole.name || ''} onChange={(e) => setEditingRole({ ...editingRole, name: e.target.value })} />
             </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="edit-password">New Password</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="edit-password"
-                  type="text"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="Enter new password or generate"
-                  className="font-mono"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={handleCopyPassword}
-                  disabled={!newPassword}
-                  title="Copy password"
-                >
-                  <Copy className="h-4 w-4" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={handleGeneratePassword}
-                  title="Generate password"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Leave blank to keep current password. Click refresh to generate a new one.
-              </p>
-            </div>
-
-            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
-              <p className="text-sm text-amber-800 dark:text-amber-200">
-                <strong>Note:</strong> Make sure to copy and share the new password with the user securely.
-              </p>
+            <div>
+              <Label className="text-xs">Description</Label>
+              <Textarea className="mt-1" placeholder="What this role is for..." rows={2} value={editingRole.description || ''} onChange={(e) => setEditingRole({ ...editingRole, description: e.target.value })} />
             </div>
           </div>
-
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsEditCredentialsOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleSaveCredentials}>
-              Update Credentials
+            <Button variant="outline" onClick={() => setRoleDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleSaveRole} disabled={saving}>
+              <Save className="h-4 w-4 mr-1" /> {saving ? 'Saving...' : isNewRole ? 'Create Role' : 'Save Changes'}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={!!roleToDelete} onOpenChange={() => setRoleToDelete(null)}>
+
+      {/* Delete Confirmation */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogTitle>Delete Role</AlertDialogTitle>
             <AlertDialogDescription>
-              This action cannot be undone. This will permanently delete the 
-              role and may affect users who have been assigned this role.
+              Are you sure you want to delete "{roleToDelete?.name}"? Users with this role will lose their permissions.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction 
-              className="bg-red-600 text-white hover:bg-red-700"
-              onClick={confirmDeleteRole}
-            >
-              Delete
-            </AlertDialogAction>
+            <AlertDialogAction onClick={confirmDelete} className="bg-red-600 hover:bg-red-700">Delete</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </div>
   );
+}
+
+// Default roles when no DB table exists
+function getDefaultRoles(): Role[] {
+  return [
+    { id: 'sys-admin', name: 'Admin', description: 'Full access to all modules and settings', is_system: true, permissions: Object.fromEntries(MODULES.map(m => [m, [...PERMISSIONS]])), created_at: '2024-01-01' },
+    { id: 'sys-sales', name: 'Sales', description: 'Leads, quotations, agreements, work orders', is_system: true, permissions: { 'Sales': ['view', 'create', 'edit', 'delete', 'export'], 'Reports': ['view', 'export'] }, created_at: '2024-01-01' },
+    { id: 'sys-operations', name: 'Operations', description: 'Posts, rota, attendance, patrols, penalties', is_system: true, permissions: { 'Operations': ['view', 'create', 'edit', 'delete', 'export'], 'Reports': ['view', 'export'] }, created_at: '2024-01-01' },
+    { id: 'sys-accounts', name: 'Accounts', description: 'Payables, receivables, banking, compliance, assets', is_system: true, permissions: { 'Accounts': ['view', 'create', 'edit', 'delete', 'export'], 'Reports': ['view', 'export'] }, created_at: '2024-01-01' },
+    { id: 'sys-hr', name: 'HR', description: 'Employees, leave, payroll, training, loans', is_system: true, permissions: { 'HR': ['view', 'create', 'edit', 'delete', 'export'], 'Reports': ['view', 'export'] }, created_at: '2024-01-01' },
+    { id: 'sys-office-admin', name: 'Office Admin', description: 'Branch management, inventory, procurement, facilities, documents', is_system: true, permissions: { 'Office Admin': ['view', 'create', 'edit', 'delete', 'export'], 'Reports': ['view', 'export'] }, created_at: '2024-01-01' },
+  ];
 }

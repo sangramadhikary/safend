@@ -1,0 +1,3025 @@
+FORMAT: 1A
+HOST: https://dale.staging.shadowfax.in/api/
+
+# Shadowfax Unified API for Forward Integrations
+
+You can integrate with Shadowfax's Last Mile Customer Delivery Platform by using the Unified API Collection. Unified APIs provide a singular interface to enable Marketplace Seller and Warehouse models of operations. These APIs support end to end order lifecycle starting from Pincode serviceability to order status tracking until delivery.
+## Glossary
+
+###DCs and Hubs
+*DC*: Large facilities typically located in the outskirts of a city where all shipments(intercity and intracity both) are processed.<br>
+
+
+*Hub*: Small facilities located across the city from where last-mile delivery and first mile pick up happens. 
+
+
+####Following terms are defined concerning a shipment's location
+* Origin Hub:<br>
+This is the first Shadowfax facility where a packet reaches directly from the seller or customer
+* Origin DC:<br>
+This is the first DC where a packet is sent from the client Warehouse or origin hub to process further.
+* Destination Hub:<br>
+This is the last shadowfax facility where a packet reaches before delivering to customer or seller
+* Destination DC:<br>
+This is the last DC where a packet is sent before sending to the destination hub or client Warehouse
+* Via DC:<br>
+All DC's, other than origin and destination where a shipment has to go through. Manifest bags are not opened at these DCs and will be directly passed on to the next location.
+
+####Type of Operations
+* Forward Operations:<br>
+Orders that are originating at client warehouse or seller side and are to be delivered to end customer.<br>
+<br>
+* Reverse Operations: <br>
+Return orders that are originating at the customer side or forward orders that could not be delivered to the customer and are to be returned to the client warehouse or seller. <br>
+
+####Miscellaneous
+<br>
+* AWBs: <br>
+Unique Identification Number for each item/packet <br>
+* LOR: <br>
+Letter of Receipt, a document for acknowledging the delivery or receipt of shipments/ packets <br>
+* POD(Proof of Delivery): <br>
+A receipt of pickup and delivery of items
+
+
+
+##Authentication
+Shadowfax API uses Token Authentication. The Staging and Production API keys will be shared with you from the Shadowfax Team via an automated email.
+<br><br>The `Authorization` header that should be used while sending the request will look like:
+<br>
+`Token <token_id here>` 
+<br>The `Authorization` value itself contains the Word “Token”.
+
+##Requests
+This is the base URL. Please refer to endpoints to make the actual request. The base URL for all requests to the Production Shadowfax Server is given below:<br>
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api`|
+|Production|`https://dale.shadowfax.in/api`|
+
+All our API is REST-based. This means:  
+* It makes use of standard HTTP verbs like GET, POST, DELETE.
+* The API uses standard HTTP error responses to describe errors.
+* Authentication is specified with HTTP Token Authentication.  
+
+POST data should be encoded as standard `application/json`  
+|Accepted Format||
+|--------------------|--------------------|
+|Date|(YYYY:MM:DD)|
+|DateTime |(YYYY:MM:DD HH:MM:SS)|
+
+##Responses
+Shadowfax API uses HTTP status codes to indicate the status of your requests. This includes successful and unsuccessful responses.
+
+* All responses are in [JSON]('http://www.json.org') by default.
+* All response Timestamps follow [ISO-8061]('https://www.w3.org/TR/NOTE-datetime') format.
+    > Times are expressed in UTC (Coordinated Universal Time), with a special UTC designator ("Z").
+    
+#### Status Codes
+
+* 200 - OK: Everything went as planned.
+* 400 - Bad Request: You did something wrong. Often a missing argument or parameter.
+* 401 - Unauthorized: Authentication was incorrect.
+* 404 - Not Found
+* 500 - Internal Server Error: We had a problem processing the request.
+* 503 - Service Unavailable: Try again later.
+
+##Order States
+A given order can be in one of the following states.
+ This state will be shared in the `status_id` field in the Order Tracking APIs.
+
+####Marketplace order states :
+
+|status_id                      |status                         |Remark                                                  |Description                                                                    |
+|-------------------------------|-------------------------------|--------------------------------------------------------|-------------------------------------------------------------------------------|
+| `new`                         | New                           |Item New at `<SFX Facility>`                            | When the delivery request is new at shadowfax facility                           |
+| `picked`                      | Picked                        |Picked                                                  |When the  order is picked successfully                                          |
+| `assigned_for_seller_pickup`  | Assigned For Pickup           |Item Assigned For Customer Pickup at `<SFX Facility>`   | When the  order is Assigned to Shadowfax Rider For Seller Pickup.                       |
+| `ofp`                         | Out For Pickup                |Item Out For Pickup at `<SFX Facility>`                 | When the  order is out for Seller Pickup.                                                     |
+| `recd_at_rev_hub`             | Received At Reverse Hub       |Received at hub Successfully                            | When the  order is Picked and Received At pickup hub                                                  |
+| `item_manifested`             | Item added to Bag       |Item added to bag at `<SFX facility>`                     | When the  order is added to the bag                                        |
+| `recd_at_fwd_hub`             | Received At Forward Hub       |Item Received at hub at `<SFX Facility>`                | when order is received at destination hub                                  |
+| `recd_at_fwd_dc`              | Received At DC                |Item Received at dc at `<SFX Facility>`                 | when the order received at destination city DC.                                                    |
+| `cancelled_by_seller`         | Cancelled By Seller         | Item cancelled by seller at `<SFX Facility>`             |Seller has requested to cancel the pickup|
+| `assigned_for_delivery`       | Assigned for Customer Delivery|Item Assigned at `<SFX Facility>`                       | Order is assigned to Shadowfax Rider for Customer Delivery.                         |
+| `ofd`                         | Out For Delivery              |Item OFD at `<SFX Facility>`                            | Order is out for Customer Delivery.                                                 |
+| `delivered`                   | Delivered                     |Item Delivered at `<SFX Facility> `                     | Order has been delivered to the customer.                                           |
+| `cid`                         | Cid                           | Customer wants delivery on another date                | Customer Initiated Delay(cid). Customer has requested for delivery on another day.   |
+| `seller_initiated_delay`      | Cid                           |Seller Initiated Delay                                  | Seller has requested to pickup the  order on another day                                       |
+| `seller_not_contactable`      | Not Contactable               |Seller not reachable                                    | Seller is not contactable for pickup                                                         |
+| `nc`                          | Not Contactable               |Refer [Appendix](#Appendix_nc) for detailed Reasons of Not Contactable |  Customer is not contactable for delivery                             |
+| `pickup_not_attempted`        | Not Attempted                  |Not able to attempt                                     | Not able to attempt the pickup for the  order                                                   |          
+| `na`                          | Not attempted                 |Refer [Appendix](#Appendix_not_attempted) for detailed Reasons of Not Attempted   | Customer Delivery was not attempted by Shadowfax Rider     |
+| `cancelled_by_customer`       | Cancelled                     |Refer [Appendix](#Appendix_cancelled) for detailed reasons of order Cancelled. | Delivery Request has been Cancelled By customer (can be due to various reasons)     |
+| `rts`                         | Return to Seller initiated    |Item Return To Seller at `<SFX Facility>`               | Order is initated for Return To Seller                                                            |
+| `rts_d`                       | Returned To Client            |Item Return To Seller Delivered at `<SFX Facility>`     | Order has been successfully returned to Seller.                                           |
+| `rts_in_process`              | RTS In Progress            |Item RTS In Progress at `<SFX Facility>`     | Order Return to Seller in progress                                           |
+| `rts_ofd`                     | Out for Delivery for RTS            |Item out for delivery to seller at `<SFX Facility>`     | Order  out for delivery to seller.                                           |
+| `rts_nd`                      | Undelivered                    | Item Return to Seller Not Delivered at `<SFX Facility>`  | Order has been not returned to Seller.        |
+| `lost`                        | Lost                          |Item Lost at `<SFX Facility>`                           | Order lost in transit                                                             |
+| `on_hold`                     | On Hold                       | Refer [Appendix](#Appendix_On_Hold) for detailed Reasons of order On Hold |  When the item is put On Hold due to client orders/Operational Concerns. |
+| `pickup_on_hold`              | Pick up On Hold                          |Refer [Appendix](#Appendix_On_pickupHold) for detailed Reasons of order On Hold | Due to the specified reason the pickup was put on hold. This status is only for marketplace order type |
+| `reopen_ndr`                  | Require Delivery - NDR        |Require Delivery As Per NDR Instructions                    |Customer Delivery will be reattempted as per customer request           |
+| `in_transit_return`           | In Transit for Return        |Bag in transit return from `<SFX Facility> `           |This status signifies that the bag (Master Manifest) is in transit during rts journey. |
+| `bag_received`                |Bag Received                  |Bag received at `<SFX Facility>`                   |This status signifies that the bag (Master Manifest) has been received at the destination facility |
+| `bag_received_at_via`         | Bag Received at Via          |Bag received at `<SFX Facility>`                   |This status signifies that the bag (Master Manifest) has been received at the intermediate facility.           |
+| `bag_in_transit`              | Bag In Transit               |Bag in transit from `<SFX Facility> `              |This status signifies that the bag (Master Manifest) is  in forward journey.  |
+| `pincode_updated`             | Pincode Updated              |Item destination pincode updated at <SFX Facility>` |This status signifies that the destination pincode was updated.|
+| `item_misrouted`              | Item Misrouted              |Item misrouted at `<SFX Facility>` |The shipment reached to a wrong sfx facility |
+
+####warehouse order states :
+
+|status_id                      |status                         |Remark                                                  |Description                                                                    |
+|-------------------------------|-------------------------------|--------------------------------------------------------|-------------------------------------------------------------------------------|
+| `new`                         | New                           |Item New at `<SFX Facility>`                            | When the delivery request is new at shadowfax facility                           |
+| `received_from_client_warehouse` |Received from Client Warehouse |Item Received from Client Warehouse at `<SFX Facility>` | This status signifies that the item has been picked from the client's warehouse. |
+| `item_manifested`             | Item added to Bag       |Item added to bag at `<SFX facility>`                    | When the warehouse order added to the bag                                        |
+| `bag_in_transit`              | Bag In Transit               |Bag in transit from `<SFX Facility> `              |This status signifies that the bag (Master Manifest) is in transit.  |
+| `bag_received_at_via`         | Bag Received at Via          |Bag received at `<SFX Facility>`                   |This status signifies that the bag (Master Manifest) has been received at the intermediate facility.           |
+| `bag_received`                |Bag Received                  |Bag received at `<SFX Facility>`                   |This status signifies that the bag (Master Manifest) has been received at the destination facility |
+| `ofd`                         | Out For Delivery              |Item OFD at `<SFX Facility>`                            | Order is out for Customer Delivery.                                                 |
+| `cid`                         | Cid                           | Customer wants delivery on another date                | Customer Initiated Delay(cid). Customer has requested for delivery on another day.   |
+| `on_hold`                     | On Hold                       | Refer [Appendix](#Appendix_On_Holdwarehouse) for detailed Reasons of order On Hold |  When the item is put On Hold due to client orders/Operational Concerns. |
+| `reopen_ndr`                  | Require Delivery - NDR        |Require Delivery As Per NDR Instructions                    |Customer Delivery will be reattempted as per customer request           |
+| `delivered`                   | Delivered                     |Item Delivered at `<SFX Facility> `                     | Order has been delivered to the customer.                                           |
+| `rto`                         |Return to origin initiated     |Item Return To Origin at `<SFX Facility>`               | Order is initated for Return To Client/ warehouse|
+| `rto_d`                       | Returned to Client            |Item Return To Origin Delivered at `<SFX Facility>`     | Order has been successfully returned to client       |
+| `lost`                        | Lost                          |Item Lost at `<SFX Facility>`                           | Order lost in transit                                                             |
+| `item_misrouted`              | Item Misrouted              |Item misrouted at `<SFX Facility>` |The shipment reached to a wrong sfx facility |
+| `pincode_updated`             | Pincode Updated              |Item destination pincode updated at <SFX Facility>` |This status signifies that the destination pincode was updated.|
+| `in_transit_return`           | In Transit for Return        |Bag in transit return from `<SFX Facility> `           |This status signifies that the bag (Master Manifest) is in transit during rts journey. |
+| `recd_at_fwd_dc`              | Received At DC                |Item Received at dc at `<SFX Facility>`                 | Order is received to Forward DC.                                                    |
+| `recd_at_fwd_hub`             | Received At Forward Hub       |Item Received at hub at `<SFX Facility>`                | Order is received at Forward Hub from Reverse Hub.                                  |
+| `assigned_for_delivery`       | Assigned for Customer Delivery|Item Assigned at `<SFX Facility>`                       | Order is assigned to Shadowfax Rider for Customer Delivery.                         |
+| `nc`                          | Not Contactable               |Refer [Appendix](Appendix_ncwarehouse) for detailed Reasons of Not Contactable |  Customer is not contactable for delivery                             |
+| `na`                          | Not attempted                 |Refer [Appendix](#Appendix_not_attempted) for detailed Reasons of Not Attempted   | Customer Delivery was not attempted by Shadowfax Rider     |
+| `cancelled_by_customer`       | Cancelled                     |Refer [Appendix](#Appendix_cancelled) for detailed reasons of order Cancelled. | Delivery Request has been Cancelled By customer (can be due to various reasons)     |
+
+
+##Push Callback API
+We have built a generic PUSH API callback for both Marketplace(seller pickup) and warehouse models. The client can enable it to get real-time notification of each push notification status change.
+
+### Callback Header details
+
+The Standard callback header has the following keys: `Authentication Key(Non mandatory).`
+
+
++ Headers
+
+      Authorization: Token c6b780ae9250f3
+      Content-Type: application/json
+
+Here we have the capability to add/modify the header keys as shown in the example below:
+
++ Headers
+
+    Content-Type: application/json
+    Authorization: d5eecf30ae6eb8d158dc54c77178ab9
+    account_name:  SF_ACC_STAGING
+
+
+### Request Body details
+The callback contains the below parameters:
+
+* `awb_number` - Generated by Shadowfax while placing an order.
+* `order_id` - client_order_id shared while placing an order.
+* `event_timestamp` - event_timestamp of the current status.
+* `current_location` - The current location of the order during the event.
+* `comments` - Contains the remarks associated with the status.
+* `status` - Current status of the shipment
+* `event` - Current status id of the shipment
+* `otp_verifed` - The value indicates whether the status was marked after OTP verification. The possible values are `"Y"/"N"/"NA"`. By Default `"NA"`.
+* `rider_name` - The name of the rider delivering the order.The rider details are shared when the current status is Out For Delivery (ofd).
+* `rider_contact` - The contact details of the rider delivering the order.The rider details are shared when the current status is Out For Delivery (ofd).
+* `type` - The order type is shared over this field. eg: FWD/REV 
+* `recepient_info` - This field contains proof of delivery, and it will be sent only when the current status has been delivered or RTS_D has been confirmed.
+
+
+This is the structure of the payload data(JSON) that will be pushed to your end.
+
++ Response 200 (application/json)
+
+        {
+            "awb_number": "SF610198449AAA",
+            "order_id": "FL20230517311447364",
+            "event_timestamp": "2023-05-18 16:22:13",
+            "current_location": "CHN_Ambattur_EXP",
+            "comments": "Item Delivered at CHN_Ambattur_EXP",
+            "event": "delivered",
+            "status": "Delivered",
+            "otp_verified": "Y",
+            "rider_name": null,
+            "rider_contact": null,
+            "client_id": 2245,
+            "recipient_info": {
+                "recipient": "Customer",
+                "recipient_name": "Chittaranjan",
+                "recipient_contact": "20369854715",
+                "recipient_signature": []
+            },
+            "type": "FWD"
+        }
+When we want to send a push message to your server, we need to make an API call to a push service. API call would require the following callback details, which can be configured via the Client Portal on the Webhook tab.
+#### Note : Customized Request Body for Push Callback
+
+We also have the capability to send the below optional fields on clients request as an addition to the above request body :
+    
+* `updated_date` - Here the value would be the event updated date and the format would be `YYYY-MM-DD` eg: `2023-05-18`
+* `updated_time` - Here the value would be the event updated time. The format would be `HHMM`. eg: `1622`    
+* `created_date` - Here the value would be the order created date. The format would be `YYYY-MM-DD` eg: `2023-05-18`. 
+* `created_time` - Here the value would be the order created time. The format would be `HHMM`.  eg: `1622`
+* `total_amount` - This field would be the total amount (inclusive of GST) passed during order placement. 
+* `destinationPincode` - This field would have the delivery pincode.
+* `destinationCity` -  This field would have the drop city name. default: `null`
+* `originCity` - This field would have the drop city name.
+* `shipmenttype` - This field indicated the order leg, that is for reverse leg the value would be `R` and for forward leg the value would be `F`. This field is not the same as the `type` field.
+* `payMode` - Here the value indicates the payment mode. The value would be `C` for cod mode and `P` for prepaid mode.
+* `codAmount` - This field would have the cod amount.
+* `estimatedDeliveryDate` - This field would have the promised date. The format would be `YYYY-MM-DD HH:MM:SS`. 
+* `attempt_number` - This field would have the attempt count. default: 0    
+
+`The appropriate URL implemented at your end to trigger a push message(Mandatory).`
+
+
+
+####Marketplace order states for PUSH Api :
+
+|status_id                      |status                         |Remark                                                  |Description                                                                    |
+|-------------------------------|-------------------------------|--------------------------------------------------------|-------------------------------------------------------------------------------|
+| `assigned_for_pickup`         | Assigned For Pickup                           |Item Assigned For Seller Pickup at `<SFX Facility>`                            | When the Item Assigned For Seller Pickup                           |
+| `assigned_for_seller_pickup`  | Assigned For Pickup           |Item Assigned For Customer Pickup at `<SFX Facility>`   | When the  order is Assigned to Shadowfax Rider For Seller Pickup.                       |
+| `ofp`                         | Out For Pickup                |Item Out For Pickup at `<SFX Facility>`                 | When the  order is out for Seller Pickup.                                                     |
+| `picked`                      | Picked                        |Picked                                                  |When the  order is picked successfully                                          |
+| `recd_at_rev_hub`             | Received At Reverse Hub       |Received at hub Successfully                            | When the  order is Picked and Received At pickup hub                                                  |
+| `recd_at_fwd_hub`             | Received At Forward Hub       |Item Received at hub at `<SFX Facility>`                | when order is received at destination hub                                  |
+| `recd_at_fwd_dc`              | Received At DC                |Item Received at dc at `<SFX Facility>`                 | when the order received at destination city DC.                                                    |
+| `ofd`                         | Out For Delivery              |Item OFD at `<SFX Facility>`                            | Order is out for Customer Delivery.                                                 |
+| `assigned_for_delivery`       | Assigned for Customer Delivery|Item Assigned at `<SFX Facility>`                       | Order is assigned to Shadowfax Rider for Customer Delivery.                         |
+| `delivered`                   | Delivered                     |Item Delivered at `<SFX Facility> `                     | Order has been delivered to the customer.                                           |
+| `cid`                         | Cid                           | Customer wants delivery on another date                | Customer Initiated Delay(cid). Customer has requested for delivery on another day.   |
+| `nc`                          | Not Contactable               |Refer [Appendix](#Appendix_pushnc) for detailed Reasons of Not Contactable |  Customer is not contactable for delivery                             |
+| `na`                          | Not attempted                 |Refer [Appendix](#Appendix_pushnot_attempted) for detailed Reasons of Not Attempted   | Customer Delivery was not attempted by Shadowfax Rider     |
+| `pickup_not_attempted`        | Not Attempted                  |Not able to attempt                                     | Not able to attempt the pickup for the marketplace order                                                   |          
+| `pickup_on_hold`              | Pick up On Hold                          |Refer [Appendix](#Appendix_On_pushpickupHold) for detailed Reasons of order On Hold | Due to the specified reason the pickup was put on hold|
+| `reopen_ndr`                  | Require Delivery - NDR        |Require Delivery As Per NDR Instructions                    |Customer Delivery will be reattempted as per customer request           |
+| `cancelled_by_customer`       | Cancelled                     |Refer [Appendix](#Appendix_pushmarketcancelled) for detailed reasons of order Cancelled. | Delivery Request has been Cancelled By customer (can be due to various reasons)     |
+| `rts`                         | Return to Seller initiated    |Item Return To Seller at `<SFX Facility>`               | Order is initated for Return To Seller                                                            |
+| `rts_in_process`              | RTS In Progress            |Item RTS In Progress at `<SFX Facility>`     | Order Return to Seller in progress                                           |
+| `rts_d`                       | Returned To Client            |Item Return To Seller Delivered at `<SFX Facility>`     | Order has been successfully returned to Seller.                                           |
+| `rts_nd`                      | Undelivered                    | Item Return to Seller Not Delivered at `<SFX Facility>`  | Order has been not returned to Seller.        |
+| `lost`                        | Lost                          |Item Lost at `<SFX Facility>`                           | Order lost in transit                                                             |
+| `on_hold`                     | On Hold                       | Refer [Appendix](#Appendix_pushOn_Holdmarketplace) for detailed Reasons of order On Hold |  When the item is put On Hold due to client orders/Operational Concerns. |
+| `seller_initiated_delay`      | Cid                           |Seller Initiated Delay                                  | Seller has requested to pickup the  order on another day                                       |
+| `cancelled_by_seller`       | Cancelled by Seller                     |Item cancelled by seller at `<SFX Facility>`| Seller has requested to cancel the pickup|
+
+
+####Warehouse order states for PUSH Api :
+
+|status_id                      |status                         |Remark                                                  |Description                                                                    |
+|-------------------------------|-------------------------------|--------------------------------------------------------|-------------------------------------------------------------------------------|
+| `received_from_client_warehouse` |Received from Client Warehouse |Item Received from Client Warehouse at `<SFX Facility>` | This status signifies that the item has been picked from the client's warehouse. |
+| `recd_at_fwd_dc`              | Received At DC                |Item Received at dc at `<SFX Facility>`                 | Order is received to Forward DC.                                                    |
+| `recd_at_fwd_hub`             | Received At Forward Hub       |Item Received at hub at `<SFX Facility>`                | Order is received at Forward Hub from Reverse Hub.                                  |
+| `assigned_for_delivery`       | Assigned for Customer Delivery|Item Assigned at `<SFX Facility>`                       | Order is assigned to Shadowfax Rider for Customer Delivery.                         |
+| `ofd`                         | Out For Delivery              |Item OFD at `<SFX Facility>`                            | Order is out for Customer Delivery.                                                 |
+| `delivered`                   | Delivered                     |Item Delivered at `<SFX Facility> `                     | Order has been delivered to the customer.                                           |
+| `cancelled_by_customer`       | Cancelled                     |Cancelled | Delivery Request has been Cancelled By customer (can be due to various reasons)     |
+| `cid`                         | Cid                           | Customer wants delivery on another date                | Customer Initiated Delay(cid). Customer has requested for delivery on another day.   |
+| `nc`                          | Not Contactable               |Customer not contactable |  Customer is not contactable for delivery                             |
+| `na`                          | Not attempted                 | Not Attempted  | Customer Delivery was not attempted by Shadowfax Rider     |
+| `lost`                        | Lost                          |Item Lost at `<SFX Facility>`                           | Order lost in transit                                                             |
+| `reopen_ndr`                  | Require Delivery - NDR        |Require Delivery As Per NDR Instructions                    |Customer Delivery will be reattempted as per customer request           |
+| `rto`                         |Return to origin initiated     |Refer [Appendix](#Appendix_pushrtowarehouse) for detailed Reasons of Return to origion               | Order is initated for Return To Client/ warehouse|
+| `rto_in_process`              |In RTO/RTS Process     |Item RTO In Progress at `<SFX Facility>`            | Order is initated for Return To Client/ warehouse is in process|
+| `rto_d`                       | Returned to Client            |Item Return To Origin Delivered at `<SFX Facility>`     | Order has been successfully returned to client       |
+| `rto_nd`                       | Undelivered            |Item Return To Origin Not Delivered at `<SFX Facility>`    | Order has been returned to client       |
+| `on_hold`                     | On Hold                       | Refer [Appendix](#Appendix_pushOn_Holdwarehouse) for detailed Reasons of order On Hold |  When the item is put On Hold due to client orders/Operational Concerns. |
+
+# Group Serviceability
+
+
+## Unified Pincode Serviceability [/v1/clients/serviceability/?service={service}&page={page}&count={count}&pincodes={pincodes}]
+### List All Serviceable Pincodes  [GET]
+
+By using this endpoint, you can get a list of all Shadowfax serviceable pincodes, as well as the services provided by each of them.
+
+If pagination is not sent as a parameter then by default 25 pincodes will be retrieved.
+
+While triggering the API enter the service for which the list of pincode needs to be fetched.
+* The service parameter can be:
+    * `seller_pickup` - List all the pincodes where seller pickup is available.
+    * `customer_delivery` - List all the pincodes where customer delivery is available.
+    * `customer_pickup` - List all the pincodes where customer pickup is available.
+    * `seller_delivery` - List all the pincodes where seller delivery is available.
+    * `warehouse_pickup` - List all the pincodes where warehouse pickup is available.
+    * `warehouse_return` - List all the pincodes where warehouse return or rto is available.
+
+
+##Requests
+This is the URL to make an actual request:<br>
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api/v1/clients/serviceability/?service=customer_delivery&page=1&count=10&pincodes=560016,560017`|
+|Production|`https://dale.shadowfax.in/api/v1/clients/serviceability/?service=customer_delivery&page=1&count=10&pincodes=560016,560017`|
+
+
++ Parameters
+    
+    + service:customer_delivery (required, string) - Enter the service for which the list of pincodes needs to be fetched.
+    + page:1 (number)- Enter the page number.
+    + count:10 (number) - Enter the per page count.
+    + pincodes:560017 (number) - Enter the pincodes.
+
+    
++ Request (application/json)
+
+    + Headers 
+    
+            Authorization: Token <token_id here>
+            
++ Response 200 (application/json)
+
+    [
+        {
+            "code": 560017,
+            "services": [
+                "Regular",
+                "Surface"
+            ]
+        }
+        {
+            "code": 560016,
+            "services": [
+                "Regular"
+            ]
+        }
+    ]
+
++ Response 401 (application/json)
+
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Invalid Request"
+        }
+
+
+
+# group AWB Generation
+## AWB Generation [/v3/clients/generate_marketplace_awb/]
+
+### Generate AWB [POST]
+We have an automated process of sharing new and unused AWBs once the existing ones are about to exhaust. 
+It takes the count of AWB Number as the parameter. The endpoint automatically generates new AWBs and returns them if the unused AWBs are less than the required count.
+ The max limit for the number of AWBs that can be requested in one go is 100,000.
+
+For any changes, please reach out to Shadowfax's Account Manager.
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api/`|
+
+|Production|`https://dale.shadowfax.in/api/`|
+
+
++ Request
+
+    + Body 
+    
+            { 
+                "count" : 10
+            }
+            
+    + Headers
+    
+            Authorization: Token Authorization
+            
++ Response 200 (application/json)
+    
+        {
+            "message": "Success",
+            "awb_numbers": [
+                "SF10000001san",
+                "SF10000002san",
+                "SF10000003san",
+                "SF10000004san",
+                "SF10000005san",
+                "SF10000006san",
+                "SF10000007san",
+                "SF10000008san",
+                "SF10000009san",
+                "SF10000010san"
+            ]
+        }
+
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Max limit on count is 100000. Please input a lower integer"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Invalid client type."
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Client does not exist in forward. "
+        }
+
+
+
+#group Marketplace- Order Creation
+## Order Creation for marketplace seller model [/v3/clients/orders/]
+### Create a Seller Pickup Request[POST]
+This endpoint is used to place a new seller pickup and delivery order in our system. 
+It takes order_details, customer_details, pickup_details, rts_details and product_details as parameters.
+
+Below given are sample pincodes for testing in Staging Environment for Pickup / delivered / return 
+*  110009 
+*  560077
+*  560007
+
++ Parameters
+    + format (optional, string)
+        Type of response (json or xml) required
+        + Default: json
+
++ Request (application/json)
+
+    + Body
+    
+            {
+          "order_type": "marketplace",
+          "order_details": {
+            "client_order_id": "0123",
+            "actual_weight": 100,
+            "volumetric_weight": 100,
+            "product_value": 515,
+            "payment_mode": "Prepaid",
+            "cod_amount": "0",
+            "promised_delivery_date": "2018-01-09T00:00:00.000Z",
+            "total_amount": 5555,
+            "eway_bill":"7452128",
+            "gstin_number" : "74185263",
+            "order_service":"regular"
+          },
+          "customer_details": {
+            "name": "Deepak",
+            "contact": "9999999999",
+            "address_line_1": "Flat 38 Loknayak Aptt Sector 9 Rohini",
+            "address_line_2": "Sector 7, dividing road",
+            "city": "New Delhi",
+            "state": "Delhi",
+            "pincode": 110001,
+            "alternate_contact": "9999999999",
+            "latitude": "11.0000",
+            "longitude": "77.0000"
+          },
+          "pickup_details": {
+            "name": "HSR Telecom",
+            "contact": "9999999999",
+            "address_line_1": "8th main 5th cross",
+            "address_line_2": "Teachers colony",
+            "city": "Bengaluru",
+            "state": "Karnataka",
+            "pincode": 560007,
+            "latitude": "12.0000",
+            "longitude": "78.0000",
+            "unique_code" : "warehousecode01"
+          },
+          "rts_details": {
+            "name": "Deepak",
+            "contact": "9999999999",
+            "address_line_1": "sec-24 poc-25 Hno-76",
+            "address_line_2": "Shiv mandir",
+            "city": "Ludhiana",
+            "state": "Punjab",
+            "pincode": 110009,
+            "email": "abc@gmail.com",
+            "latitude": "12.0000",
+            "longitude": "78.0000",
+            "unique_code" : "warehousecode01"
+          },
+          "product_details": [
+            {
+              "hsn_code": "HJUY890",
+              "invoice_no": "SNP678",
+              "sku_name": "macBook Air",
+              "sku_id": "MAC789",
+              "category": "cosmic",
+              "price": 4500,
+              "seller_details": {
+                "seller_name": "NewSeller",
+                "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                "seller_state": "Kerala",
+                "gstin_number": "HDS798HG"
+              },
+              "taxes": {
+                "cgst": 3,
+                "sgst": 4,
+                "igst": 5,
+                "total_tax": 5.6
+              },
+              "additional_details": {
+                "requires_extra_care": "False",
+                "type_extra_care": "Dangerous Goods",
+                "quantity" : 2
+              }
+            }
+          ]
+        }
+            
+
+    + Headers
+    
+            Authorization: Token <token_id here>
+            
+    + Attributes
+        
+        + order_type (required, string)-For Marketplace model integration, value will be "marketplace"
+        + order_details (required, object)
+          + client_order_id (required, string) - Order ID in the client system. Character limit : 100 
+          + awb_number(optional, string) - Awb Number provided by you (Optional, If not provided, an awb number will be assigned automatically ) Character limit : 100 
+          + actual_weight(optional, number) - Weight of the Product (in gms) default :0.0
+          + volumetric_weight(optional, number) - Volumetric Weight of the Product (in gms). default : 0.0 (volumetric weight=(l*b*h)/5000)
+          + product_value (required, number) - Total SKU's product value exc. tax
+          + cod_amount (required, number) -  Amount to be collected from the customer.
+          + payment_mode (required, string) - either COD or Prepaid (Mandatory)
+          + promised_delivery_date (optional, string) - scheduled delivery date of the product (Format – yyyy-mm- dd, e.g. 2016-11- 09)
+          + total_amount (optional, number) - Total SKU's value inclusive of tax.
+          + eway_bill (optional , string ) - Character limit : 12
+          + gstin_number (optional, string) - Character limit : 50
+          + order_service (optional, string)- The order service will be regular
+        + customer_details (required, object)
+          + name (required, string) - Character limit : 100
+          + contact (required, string) - 10(minimum) digit phone number. Character limit : 13
+          + alternate_contact (optional, string) - Pickup Customer's Alternate Contact Number. If provided, it should be a minimum of 10 digits otherwise validation error will be thrown.Character limit :13
+          + address_line_1 (required, string)
+          + address_line_2 (optional ,string)
+          + city (required, string) - customer city.Character limit :50
+          + state (required, string) - customer state. Character limit :50
+          + pincode (required, number) - 6 digit valid pincode Character limit :6
+          + latitude (optional, string) 
+          + longitude (optional, string)
+        + pickup_details (required, object ) 
+          + name (optional, string)-Character limit : 100
+          + contact (required, string) : 10(minimum) digit phone number.Character limit : 13
+          + address_line_1 (required, string) 
+          + address_line_2 (optional, string)
+          + city (required, string) - customer city .Character limit : 50
+          + state (required, string) - customer state. Character limit : 50
+          + pincode (required, number)  - 6 digit valid pincode
+          + latitude (optional, string)
+          + longitude (optional, string)
+          + unique_code (optional, string) - 255 (max length) a unique warehouse code
+        + rts_details (required , object)
+          + name (required, string)- Character limit : 100
+          + contact (required, string) - 10(minimum) digit phone number.Character limit : 13
+          + address_line_1 (required, string)
+          + address_line_2 (optional, string)
+          + city (required, string)  - customer city. Character limit : 50 
+          + state (required, string) - customer state. Character limit : 50
+          + pincode (required, number) - 6 digit valid pincode 
+          + email(optional , string) - 100 (max length) valid email address
+          + latitude (optional, string)
+          + longitude (optional, string)
+          + unique_code (optional, string) - 255 (max length) a unique warehouse code.
+        + product_details (required , array) - Array of json objects. This can have multiple skus but the array should contain at least one valid sku object.
+            + (object)
+                + sku_id (optional, string).Character limit : 100
+                + sku_name (required, string) - Name of the product
+                + hsn_code (optional, string) - Character limit :50
+                + invoice_no (optional, string)- Character limit : 50
+                + category (optional, string)-Character limit : 200
+                + price (required, number)
+                + seller_details (optional, object)
+                    + seller_name (optional, string) -Character limit : 100
+                    + seller_address (optional, string)
+                    + seller_state (optional, string) - Character limit : 50
+                    + gstin_number (optional, string) -Character limit : 50
+                + taxes (optional, object)
+                    + cgst (optional , number)
+                    + sgst (optional , number)
+                    + igst (optional, number)
+                    + total_tax (optional , number )
+                + additional_details (optional, object)
+                    + requires_extra_care (optional, string)
+                    + type_extra_care (optional, string)
+                    + quantity (optional, number)
+                
++ Response 200 (application/json)
+
+        {
+            "message": "Success",
+            "errors": null,
+            "data": {
+                "id": 2199782,
+                "client_name": Test Client Grocery",
+                "client_order_id": "3399845736",
+                "awb_number": "SF401022456TST",
+                "product_value": 900.0,
+                "cod_amount": 0,
+                "payment_mode": "prepaid",
+                "order_date": "2023-08-02",
+                "promised_delivery_date": null,
+                "status_display": "New",
+                "status": "new",
+                "pickup_details": {
+                    "name": "Titanic world",
+                    "contact": "8319733588",
+                    "address_line_1": "World wide center",
+                    "address_line_2": "USA",
+                    "city": "Bengaluru",
+                    "state": "Karnataka",
+                    "pincode": 560007,
+                    "alternate_contact": null,
+                    "sms_contact": null,
+                    "latitude": "",
+                    "longitude": ""
+                },
+                "delivery_details": {
+                    "name": "Vikas",
+                    "contact": "8319733588",
+                    "address_line_1": "D-8,sector-,Delhi",
+                    "address_line_2": "",
+                    "city": "Delhi",
+                    "state": "Delhi",
+                    "pincode": 560007,
+                    "alternate_contact": "9090909090",
+                    "sms_contact": null,
+                    "latitude": "",
+                    "longitude": ""
+                },
+                "product_details": [
+                    {
+                        "sku_id": "MAC789",
+                        "sku_name": "macBook Air",
+                        "price": 9000.0,
+                        "return_reason": null,
+                        "category": "Electronic",
+                        "brand": null,
+                        "additional_details": "{\"requires_extra_care\": true, \"type_extra_care\": null, \"quantity\": 2}",
+                        "seller_name": "NewSeller",
+                        "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                        "seller_state": "Kerala",
+                        "hsn_code": "HJUY890",
+                        "invoice_no": "SNP678",
+                        "sgst_amount": 68.0,
+                        "cgst_amount": 68.0,
+                        "igst_amount": 0.0,
+                        "gstin_number": "",
+                        "total_tax_value": 136.0,
+                        "qc_required": true,
+                        "qc_rules": ""
+                    },
+                    {
+                        "sku_id": "MAC790",
+                        "sku_name": "macBook Air",
+                        "price": 9000.0,
+                        "return_reason": null,
+                        "category": "Electronic",
+                        "brand": null,
+                        "additional_details": "{\"requires_extra_care\": true, \"type_extra_care\": null, \"quantity\": 2}",
+                        "seller_name": "NewSeller",
+                        "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                        "seller_state": "Kerala",
+                        "hsn_code": "HJUY890",
+                        "invoice_no": "SNP678",
+                        "sgst_amount": 68.0,
+                        "cgst_amount": 68.0,
+                        "igst_amount": 0.0,
+                        "gstin_number": "",
+                        "total_tax_value": 136.0,
+                        "qc_required": true,
+                        "qc_rules": ""
+                    },
+                    {
+                        "sku_id": "MAC791",
+                        "sku_name": "macBook Air",
+                        "price": 9000.0,
+                        "return_reason": null,
+                        "category": "Electronic",
+                        "brand": null,
+                        "additional_details": "{\"requires_extra_care\": true, \"type_extra_care\": null, \"quantity\": 5}",
+                        "seller_name": "NewSeller",
+                        "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                        "seller_state": "Kerala",
+                        "hsn_code": "HJUY890",
+                        "invoice_no": "SNP678",
+                        "sgst_amount": 68.0,
+                        "cgst_amount": 68.0,
+                        "igst_amount": 0.0,
+                        "gstin_number": "",
+                        "total_tax_value": 136.0,
+                        "qc_required": true,
+                        "qc_rules": ""
+                    }
+                ],
+                "eway_bill_number": null,
+                "invoice_date": null,
+                "sort_code": null
+            }
+        }                
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Order for COID : Test warhosue32x0232 is already created with AWB : SF325110257MY",
+            "COID": "Test warhosue32x0232",
+            "AWB": "SF325110257MY"
+        }
+        
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Contact number is Required"
+        }
+
++ Response 200 (application/json)
+    
+        {
+            "message": "Failure",
+            "errors": [
+                "RTO Contact Number is Invalid"
+            ]
+        }
+        
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Please Enter Valid 12-digit E-Way Bill Number"
+            ]
+        }
+        
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid order service"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "GSTIN Number is mandatory for product value more than 50000"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid Pickup Pincode. Pickup pincode 128888 is not serviceable"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid Return Pincode. Pickup pincode 128888 is not serviceable"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid Delivery Pincode. Pincode 128888 is not serviceble"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Invalid email format for seller email"
+            ]
+        }
+    
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": {
+                "order_details": {
+                    "client_order_id": [
+                        "This field is required."
+                    ]
+                }
+            },
+            "data": {}
+        }
+        
++ Response 200 (application/json)
+ 
+        {
+            "message": "Failure",
+            "errors": [
+                "COD amount is greater than 50000 and Unable to create E-way Bill"
+            ]
+        }
+
++ Response 200 (application/json)
+ 
+        {
+            "message": "Failure",
+            "errors": [
+                "Payment Mode is Required"
+            ]
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Product value is required"
+            ]
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Return details are Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Pickup details are Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Pincode is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer details are Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Pickup Address is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Pickup Contact number is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Pickup unique code is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Return Pincode is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Return Name is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Return address is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer details are Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Pincode is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Contact number is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Contact number is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Delivery Address is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Delivery Address is Required"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Invalid Customer contact number"
+            ]
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Customer contact is not valid"
+            ]
+        }
+        
++ Response 200 (application/json)
+        {
+            "message": "Failure",
+            "errors": {
+                 "order_details": {
+                   "awb_number": [
+                      "order with this awb number already exists."
+                    ]
+                                  }
+                       },
+    "data": {}
+        }
+
++ Response 400 (application/json)
+
+        {"message":"Cannot place an Order: Please clear your pending invoices to start placing order again"}
+
+
++ Response 401 (application/json)
+
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 500 (application/json)
+
+        {
+            "message": "Internal Server Error"
+        }
+
+
+#group Warehouse - Order Creation
+## Order Creation for warehouse model [/v3/clients/orders/]
+### Create a Delivery Request[POST]
+This endpoint is used to create a new delivery request in our E-Commerce Forward System. It takes customer details, product details, and RTO(Return To Origin) details as parameters.
+Make sure to only add serviceable pincodes.
+
+Below given are sample pincodes for testing in Staging Environment for Pickup / delivered / return
+*  110009 
+*  560077
+*  560007
+
++ Parameters
+    + format (optional, string)
+        Type of response (json or xml) required
+        + Default: json
+
++ Request (application/json)
+
+    + Body
+
+        {
+          "order_type": "warehouse",
+          "order_details": {
+            "client_order_id": "0123",
+            "actual_weight": 100,
+            "volumetric_weight": 100,
+            "product_value": 515,
+            "payment_mode": "Prepaid",
+            "cod_amount": "0",
+            "promised_delivery_date": "2018-01-09T00:00:00.000Z",
+            "total_amount": 5555,
+            "eway_bill": "7452128",
+            "gstin_number": "HDS798HG",
+            "order_service":"regular"
+          },
+          "customer_details": {
+            "name": "Deepak",
+            "contact": "9999999999",
+            "address_line_1": "Flat 38 Loknayak Aptt Sector 9 Rohini",
+            "address_line_2": "Sector 7, dividing road",
+            "city": "New Delhi",
+            "state": "Delhi",
+            "pincode": 110001,
+            "alternate_contact": "9999999999",
+            "latitude": "11.0000",
+            "longitude": "77.0000",
+            "location_type" : "residential"
+          },
+          "pickup_details": {
+            "name": "HSR Telecom",
+            "contact": "9999999999",
+            "address_line_1": "8th main 5th cross",
+            "address_line_2": "Teachers colony",
+            "city": "Bengaluru",
+            "state": "Karnataka",
+            "pincode": 560007,
+            "latitude": "12.0000",
+            "longitude": "78.0000",
+            "unique_code" : "warehousecode01"
+          },
+          "rto_details": {
+            "name": "Deepak",
+            "contact": "9999999999",
+            "address_line_1": "sec-24 poc-25 Hno-76",
+            "address_line_2": "Shiv mandir",
+            "city": "Ludhiana",
+            "state": "Punjab",
+            "pincode": 110009,
+            "unique_code" : "testwarehouse01"
+          },
+          "product_details": [
+            {
+              "hsn_code": "HJUY890",
+              "invoice_no": "SNP678",
+              "sku_name": "macBook Air",
+              "sku_id": "MAC789",
+              "category": "cosmic",
+              "price": 4500,
+              "seller_details": {
+                "seller_name": "NewSeller",
+                "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                "seller_state": "Kerala",
+                "gstin_number": "HDS798HG"
+              },
+              "taxes": {
+                "cgst": 3,
+                "sgst": 4,
+                "igst": 5,
+                "total_tax": 5.6
+              },
+              "additional_details": {
+                "requires_extra_care": "False",
+                "type_extra_care": "Dangerous Goods",
+                "quantity" : 2
+              }
+            }
+          ]
+        }
+
+    + Headers
+    
+            Authorization: Token <token_id here>
+            
+    + Attributes
+        
+        + order_type (required, string)-For Warehouse model integration, value will be "warehouse"
+        + order_details (required, object)
+          + client_order_id (required, string) - Order ID in the client system. Character limit : 100 
+          + awb_number(optional, string) - Awb Number provided by you (Optional, If not provided, an awb number will be assigned automatically ). Character limit : 100
+          + actual_weight(optional, number) - Weight of the Product (in gms). default : 0.0
+          + volumetric_weight(optional, number) - Volumetric Weight of the Product. default : 0.0 (volumetric weight=(l*b*h)/5000)
+          + product_value (required, number) - Total SKU's product value exc. tax
+          + cod_amount (required, number) -  Amount to be collected from the customer.
+          + payment_mode (required, string) - either COD or Prepaid (Mandatory)
+          + promised_delivery_date (optional, string) - scheduled delivery date of the product (Format – yyyy-mm- dd, e.g. 2016-11- 09)
+          + total_amount (optional, number) - Total SKU's value inclusive of tax.
+          + gstin_number (optional, string) - Character limit : 50
+          + eway_bill (optional, number) - Character limit : 12
+          + order_service (optional, string)- The order service will be regular
+        + customer_details (required, object)
+          + name (required, string)- Character limit :100
+          + contact (required, string) - 10(minimum) digit phone number. Character limit : 13
+          + alternate_contact (optional, string) - Pickup Customer's Alternate Contact Number. If provided, it should be a minimum of 10 digits otherwise validation error will be thrown.Character limit :13
+          + address_line_1 (required, string)
+          + address_line_2 (optional ,string)
+          + city (required, string) - customer city. Character limit : 50
+          + state (required, string) - customer state. Character limit : 50
+          + pincode (required, number) - 6 digit valid pincode. Character limit : 6
+          + latitude (optional, string) 
+          + longitude (optional, string)
+          + location_type (optional, string) - "residential"/"Commercial"
+        + pickup_details (required, object ) 
+          + name (optional, string)- Character limit : 100
+          + contact (required, string) : 10(minimum) digit phone number. Character limit : 13
+          + address_line_1 (required, string) 
+          + address_line_2 (optional, string)
+          + city (required, string) - customer city. Character limit : 50
+          + state (required, string) - customer state. Character limit : 50 
+          + pincode (required, number)  - 6 digit valid pincode. Character limit : 6
+          + latitude (optional, string)
+          + longitude (optional, string)
+          + unique_code (optional, string) - 255 (max length) a unique warehouse code
+        + rto_details (required, object) - Address and Contact Details of the location where RTO needs to be done
+          + name (required, string) - Character limit : 100
+          + contact (required, string) - 10(minimum) digit phone number. Character limit : 13
+          + address_line_1 (required, string)
+          + address_line_2 (optional ,string)
+          + city (required, string) - return warehouse city. Character limit : 50
+          + state (required, string) - return warehouse state. Character limit : 50
+          + pincode (required, number) - 6 digit valid pincode. Character limit : 6 
+          + unique_code (optional, string) - 255 (max length) a unique warehouse code
+        + product_details (required , array) - Array of json objects. This can have multiple skus but the array should contain at least one valid sku object.
+            + (object)
+                + client_sku_id (optional, string) - Character limit : 100
+                + sku_name (required, string) - Name of the product
+                + hsn_code (optional, string) - Character limit : 50
+                + invoice_no (optional, string) - Character limit : 50
+                + category (optional, string) - Character limit : 200
+                + price (required, number)
+                + seller_details (optional, object)
+                    + seller_name (optional, string) - Character limit : 100
+                    + seller_address (optional, string)
+                    + seller_state (optional, string). Character limit : 50
+                    + gstin_number (optional, string). Character limit : 50
+                + taxes (optional, object)
+                    + cgst (optional , number)
+                    + sgst (optional , number)
+                    + igst (optional, number)
+                    + total_tax (optional , number )
+                + additional_details (optional, object)
+                    + requires_extra_care (optional, string)
+                    + type_extra_care (optional, string)
+                    + quantity (optional, number)
+                
++ Response 200 (application/json)
+
+        {
+            "message": "Success",
+            "errors": null,
+            "data": {
+                "id": 2035397,
+                "client_name": "Treesa M Antony",
+                "client_order_id": "0123",
+                "awb_number": "SF36089989TMA",
+                "product_value": 515.0,
+                "cod_amount": 0,
+                "payment_mode": "prepaid",
+                "order_date": "2022-01-28",
+                "promised_delivery_date": "2018-01-08T18:30:00Z",
+                "status_display": "New",
+                "status": "new",
+                "pickup_details": {
+                    "name": "HSR Telecom",
+                    "contact": "9999999999",
+                    "address_line_1": "8th main 5th cross",
+                    "address_line_2": "Teachers colony",
+                    "city": "Bengaluru",
+                    "state": "Karnataka",
+                    "pincode": 560007,
+                    "alternate_contact": null,
+                    "sms_contact": null,
+                    "latitude": "12.0000",
+                    "longitude": "78.0000"
+                },
+                "delivery_details": {
+                    "name": "Deepak",
+                    "contact": "9999999999",
+                    "address_line_1": "Flat 38 Loknayak Aptt Sector 9 Rohini",
+                    "address_line_2": "Sector 7, dividing road",
+                    "city": "New Delhi",
+                    "state": "Delhi",
+                    "pincode": 110001,
+                    "alternate_contact": "9999999999",
+                    "sms_contact": null,
+                    "latitude": "11.0000",
+                    "longitude": "77.0000"
+                },
+                "product_details": [
+                    {
+                        "sku_id": "MAC789",
+                        "sku_name": "macBook Air",
+                        "price": 4500.0,
+                        "return_reason": null,
+                        "category": "cosmic",
+                        "brand": null,
+                        "additional_details": "{\"type_extra_care\": \"Dangerous Goods\", \"requires_extra_care\": false}",
+                        "seller_name": "NewSeller",
+                        "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                        "seller_state": "Kerala",
+                        "hsn_code": "HJUY890",
+                        "invoice_no": "SNP678",
+                        "sgst_amount": 4.0,
+                        "cgst_amount": 3.0,
+                        "igst_amount": 5.0,
+                        "gstin_number": "HDS798HG",
+                        "total_tax_value": 5.6,
+                        "qc_required": true,
+                        "qc_rules": ""
+                    }
+                ],
+                "eway_bill_number": "7452128",
+                "invoice_date": null,
+                "sort_code": null
+            }
+        }     
+        
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Order for COID : Test warhosue32x0232 is already created with AWB : SF325110257MY",
+            "COID": "Test warhosue32x0232",
+            "AWB": "SF325110257MY"
+        }
+        
++ Response 200 (application/json)
+ 
+        {
+            "message": "Failure",
+            "errors": [
+                "COD amount is greater than 50000 and Unable to create E-way Bill"
+            ]
+        }
+
++ Response 200 (application/json)
+ 
+        {
+            "message": "Failure",
+            "errors": [
+                "Payment Mode is Required"
+            ]
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Product value is required"
+            ]
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Customer Contact number is Required"
+        }
+
++ Response 200 (application/json)
+    
+        {
+            "message": "Failure",
+            "errors": [
+                "RTO Contact Number is Invalid"
+            ]
+        }
+        
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Please Enter Valid 12-digit E-Way Bill Number"
+            ]
+        }
+        
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid order service"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "GSTIN Number is mandatory for product value more than 50000"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid Pickup Pincode. Pickup pincode 128888 is not serviceable"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid Return Pincode. Pickup pincode 128888 is not serviceable"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": "Invalid Delivery Pincode. Pincode 128888 is not serviceble"
+        }
+
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": [
+                "Invalid email format for seller email"
+            ]
+        }
+    
++ Response 200 (application/json)
+
+        {
+            "message": "Failure",
+            "errors": {
+                "order_details": {
+                    "client_order_id": [
+                        "This field is required."
+                    ]
+                }
+            },
+            "data": {}
+        }
+        
++ Response 200 (application/json)
+        {
+            "message": "Failure",
+            "errors": {
+                 "order_details": {
+                   "awb_number": [
+                      "order with this awb number already exists."
+                    ]
+                                  }
+                       },
+            "data": {}
+        }
+        
++ Response 400 (application/json)
+
+        { "message":"Cannot place an Order: Please clear your pending invoices to start placing order again"}
+
++ Response 401 (application/json)
+
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
+
++ Response 500 (application/json)
+
+        {
+            "message": "Internal Server Error"
+        }
+
+
+
+# Group Order Details
+
+## Single Order Details V4 version [/v4/clients/orders/{awb_number}/track/]
+
++ Parameters
+    + awb_number (required, string) ... AWB Number of the order
+
+### Get Details of a Request[GET]
+
+This endpoint is used to get all details of an Order by AWB Number. The v4 version of tracking API provides the additional intermediate statuses like Item Manifested, Bag In Transit etc.
++ Request
+
+    + Header
+    
+            Authorization: Token Authorization
+
++ Response 200 (application/json)
+
+    {
+        "message": "Success",
+        "order_details": {
+            "id": 145475249,
+            "client_name": "Test Client",
+            "client_order_id": "11002",
+            "awb_number": "SF222344412TST",
+            "product_value": 5555.0,
+            "cod_amount": 0,
+            "payment_mode": "prepaid",
+            "order_date": "2022-02-28",
+            "promised_delivery_date": null,
+            "status_display": "Undelivered",
+            "status": "rts_nd",
+            "pickup_details": {
+                "name": "HSR Telecom",
+                "contact": "9999999999",
+                "address_line_1": "8th main 5th cross",
+                "address_line_2": "Teachers colony",
+                "city": "Bengaluru",
+                "state": "Karnataka",
+                "pincode": 999999,
+                "alternate_contact": null,
+                "sms_contact": null,
+                "latitude": "12.0000",
+                "longitude": "78.0000"
+            },
+            "delivery_details": {
+                "name": "Deepak",
+                "contact": "1234567890",
+                "address_line_1": "Flat 38 Loknayak Aptt Sector 9 Rohini",
+                "address_line_2": "Sector 7, dividing road",
+                "city": "New Delhi",
+                "state": "Delhi",
+                "pincode": 999998,
+                "alternate_contact": "1234567890",
+                "sms_contact": null,
+                "latitude": "11.0000",
+                "longitude": "77.0000"
+            },
+            "product_details": [
+            {
+                "sku_id": null,
+                "sku_name": "macBook Air",
+                "price": 4500.0,
+                "return_reason": null,
+                "category": "cosmic",
+                "brand": null,
+                "additional_details": "{\"requires_extra_care\": false, \"type_extra_care\": \"Dangerous Goods\"}",
+                "seller_name": "NewSeller",
+                "seller_address": "Arangath House, Manalithra, Thrissur Dist",
+                "seller_state": "Kerala",
+                "hsn_code": "HJUY890",
+                "invoice_no": "SNP678",
+                "sgst_amount": 4.0,
+                "cgst_amount": 3.0,
+                "igst_amount": 5.0,
+                "gstin_number": "HDS798HG",
+                "total_tax_value": 5.6,
+                "qc_required": true,
+                "qc_rules": ""
+            }
+        ],
+        "eway_bill_number": null,
+        "invoice_date": null,
+        "customer_track_url": "https://exp.shadowfax.in/JdDYM6"
+    },
+    "tracking_details": [
+        {
+        "created": "2022-02-28T08:58:57Z",
+        "location": "SFX TestHub",
+        "status_id": "new",
+        "status": "New",
+        "remarks": "Item New at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:00:03Z",
+        "location": "SFX TestHub",
+        "status_id": "assigned_for_seller_pickup",
+        "status": "Assigned For Seller Pickup",
+        "remarks": "Item assigned for seller pickup at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:00:09Z",
+        "location": "SFX TestHub",
+        "status_id": "ofp",
+        "status": "Out For Pickup",
+        "remarks": "Item Out For Pickup at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:00:15Z",
+        "location": "SFX TestHub",
+        "status_id": "recd_at_rev_hub",
+        "status": "Received at Reverse Hub",
+        "remarks": "Received at hub Successfully",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:00:15Z",
+        "location": "SFX TestHub",
+        "status_id": "recd_at_fwd_hub",
+        "status": "Received at Forward Hub",
+        "remarks": "Item Received at pickup hub at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:00:45Z",
+        "location": "SFX TestHub",
+        "status_id": "item_manifested",
+        "status": "Item added to Bag",
+        "remarks": "Item added to bag at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:00:59Z",
+        "location": "SFX TestHub",
+        "status_id": "bag_in_transit",
+        "status": "Bag In Transit",
+        "remarks": "Bag in transit from SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:01:26Z",
+        "location": "TEST DC",
+        "status_id": "bag_received",
+        "status": "Bag Received",
+        "remarks": "Bag received at TEST DC",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:01:53Z",
+        "location": "TEST DC",
+        "status_id": "recd_at_fwd_dc",
+        "status": "Received at Forward DC",
+        "remarks": "Item Received at dc at TEST DC",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:02:30Z",
+        "location": "TEST DC",
+        "status_id": "item_manifested",
+        "status": "Item added to Bag",
+        "remarks": "Item added to bag at TEST DC",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:02:52Z",
+        "location": "TEST DC",
+        "status_id": "bag_in_transit",
+        "status": "Bag In Transit",
+        "remarks": "Bag in transit from TEST DC",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:03:15Z",
+        "location": "TestHub2",
+        "status_id": "bag_received",
+        "status": "Bag Received",
+        "remarks": "Bag received at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:03:24Z",
+        "location": "TestHub2",
+        "status_id": "recd_at_fwd_hub",
+        "status": "Received at Forward Hub",
+        "remarks": "Item Received at hub at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:03:36Z",
+        "location": "TestHub2",
+        "status_id": "assigned_for_delivery",
+        "status": "Assigned For Delivery",
+        "remarks": "Item Assigned at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:03:54Z",
+        "location": "TestHub2",
+        "status_id": "ofd",
+        "status": "Out For Delivery",
+        "remarks": "Item OFD at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:04:09Z",
+        "location": "TestHub2",
+        "status_id": "cancelled_by_customer",
+        "status": "Cancelled",
+        "remarks": "Cancelled by customer",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:04:43Z",
+        "location": "TestHub2",
+        "status_id": "rts",
+        "status": "Return to Seller initiated",
+        "remarks": "Item Return To Seller at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:05:11Z",
+        "location": "TestHub2",
+        "status_id": "item_manifested",
+        "status": "Item added to Bag",
+        "remarks": "Item added to bag at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:05:24Z",
+        "location": "TestHub2",
+        "status_id": "in_transit_return",
+        "status": "In Transit for Return",
+        "remarks": "Bag in transit for return at TestHub2",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:05:54Z",
+        "location": "TEST DC",
+        "status_id": "bag_received",
+        "status": "Bag Received",
+        "remarks": "Bag received at TEST DC",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T09:06:15Z",
+        "location": "TEST DC",
+        "status_id": "recd_at_dc_rts",
+        "status": "Recived at RTS DC",
+        "remarks": "Item Received at RTS DC at TEST DC",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T10:01:29Z",
+        "location": "SFX TestHub",
+        "status_id": "rts_ofd",
+        "status": "Out for Delivery for RTS",
+        "remarks": "Item out for delivery to seller at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        },
+        {
+        "created": "2022-02-28T10:02:38Z",
+        "location": "SFX TestHub",
+        "status_id": "rts_nd",
+        "status": "Undelivered",
+        "remarks": "Item Return to Seller Not Delivered at SFX TestHub",
+        "awb_number": "SF222344412TST"
+        }
+    ]
+}
+
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+    
+        {
+           "message" : "Invalid AWB number"
+        }
+        
+
+## Multiple Order Details V4 Version [/v4/clients/bulk_track/]
+
+### Get Details of Multiple Delivery Requests [POST]
+
+This endpoint is used to get all details of multiple delivery requests, each defined by its AWB Number. The v4 version of tracking API provides the additional intermediate statuses like Item Manifested, Bag In Transit etc. The API can be used to track up to 50 AWBs in a single API call.
+
++ Parameters
+    + format (optional, string)
+        Type of response (json or xml) required
+        + Default: json
+
++ Request
+
+    + Header
+    
+            Authorization: Token <token_id here>
+            
+    + Body
+        
+            {
+                "awb_numbers": [
+                "SF1360594400TES",
+                "SF1360594301TES",
+                "SF1360593963TES"
+  ]
+}
+    
+    + Attributes
+    
+        + awb_numbers (required, array) - An array of AWB numbers
+        
+
++ Response 200 (application/json)
+
+  {
+    "message": "Success",
+    "data": [
+        {
+            "id": 852558400,
+            "client_name": "Test",
+            "client_order_id": "SPCH241063215",
+            "awb_number": "SF1360593963TES",
+            "product_value": 360.05,
+            "cod_amount": 0,
+            "payment_mode": "prepaid",
+            "order_date": "2024-08-27",
+            "promised_delivery_date": null,
+            "status_display": "Delivered to customer",
+            "status": "delivered",
+            "pickup_details": {
+                "name": "",
+                "contact": "",
+                "address_line_1": "",
+                "address_line_2": "",
+                "city": "Bangalore",
+                "state": "Karnataka",
+                "pincode": 562106,
+                "alternate_contact": "",
+                "sms_contact": "",
+                "latitude": null,
+                "longitude": null
+            },
+            "delivery_details": {
+                "name": "",
+                "contact": "",
+                "address_line_1": "",
+                "address_line_2": "",
+                "city": "Bengaluru",
+                "state": "Karnataka",
+                "pincode": 560064,
+                "alternate_contact": "",
+                "sms_contact": "",
+                "latitude": null,
+                "longitude": null
+            },
+            "product_details": [
+                {
+                    "sku_id": "8905040195551",
+                    "sku_name": "",
+                    "price": "",
+                    "return_reason": null,
+                    "category": "",
+                    "brand": null,
+                    "additional_details": "{}",
+                    "seller_name": "BRAND STUDIO LIFESTYLE PVT LTD",
+                    "seller_address": "Sy No. 330/B  324  331  331/B  331/1 and 334/1 Marasur Village  Kasaba Hobli  Anekal Taluk  Bangalore Bengaluru KA IN 562106",
+                    "seller_state": "Karnataka",
+                    "hsn_code": "",
+                    "invoice_no": "BSCH24108929",
+                    "sgst_amount": 0.0,
+                    "cgst_amount": 0.0,
+                    "igst_amount": 0.0,
+                    "gstin_number": "29AAGCB1468A1ZX",
+                    "total_tax_value": 0.0,
+                    "qc_required": true,
+                    "qc_rules": ""
+                }
+            ],
+            "tracking_details": [
+                {
+                    "created": "2024-08-27T11:29:31Z",
+                    "location": "Bangalore DC",
+                    "status_id": "new",
+                    "status": "New",
+                    "remarks": "Item New at Bangalore DC",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T04:16:31Z",
+                    "location": "Bangalore DC",
+                    "status_id": "received_from_client_warehouse",
+                    "status": "Received from Client Warehouse",
+                    "remarks": "Item Received from Client Warehouse at Bangalore DC",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T08:27:10Z",
+                    "location": "Bangalore DC",
+                    "status_id": "recd_at_fwd_dc",
+                    "status": "Received at Forward DC",
+                    "remarks": "Item Received at dc at Bangalore DC",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T08:34:52Z",
+                    "location": "Bangalore DC",
+                    "status_id": "item_manifested",
+                    "status": "Item added to Bag",
+                    "remarks": "Item added to bag at Bangalore DC",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T09:48:40Z",
+                    "location": "Bangalore DC",
+                    "status_id": "bag_in_transit",
+                    "status": "Bag In Transit",
+                    "remarks": "Bag in transit from Bangalore DC",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T12:05:17Z",
+                    "location": "BLR_ Yalahanka",
+                    "status_id": "bag_received",
+                    "status": "Bag Received",
+                    "remarks": "Bag received at BLR_ Yalahanka",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T12:36:00Z",
+                    "location": "BLR_ Yalahanka",
+                    "status_id": "recd_at_fwd_hub",
+                    "status": "Received at Forward Hub",
+                    "remarks": "Item Received at hub at BLR_ Yalahanka",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T12:51:58Z",
+                    "location": "BLR_ Yalahanka",
+                    "status_id": "assigned_for_delivery",
+                    "status": "Assigned For Delivery",
+                    "remarks": "Item Assigned at BLR_ Yalahanka",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T12:52:57Z",
+                    "location": "BLR_ Yalahanka",
+                    "status_id": "ofd",
+                    "status": "Out For Delivery",
+                    "remarks": "Item OFD at BLR_ Yalahanka",
+                    "awb_number": "SF1360593963TES"
+                },
+                {
+                    "created": "2024-08-28T14:31:39Z",
+                    "location": "BLR_ Yalahanka",
+                    "status_id": "delivered",
+                    "status": "Delivered",
+                    "remarks": "Item Delivered at BLR_ Yalahanka",
+                    "awb_number": "SF1360593963TES"
+                }
+            ]
+        },
+        {
+            "id": 852560471,
+            "client_name": "Test",
+            "client_order_id": "SPKH241810077",
+            "awb_number": "SF1360594301TES",
+            "product_value": 469.0,
+            "cod_amount": 574,
+            "payment_mode": "cod",
+            "order_date": "2024-08-27",
+            "promised_delivery_date": null,
+            "status_display": "Delivered to customer",
+            "status": "delivered",
+            "pickup_details": {
+                "name": "",
+                "contact": "",
+                "address_line_1": "",
+                "address_line_2": "",
+                "city": "Bangalore",
+                "state": "Karnataka",
+                "pincode": 562106,
+                "alternate_contact": "",
+                "sms_contact": "",
+                "latitude": null,
+                "longitude": null
+            },
+            "delivery_details": {
+                "name": "",
+                "contact": "",
+                "address_line_1": "",
+                "address_line_2": "",
+                "city": "BANGALORE",
+                "state": "Karnataka",
+                "pincode": 560040,
+                "alternate_contact": "",
+                "sms_contact": "",
+                "latitude": null,
+                "longitude": null
+            },
+            "product_details": [
+                {
+                    "sku_id": "8905745583530",
+                    "sku_name": "",
+                    "price": "",
+                    "return_reason": null,
+                    "category": "",
+                    "brand": null,
+                    "additional_details": "{}",
+                    "seller_name": "BRAND STUDIO LIFESTYLE PVT.LTD",
+                    "seller_address": "BRAND STUDIO LIFESTYLE PVT.LTD  Block No. 1 Sy.No.18 Bandk Logistics ParkKasaba Hobli  Kumbarnahalli  Bangalore South",
+                    "seller_state": "Karnataka",
+                    "hsn_code": "",
+                    "invoice_no": "BSKH24297919",
+                    "sgst_amount": 0.0,
+                    "cgst_amount": 0.0,
+                    "igst_amount": 0.0,
+                    "gstin_number": "29AAGCB1468A1ZX",
+                    "total_tax_value": 0.0,
+                    "qc_required": true,
+                    "qc_rules": ""
+                }
+            ],
+            "tracking_details": [
+                {
+                    "created": "2024-08-27T11:31:25Z",
+                    "location": "Bangalore DC",
+                    "status_id": "new",
+                    "status": "New",
+                    "remarks": "Item New at Bangalore DC",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T04:22:00Z",
+                    "location": "Bangalore DC",
+                    "status_id": "received_from_client_warehouse",
+                    "status": "Received from Client Warehouse",
+                    "remarks": "Item Received from Client Warehouse at Bangalore DC",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T08:26:09Z",
+                    "location": "Bangalore DC",
+                    "status_id": "recd_at_fwd_dc",
+                    "status": "Received at Forward DC",
+                    "remarks": "Item Received at dc at Bangalore DC",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T08:31:13Z",
+                    "location": "Bangalore DC",
+                    "status_id": "item_manifested",
+                    "status": "Item added to Bag",
+                    "remarks": "Item added to bag at Bangalore DC",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T09:06:44Z",
+                    "location": "Bangalore DC",
+                    "status_id": "bag_in_transit",
+                    "status": "Bag In Transit",
+                    "remarks": "Bag in transit from Bangalore DC",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T11:46:01Z",
+                    "location": "BLR_Magadiroad",
+                    "status_id": "bag_received",
+                    "status": "Bag Received",
+                    "remarks": "Bag received at BLR_Magadiroad",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T11:58:00Z",
+                    "location": "BLR_Magadiroad",
+                    "status_id": "recd_at_fwd_hub",
+                    "status": "Received at Forward Hub",
+                    "remarks": "Item Received at hub at BLR_Magadiroad",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T12:46:55Z",
+                    "location": "BLR_Magadiroad",
+                    "status_id": "assigned_for_delivery",
+                    "status": "Assigned For Delivery",
+                    "remarks": "Item Assigned at BLR_Magadiroad",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T12:50:28Z",
+                    "location": "BLR_Magadiroad",
+                    "status_id": "ofd",
+                    "status": "Out For Delivery",
+                    "remarks": "Item OFD at BLR_Magadiroad",
+                    "awb_number": "SF1360594301TES"
+                },
+                {
+                    "created": "2024-08-28T13:12:53Z",
+                    "location": "BLR_Magadiroad",
+                    "status_id": "delivered",
+                    "status": "Delivered",
+                    "remarks": "Item Delivered at BLR_Magadiroad",
+                    "awb_number": "SF1360594301TES"
+                }
+            ]
+        },
+        {
+            "id": 852560747,
+            "client_name": "Test",
+            "client_order_id": "SPKH241810054",
+            "awb_number": "SF1360594400TES",
+            "product_value": 569.05,
+            "cod_amount": 0,
+            "payment_mode": "prepaid",
+            "order_date": "2024-08-27",
+            "promised_delivery_date": null,
+            "status_display": "Delivered to customer",
+            "status": "delivered",
+            "pickup_details": {
+                "name": "",
+                "contact": "",
+                "address_line_1": "",
+                "address_line_2": "",
+                "city": "Bangalore",
+                "state": "Karnataka",
+                "pincode": 562106,
+                "alternate_contact": "",
+                "sms_contact": "",
+                "latitude": null,
+                "longitude": null
+            },
+            "delivery_details": {
+                "name": "",
+                "contact": "",
+                "address_line_1": "",
+                "address_line_2": "",
+                "city": "BANGALORE",
+                "state": "Karnataka",
+                "pincode": 560076,
+                "alternate_contact": "",
+                "sms_contact": "",
+                "latitude": null,
+                "longitude": null
+            },
+            "product_details": [
+                {
+                    "sku_id": "8909107428927",
+                    "sku_name": "",
+                    "price": "",
+                    "return_reason": null,
+                    "category": "",
+                    "brand": null,
+                    "additional_details": "{}",
+                    "seller_name": "BRAND STUDIO LIFESTYLE PVT.LTD",
+                    "seller_address": "BRAND STUDIO LIFESTYLE PVT.LTD  Block No. 1 Sy.No.18 Bandk Logistics ParkKasaba Hobli  Kumbarnahalli  Bangalore South",
+                    "seller_state": "Karnataka",
+                    "hsn_code": "",
+                    "invoice_no": "BSKH24297923",
+                    "sgst_amount": 0.0,
+                    "cgst_amount": 0.0,
+                    "igst_amount": 0.0,
+                    "gstin_number": "29AAGCB1468A1ZX",
+                    "total_tax_value": 0.0,
+                    "qc_required": true,
+                    "qc_rules": ""
+                }
+            ],
+            "tracking_details": [
+                {
+                    "created": "2024-08-27T11:32:01Z",
+                    "location": "Bangalore DC",
+                    "status_id": "new",
+                    "status": "New",
+                    "remarks": "Item New at Bangalore DC",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T04:38:02Z",
+                    "location": "Bangalore DC",
+                    "status_id": "received_from_client_warehouse",
+                    "status": "Received from Client Warehouse",
+                    "remarks": "Item Received from Client Warehouse at Bangalore DC",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T08:26:48Z",
+                    "location": "Bangalore DC",
+                    "status_id": "recd_at_fwd_dc",
+                    "status": "Received at Forward DC",
+                    "remarks": "Item Received at dc at Bangalore DC",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T08:35:45Z",
+                    "location": "Bangalore DC",
+                    "status_id": "item_manifested",
+                    "status": "Item added to Bag",
+                    "remarks": "Item added to bag at Bangalore DC",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T09:36:29Z",
+                    "location": "Bangalore DC",
+                    "status_id": "bag_in_transit",
+                    "status": "Bag In Transit",
+                    "remarks": "Bag in transit from Bangalore DC",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T12:02:48Z",
+                    "location": "BLR_Bannerghatta",
+                    "status_id": "bag_received",
+                    "status": "Bag Received",
+                    "remarks": "Bag received at BLR_Bannerghatta",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T12:22:11Z",
+                    "location": "BLR_Bannerghatta",
+                    "status_id": "recd_at_fwd_hub",
+                    "status": "Received at Forward Hub",
+                    "remarks": "Item Received at hub at BLR_Bannerghatta",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T12:58:24Z",
+                    "location": "BLR_Bannerghatta",
+                    "status_id": "assigned_for_delivery",
+                    "status": "Assigned For Delivery",
+                    "remarks": "Item Assigned at BLR_Bannerghatta",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T12:58:31Z",
+                    "location": "BLR_Bannerghatta",
+                    "status_id": "ofd",
+                    "status": "Out For Delivery",
+                    "remarks": "Item OFD at BLR_Bannerghatta",
+                    "awb_number": "SF1360594400TES"
+                },
+                {
+                    "created": "2024-08-28T14:09:41Z",
+                    "location": "BLR_Bannerghatta",
+                    "status_id": "delivered",
+                    "status": "Delivered",
+                    "remarks": "Item Delivered at BLR_Bannerghatta",
+                    "awb_number": "SF1360594400TES"
+                }
+            ]
+        }
+    ]
+}
+
+
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+    
+        {
+           "message" : "Invalid AWB Number"
+        }
+
++ Response 400 (application/json)
+        {
+            "message": "Number of AWBs exceeded. Max count allowed is 50"
+        }
+
+
+# group Update Order Details
+
+## Update Order Data  [/v3/clients/order_update/]
+
+### Request to Update Order Data [POST]
+The endpoint allows you to edit delivery_details, pickup_details,return_details and order status for an order.
+
+The API functionalities are as follows:
+
+* This API can be used to update the order status as `rts` / `rto` / `reopen_ndr` only if the current status of the order is either `on_hold` or `cancelled_by_customer` 
+* The API can be used to update customer details along with the Pincode, but the Pincode can only be updated twice per order and only for intra-city orders.
+* The mandatory/required attributes should be passed as `null` if they do not need to be updated.
+* The Pincode cannot be updated when the current status of the order is `delivered` .
+* This API can be used to update the payment mode of the order to prepaid if the `cod_amount` is passed as 0, but the updation can only be done after the pickup phase i.e post the item is picked.
+* The shipment weight can be updated only once, and only while the shipment is in new status.
+* The delivery_details can be updated before OFD, the return_details can be edited until the order is cancelled_by_customer and pickup_details can be edited until the order is assigned_for_seller_pickup.
+
+<br><br>The `Authorization` header that should be used while sending request will look like:
+<br>
+`Token <auth token here>` 
+<br>The `Authorization` value itself contains the Word “Token”.
+
+##Requests
+This is the URL to make an actual request:<br>
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api/v3/clients/order_update/ `|
+|Production|`https://dale.shadowfax.in/api/v3/clients/order_update/ `|
+
++ Request
+
+    + Attributes
+    
+        + awb_numbers (required) - Awb number of an order needs to be passed.
+        + delivery_details  - Pass the customer/ delivery details
+            + contact  - Pass customer contact.
+            + alternate_contact  - Pass customer contact.
+            + customer_address  - Pass customer address.
+            + pincode  - Pass customer/delivery pincode.
+            + latitude - Pass customer/delivery latitude.
+            + longitude - Pass customer/delivery longitude.
+        + pickup_details  - Pass the pickup details
+            + contact  - Pass pickup contact.
+            + customer_address  - Pass pickup address.
+            + pincode  - Pass pickup pincode.
+            + latitude - Pass pickup latitude.
+            + longitude - Pass pickup longitude.    
+        + return_details  - Pass the return details
+            + contact  - Pass return contact.
+            + return_address  - Pass return address.
+            + pincode  - Pass return pincode.
+            + latitude - Pass return latitude.
+            + longitude - Pass return longitude.    
+        + order_details  - Pass order details.
+            + cod_amount (number) - Pass the cod amount that needs to be updated.
+            + eway_bill_number - Pass the e-way bill number for the respective awb number.
+            + return_eway_bill_number - Pass the return e-way bill number for the respective awb number once the shipment is in RTO status.
+            + invoice_number - Pass the invoice number.
+            + actual_weight - Weight of the Product (in gms)
+            + volumetric_weight - Volumetric Weight of the Product. default : 0.0 (volumetric weight=(lbh)/5000)
+        + status_update  
+            + status  -Pass the status that needs to be updated. The status values should be `rts` / `rto` / `reopen_ndr`.
+        
+        
+        
+
+    + Body 
+
+        {
+            "awb_number": "SF47850936san",
+            "delivery_details": {
+                "contact": "9999999999",
+                "latitude":"77.6174",
+                "longitude": "12.9226",
+                "alternate_contact": "+919999999999",
+                "customer_address": "#253, 2nd cross hebbal",
+                "pincode": 560008
+            },
+            "pickup_details": {
+                "contact": "9123456781",
+                "alternate_contact": "9213456780",
+                "latitude": null,
+                "longitude": null,
+                "customer_address": "pickupaddress verkvj lrvnkjt",
+                "pincode": "560007"
+            },
+            "return_details": {
+                 "contact": "9123456781",
+                 "latitude": "89.09",
+                 "longitude": "67.09",
+                 "email": "abc@gmail.com",
+                 "capture_delivery_image": true,
+                 "return_address": "abcd",
+                 "pincode": "560007"
+             },
+            "order_details": {
+                "cod_amount": 0,
+                "eway_bill_number": "xyz",
+                "invoice_number": "abc",
+                "return_eway_bill_number": "def",
+                "actual_weight": "539.127",
+                "volumetric_weight": "1498.314"
+            },
+            "status_update": {
+                "status": null
+            }
+        }
+
+    + Headers
+    
+            Authorization: Token <token_id here>
+            Content-Type: application/json
+
++ Response 200 (application/json)
+    
+        {
+            "message": "Request accepted."
+        }
+
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 401 (application/json)
+    
+        {
+           "detail": "Invalid token."
+        }
+        
++ Response 400 (application/json)
+    
+        {
+            "message": "Status transition from recd_at_fwd_hub to ndr is not allowed"
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "message": "{\"message\":\"SF36981974TED pincode has been updated 2 times. The Pincode request is stored, will be validated and updated.\"}"
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "message": "{\"message\":\"Intercity pincode updates are not allowed\"}"
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "message": "Customer details could not be updated for SF36981985TED due to invalid status. Current status is Delivered to customer"
+        }
+        
++ Response 400 (application/json)
+
+        {
+            "message": "Customer contact number can not be blank"
+        }
+
+    
+#group Order Cancellation
+## Order Cancellation [/v3/clients/orders/cancel/]
+
+### Cancel a Request [POST]
+
+This endpoint cancels marketplace or warehouse orders using the AWB Number or unique client order id, along with the cancellation reason. 
+
+For successful cancellation, we give a Response message as “Request has been marked as cancelled” & 200 as response code.
+
+For below mentioned statues, the API queues the cancellation request, returning 'Request is queued for cancellation' & 304 as response code.
+* Out for pickup (ofp)
+* received at reverse hub (recd_at_rev_hub)
+* Out for delivery (ofd)
+* Bag In Transit (bag_in_transit)
+* Bag Received at Via (bag_received_at_via)
+
+The cancellation is executed when the shipments are received in the next SFX facility. In case the shipment is “Delivered”, then the canceling request is not executed.
+
+Cancellation after delivery results in failure, returning 'Order cannot be cancelled. Invalid state.' & 400 as response code.
+
++ Request
+
+    + Body 
+    
+            { 
+                "request_id": "SF10000002NRN",
+                "cancel_remarks": "Request cancelled by customer"
+            }
+            
+    + Headers
+    
+            Authorization: Token Authorization
+            
+    + Attributes
+    
+        + Required Parameters(required, object)
+            + request_id(required, string) - AWB number of the order or the client order id of the order. There should be a unique client order id for each order.
+            + cancel_remarks(required , string) - Valid options are discussed in the description
+            
++ Response 200 (application/json)
+    
+        {
+            "responseMsg": "Request has been marked as cancelled",
+            "responseCode": 200
+        }
+
++ Response 200 (application/json)
+
+        {
+            "responseMsg": "Request is queued for cancellation.",
+            "responseCode": 304
+        }
+
++ Response 200 (application/json)
+
+        {
+            "responseMsg": "The request is already in its cancellation phase",
+            "responseCode": 200
+        }
+        
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Please enter a valid AWB Number",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Order cannot be cancelled. Invalid state.",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Multiple Orders found for the given Request Id",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Unable to cancel the request. Please try again!",
+            "responseCode": 500
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Cannot cancel order from Pincode Updated",
+            "responseCode": 400
+        }
+
+
+#group Escalation API
+## Escalation API [/v1/clients/support/issue/]
+### Escalation API [POST]
+This endpoint is used  take escalations from clients in real time. Based on the issue category, a ticket would be raised in the system. This API is to take the escalation input from the clients. The action being taken on those tickets .
+
+####Issue Category options 
+
+|Issue Category                        |Issue Category Code  |Validations                                                                                                     |  Order Type           |
+|--------------------------------------|---------------------|----------------------------------------------------------------------------------------------------------------|---------------------|
+| `Delayed Delivery`                   | 1                   |To be passed post an order is successfully picked in system and not delivered post to Estimated Delivery Date   |    Forward          |
+| `Expedite Pickup - Customer`         | 2                   |To be passed only if the order is not yet picked from the Customer                                              |    Reverse          |
+| `Expedite Pickup - Seller`           | 3                   |To be passed only until the seller pickup is not completed                                                      |    Forward          |
+| `Status Mismatch`                    | 4                   |To be passed when there is a mismatch in expected and received order status                                     |    Forward/Reverse  |
+| `Delivery Dispute`                   | 5                   |To be passed only post the order is marked Delivered in the system                                              |    Forward          |
+
+
++ Request
+    + Body
+            {
+                "awb_number" : "SF00000000TC",
+                "issue_category" : 1
+            }
+            
+         
+            
+    + Headers
+            Authorization: Token Authorization
+    + Attributes
+        + Required Parameters(required, object)
+            + awb_number(required, string) - It should be a valid Awb number.
+            + issue_category(required , number) - Issue category will be one among choices given in Issue Category options .
+
++ Response 200 (application/json)
+
+        {
+               "message": "Issue received",
+               "status": "SUCCESS"
+        }
+           
+
+
+#group Get POD Details
+
+## Get POD Details [/v1/clients/pod_details/]
+
+### Get POD Details[POST]
+
+Using this API, you can get POD (proof of delivery) details for multiple delivery requests, each defined by their AWB number.
+This API will allow you to get pod details for up to 100 AWB numbers.
+`To obtain POD details, the order status of the AWB_number's passed must be delivered or rts_d`
+
++ Request (application/json)
+    
+    + Headers
+    
+            Authorization: Token 1234567890abc1234567890xyz
+            
+
+    + Body
+
+        {
+            "awb_numbers": [
+                "SF17102220TE",
+                "SF17102219TE",
+                "SF16330181TE"
+            ]
+        }
+
++ Response 200 (application/json)
+
+
+        {
+            "message": "Success",
+            "pod_details": {
+                "SF16330181TE": {
+                    "recipient": null,
+                    "recipient_contact": "None",
+                    "recipient_signature": "['https://s3-us-west-2.amazonaws.com/sfxdocs/seller/delivery_report/report_1992_1636536053.pdf', 'https://s3-us-west-2.amazonaws.com/sfxdocs/seller/delivery_report/report_1992_1636536184.pdf']",
+                    "recipient_name": "None"
+                },
+                "SF17102219TE": {
+                    "recipient": "CUSTOMER",
+                    "recipient_contact": "None",
+                    "recipient_signature": "None",
+                    "recipient_name": "Deepak Rastogi"
+                },
+                "SF17102220TE": {
+                    "recipient": "CUSTOMER",
+                    "recipient_contact": "None",
+                    "recipient_signature": "None",
+                    "recipient_name": "Deepak Rastogi"
+                }
+            }
+        }
+    
++ Response 400 (application/json)   
+
+            {
+                "message": "AWB does not belong to this client"
+            }
+            
++ Response 400 (application/json)
+
+            {
+                "message": "Incorrect AWB"
+            }
+            
++ Response 400 (application/json)
+
+        {
+            "message": "Max limit on count is 100. Please send a list within 100 AWBs"
+        }
+          
++ Response 400 (application/json)
+
+        {
+            "message": "Incorrect Status"
+        }
+        
++ Response 401 (application/json)
+
+        {
+            "detail": "Invalid token."
+        }
+
+
+
+# Group Generate QR Code
+## Generate QR Code v2 Version [POST]
+This API would help you to generate the QR code on invoices and labels for B2C shipments as per the guidelines of the Government of India. Using this API, Clients can get the QR code after the order has been placed successfully in the Shadowfax system. API would return the respective QR string generated with all the parameters passed in the request which the client would use to generate QR code and print it on the invoices. Clients can show the same QR code on 
+the invoice/shipment labels and payment can be made by this QR code by the end customer.
+
+## Requests
+This is the URL to make an actual request:<br>
+|||
+|------------|-----------|
+|Staging|`https://saruman.staging.shadowfax.in/api/v2/clients/qr_code/generate/`|
+|Production|`https://saruman.shadowfax.in/api/v2/clients/qr_code/generate/`|
+
+
+
++ Request (application/json)
+
+    + Body
+    
+            {
+                "awb_number": "SF29534985888TER",
+                "gstin": "36AAVCS6697K1Z4",
+                "invoice_number": "ADSf",
+                "invoice_date": "2021-03-25 12:20:16",
+                "amount":1.00,
+                "taxableValue":12.00,
+                "gstPercentage":12.00,
+                "gst": 23.00,
+                "cgst": 0.00,
+                "sgst": 23.00,
+                "igst": 23.00,
+                "cess": 0.00
+            }
+            
+
+    + Headers
+    
+            Authorization: Token <token_id>
+            
+    + Attributes
+        
+        + Required Parameters(required, object)
+            + awb_number(required, string) - AWB Number of the shipment
+            + gstin(required , string) - Seller GSTIN
+            + invoice_number(required, string) - Invoice Number for the Shipment
+            + invoice_date(required, string) - Invoice Date
+            + amount(required, string) - Pass the cash amount to be collected for which payment has to be made.
+            + taxableValue(required, string) - Total invoice value (declared value) of the shipment.
+            + gstPercentage(required, string) - GST Tax slab rate e.g. 12% / 18% in the format of number i.e. 18 or 12 or 24
+            + gst(required, string) - Total GST tax amount charged. Should be equal to INVOICE_AMOUNT * GST_RATE
+            + cgst(required, string) - CGST portion of total GST amount. Can be 0 or greater than 0
+            + igst(required, string) - IGST portion of total GST amount. Can be 0 or greater than 0
+            + sgst(required, string) - SGST portion of total GST amount. Can be 0 or greater than 0
+            + cess(required, string) - Cess amount if any. Can be 0 or greater than 0
+            
+    
+        
+
++ Response 200 (application/json)
+
+        {
+            "message": "success",
+            "payment_mode": "UPI/QR",
+            "qr_details": {
+                "qr_code_string": "upi://pay?pa=BHARATPE30029095568@yesbankltd&pn=Shadowfax+Technologies+Private+Limited&cu=INR&tn=Pay+To+Shadowfax+Technologies+Private+Limited&tr=BPD29095568&am=1.0&awb_number=SF29534985888TER&taxableValue=12.0&gstin=36AAVCS6697K1Z4&gstPercentage=12.0&gstBreakup=gst:23.0|cgst:0.0|sgst:23.0|igst:23.0|cess:0.0&invoice_number=ADSf&invoice_date=2021-03-25 12:20:16",
+                "transaction_id": "BHARATPE30029095568"
+            }
+        }
+
++ Response 403 (application/json)
+
+        {
+            "detail": "You do not have permission to perform this action."
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": {
+                "awb_number": [
+                    "This field may not be blank."
+                ]
+            }
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": {
+                "awb_number": [
+                    "This field is required."
+                ]
+            }
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Only Cash payments are enabled for this order."
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": {
+                "amount": [
+                    "Invalid transaction due to negative pay amount."
+                ]
+            }
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Invalid AWB."
+        }
+        
++ Response 400 (application/json)
+
+        {
+            "message": "Invalid Client."
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "QR Code can only be generated for customer delivery."
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "QR Code can only be generated for COD."
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Failed to generate qr code for delivery_request."
+        }
+        
++ Response 400 (application/json)
+        
+        {
+            "message": "Amount entered does not match with COD amount"
+        }
+
+
+# Group Issues and Bugs
+Please drop in a mail to <ecom.techsupport@shadowfax.in> to report any bug(s) in the Client APIs. Any issue with respect to integration
+can also be raised on this forum. Our team shall review the issue and get back to you in due time.
+
+ Client Queries Troubleshooter - https://docs.google.com/spreadsheets/d/1c7EfdwrxQrqz9zhwaa4bE0dI0EI41PT5ynY74aDJ7S8/edit#gid=1815509323
+
+# Group Appendix
+
+## <a name = "Appendix_On_Hold" > On Hold Remarks for marketplace </a>
+
+Following are the remarks shared in the cases when the order is marked as `On Hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Incorrect/incomplete contact info                    |
+| On Hold | Pincode/address mismatch           |
+| On Hold | Customer wants open delivery               |
+| On Hold | Customer shifted from given address           |
+| On Hold | Non Serviceable Area        |
+| On Hold | Customer wants delivery on another address      |
+| On Hold | High Volume Shipment           |
+| On Hold | Three succesful attempts done           |
+| On Hold | Customer wants delivery beyond cut-off date             |
+| On Hold | Payment Issue         |
+| On Hold | High Ageing                     |
+| On Hold | Successful attempts done         |
+| On Hold | COVID Restricted Area |
+| On Hold | Same City Pincode Update      |
+| On Hold | InterCity Shipment      |
+| On Hold | Address is Junk         |
+| On Hold | RTO Pending - Max attempts exhausted       |
+| On Hold | RTO Pending - OTP validated cancellation             |
+| On Hold | RTO Pending - OTP not validated cancellation              |
+| On Hold | RTO Pending - Cancelled by customer through webapp                     |
+| On Hold | RTO Pending - Awaiting runsheet closure |
+
+
+## <a name = "Appendix_On_pickupHold" > Pickup On Hold Remarks for marketplace </a>
+
+Following are the remarks shared in the cases when the order is marked as `pickup_on_hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Customer want pick-up from Non-Serviceable area                    |
+| On Hold | Pincode Address Mismatch           |
+| On Hold | Incorrect contact number               |
+| On Hold | Address issue           |
+| On Hold | Customer wants replacement/refund first        |
+| On Hold | Incomplete information received from client      |
+| On Hold | Mandatory check not available           |
+| On Hold | Pickup already done by other DSP           |
+| On Hold | Shipment is not picked             |
+| On Hold | Successful 3 attempts done         |
+| On Hold | Large Shipment                      |
+| On Hold | Customer wants pickup beyond cut off time         |
+| On Hold | Customer changed his/her mind |
+| On Hold | Doorstep QC Brandbox not available      |
+| On Hold | DOORSTEP_QC_PRICE_TAG_MISSING      |
+| On Hold | DOORSTEP_QC_PRODUCT_DAMAGE         |
+| On Hold | DOORSTEP_QC_PRODUCT_MISMATCH       |
+| On Hold | DOORSTEP_QC_USED_ITEM              |
+| On Hold | Unable to pickup in given slot              |
+| On Hold | Non Serviceable Area                      |
+| On Hold | Seller wants pickup beyond cut off time |
+| On Hold | COVID Restricted Area                    |
+
+## <a name = "Appendix_On_pushpickupHold" > Pickup On Hold Remarks for marketplace PUSH API </a>
+
+Following are the remarks shared in the cases when the order is marked as `pickup_on_hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Customer want pick-up from Non-Serviceable area                    |
+| On Hold | Pincode Address Mismatch           |
+| On Hold | Incorrect contact number               |
+| On Hold | Address issue           |
+| On Hold | Customer wants replacement/refund first        |
+| On Hold | Incomplete information received from client      |
+| On Hold | Mandatory check not available           |
+| On Hold | Pickup already done by other DSP           |
+| On Hold | Shipment is not picked             |
+| On Hold | Successful 3 attempts done         |
+| On Hold | Large Shipment                      |
+| On Hold | Customer wants pickup beyond cut off time         |
+| On Hold | Customer changed his/her mind |
+| On Hold | Doorstep QC Brandbox not available      |
+| On Hold | DOORSTEP_QC_PRICE_TAG_MISSING      |
+| On Hold | DOORSTEP_QC_PRODUCT_DAMAGE         |
+| On Hold | DOORSTEP_QC_PRODUCT_MISMATCH       |
+| On Hold | DOORSTEP_QC_USED_ITEM              |
+| On Hold | Unable to pickup in given slot              |
+| On Hold | Non Serviceable Area                      |
+| On Hold | Seller wants pickup beyond cut off time |
+| On Hold | COVID Restricted Area                    |
+
+
+## <a name = "Appendix_nc" > Not Contactable Remarks for marketplace </a>
+Following are the remarks shared in the cases when the order is marked as `nc`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Contactable | Customer not contactable           |
+| Not Contactable | Residence or Office Closed         |
+
+
+## <a name = "Appendix_pushnc" > Not Contactable Remarks for marketplace PUSH API </a>
+Following are the remarks shared in the cases when the order is marked as `nc`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Contactable | Customer not contactable           |
+| Not Contactable | Residence or Office Closed         |
+
+
+## <a name = "Appendix_cancelled" > Cancelled Remarks </a>
+Following are the remarks shared in the cases when the order is marked as `cancelled`.
+
+| Status    | Remarks                            |
+|-----------|------------------------------------|
+| Cancelled | Cancelled by customer              |
+| Cancelled | Cancelled by Client                |
+| Cancelled | Third Successful Attempt           |
+| Cancelled | Cancelled as per client's request  |
+| Cancelled | Central Ops Queued Return  |
+
+
+## <a name = "Appendix_pushcancelled" > Cancelled Remarks for Marketplace PUSH API </a>
+Following are the remarks shared in the cases when the order is marked as `cancelled`.
+
+| Status    | Remarks                            |
+|-----------|------------------------------------|
+| Cancelled | Cancelled by customer              |
+| Cancelled | Cancelled by Client                |
+| Cancelled | Third Successful Attempt           |
+| Cancelled | Cancelled as per client's request  |
+| Cancelled | Central Ops Queued Return  |
+
+
+## <a name = "Appendix_pushrtowarehouse" > Return to origin for warehouse PUSH API </a>
+Following are the remarks shared in the cases when the order is marked as `RTO`.
+
+| Status    | Remarks                            |
+|-----------|------------------------------------|
+| RTO | NSZ/Junk/Different City/Long Distance Pincode              |
+| RTO | Client instructions for RTO                |
+| RTO | >= 3+ Attempt RTO           |
+| RTO | Exception  |
+| RTO | Misrouted/Pincode Updated|
+| RTO | Validated by OTP                |
+| RTO | Max IVR attempts exhausted           |
+| RTO | Validated by IVR/Webapp  |
+| RTO | Cancelled by client over API|
+| RTO | Marked return by cron due to inactivity|
+
+## <a name = "Appendix_not_attempted" > Not Attempted Remarks </a>
+Following are the remarks shared in the cases when the order is marked as `not_attempted`.
+
+| Status        | Remarks                            |
+|---------------|------------------------------------|
+| Not Attempted | Not Attempted                      |
+| Not Attempted | Vehicle Breakdown                  |
+| Not Attempted | Heavy Rain                         |
+
+## <a name = "Appendix_pushnot_attempted" > Not Attempted Remarks for Marketplace PUSH Api </a>
+Following are the remarks shared in the cases when the order is marked as `not_attempted`.
+
+| Status        | Remarks                            |
+|---------------|------------------------------------|
+| Not Attempted | Not Attempted                      |
+| Not Attempted | Vehicle Breakdown                  |
+| Not Attempted | Heavy Rain                         |
+
+## <a name = "Appendix_On_Holdwarehouse" > On Hold Remarks for warehouse </a>
+
+Following are the remarks shared in the cases when the order is marked as `On Hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Incorrect/incomplete contact info                   |
+| On Hold | Pincode/address mismatch           |
+| On Hold | Customer wants open delivery              |
+| On Hold | Customer shifted from given address           |
+| On Hold | Non Serviceable Area        |
+| On Hold | Customer wants delivery on another address      |
+| On Hold | High Volume Shipment           |
+| On Hold | Three succesful attempts done           |
+| On Hold | Customer wants delivery beyond cut-off date            |
+| On Hold | Payment Issue         |
+| On Hold | High Ageing                      |
+| On Hold | Successful attempts done         |
+| On Hold | COVID Restricted Area |
+| On Hold | Eligible for liquidation      |
+| On Hold | Liquidated      |
+| On Hold | Same City Pincode Update        |
+| On Hold | InterCity Shipment      |
+| On Hold | Address is Junk              |
+| On Hold | RTO Pending - Max attempts exhausted            |
+| On Hold | RTO Pending - OTP validated cancellation                      |
+| On Hold | RTO Pending - OTP not validated cancellation |
+| On Hold | RTO Pending - Cancelled by customer through webapp                    |
+| On Hold | RTO Pending - Awaiting runsheet closure                    |
+
+
+## <a name = "Appendix_pushOn_Holdmarketplace" > On Hold Remarks for Marketplace PUSH API </a>
+
+Following are the remarks shared in the cases when the order is marked as `On Hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Incorrect/incomplete contact info                   |
+| On Hold | Pincode/address mismatch           |
+| On Hold | Customer wants open delivery              |
+| On Hold | Customer shifted from given address           |
+| On Hold | Non Serviceable Area        |
+| On Hold | Customer wants delivery on another address      |
+| On Hold | High Volume Shipment           |
+| On Hold | Three succesful attempts done           |
+| On Hold | Customer wants delivery beyond cut-off date            |
+| On Hold | Payment Issue         |
+| On Hold | High Ageing                      |
+| On Hold | Successful attempts done         |
+| On Hold | COVID Restricted Area |
+| On Hold | Eligible for liquidation      |
+| On Hold | Liquidated      |
+| On Hold | Same City Pincode Update        |
+| On Hold | InterCity Shipment      |
+| On Hold | Address is Junk              |
+| On Hold | RTO Pending - Max attempts exhausted            |
+| On Hold | RTO Pending - OTP validated cancellation                      |
+| On Hold | RTO Pending - OTP not validated cancellation |
+| On Hold | RTO Pending - Cancelled by customer through webapp                    |
+| On Hold | RTO Pending - Awaiting runsheet closure                    |
+
+## <a name = "Appendix_pushOn_Holdwarehouse" > On Hold Remarks for Warehouse PUSH API </a>
+
+Following are the remarks shared in the cases when the order is marked as `On Hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Incorrect/incomplete contact info                   |
+| On Hold | Pincode/address mismatch           |
+| On Hold | Customer wants open delivery              |
+| On Hold | Customer shifted from given address           |
+| On Hold | Non Serviceable Area        |
+| On Hold | Customer wants delivery on another address      |
+| On Hold | High Volume Shipment           |
+| On Hold | Three succesful attempts done           |
+| On Hold | Customer wants delivery beyond cut-off date            |
+| On Hold | Payment Issue         |
+| On Hold | High Ageing                      |
+| On Hold | Successful attempts done         |
+| On Hold | COVID Restricted Area |
+| On Hold | Eligible for liquidation      |
+| On Hold | Liquidated      |
+| On Hold | Same City Pincode Update        |
+| On Hold | InterCity Shipment      |
+| On Hold | Address is Junk              |
+| On Hold | RTO Pending - Max attempts exhausted            |
+| On Hold | RTO Pending - OTP validated cancellation                      |
+| On Hold | RTO Pending - OTP not validated cancellation |
+| On Hold | RTO Pending - Cancelled by customer through webapp                    |
+| On Hold | RTO Pending - Awaiting runsheet closure                    |
+
+
+## <a name = "Appendix_ncwarehouse" > Not Contactable Remarks </a>
+Following are the remarks shared in the cases when the order is marked as `nc`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Contactable | Customer not contactable           |
+| Not Contactable | Item Customer Not Contactable at <SFX Facility>        |
+
+
+## <a name = "Appendix_ncpushwarehouse" > Not Contactable Remarks for Warehouse PUSH API </a>
+Following are the remarks shared in the cases when the order is marked as `nc`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Contactable | Customer not contactable           |
+| Not Contactable | Item Customer Not Contactable at <SFX Facility>     

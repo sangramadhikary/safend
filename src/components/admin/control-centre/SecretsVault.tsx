@@ -1,3 +1,4 @@
+'use client';
 
 import { useState } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
@@ -13,7 +14,7 @@ export function SecretsVault() {
   // Mock secrets data
   const secrets = [
     { id: 1, name: "AWS_ACCESS_KEY", value: "AKIA1234567890ABCDEF", type: "API Key" },
-    { id: 2, name: "STRIPE_SECRET", value: "sk_test_123456789012345678901234", type: "Payment" },
+    { id: 2, name: "STRIPE_SECRET", value: "sk_test_dummy_mock_key_0000000000", type: "Payment" },
     { id: 3, name: "SENDGRID_API_KEY", value: "SG.abcdefghijklmnopqrstuvwxyz", type: "Communication" },
     { id: 4, name: "MAPS_API_KEY", value: "AIza1234567890abcdefghijklmnopqrstuvwxyz", type: "Maps" }
   ];

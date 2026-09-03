@@ -1,3 +1,4 @@
+'use client';
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
@@ -111,7 +112,7 @@ export function RacingBarChart({
                   exit={{ opacity: 0, scale: 0.8 }}
                   transition={{ delay: index * 0.1, duration: 0.5 }}
                 >
-                  <div className="text-xs text-center font-medium min-h-[2rem] flex items-center">
+                  <div className="text-xs text-center font-medium min-h-8 flex items-center">
                     {formatValue(item.value, item.maxValue)}
                   </div>
                   <motion.div

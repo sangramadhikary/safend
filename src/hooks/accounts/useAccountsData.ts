@@ -1,7 +1,8 @@
+'use client';
 
 import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { useAccountsContext } from '@/context/AccountsContext';
+import { useAccountsContext } from '@/contexts/AccountsContext';
 import { handleApiError } from '@/utils/errorHandler';
 
 type FetchStatus = 'idle' | 'loading' | 'success' | 'error';
@@ -28,9 +29,7 @@ export function useAccountsData<T>(
     setContextError(null);
     
     try {
-      console.log('Fetching data with:', fetchFn.name || 'anonymous function');
       const result = await fetchFn();
-      console.log('Data fetched successfully:', result);
       setData(result);
       setStatus('success');
     } catch (err) {
@@ -81,9 +80,7 @@ export function useAccountsMutation<T, D>(
     setContextError(null);
     
     try {
-      console.log('Executing mutation with data:', inputData);
       const result = await mutationFn(inputData);
-      console.log('Mutation completed successfully:', result);
       setData(result);
       setStatus('success');
       
@@ -147,9 +144,7 @@ export function useAccountsBatchMutation<T, D>(
     setContextError(null);
     
     try {
-      console.log('Executing batch mutation with data:', inputData);
       const result = await mutationFn(inputData);
-      console.log('Batch mutation completed successfully:', result);
       setData(result);
       setStatus('success');
       

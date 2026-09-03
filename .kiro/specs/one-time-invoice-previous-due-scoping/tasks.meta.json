@@ -1,0 +1,201 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test": {
+      "status": "passed",
+      "failingExample": "handleSelectWorkOrder(WO-002) with a mocked WO-001 pending invoice (₹50,000, same client): previousDue was set to '50000' instead of remaining ''. AssertionError: expected '50000' to be '' // Object.is equality.\nMulti-WO accumulation: handleSelectWorkOrder(WO-003) with mocked pending invoices from WO-001 (₹50,000) and WO-002 (₹30,000): previousDue was set to '80000' instead of remaining ''. AssertionError: expected '80000' to be '' // Object.is equality.",
+      "lastRunTimestamp": 1785675897225
+    },
+    "3.6 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1785678912236
+    },
+    "3.7 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1785678912950
+    }
+  },
+  "executionHistory": {
+    "1. Write bug condition exploration test": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444183
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673456457
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785675919705
+      }
+    ],
+    "2. Write preservation property tests (BEFORE implementing fix)": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444282
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785675925309
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677436255
+      }
+    ],
+    "3.1 Add `work_order_id` column to the `receivables` table": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444369
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677441940
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677579490
+      }
+    ],
+    "3.2 Update the outstanding-invoices query to scope by `work_order_id` with IS NULL fallback": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444485
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677585597
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677878197
+      }
+    ],
+    "3.3 Remove the unconditional `setPreviousDue` auto-fill call": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444604
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677884099
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677976311
+      }
+    ],
+    "3.4 Add \"Include previous balance\" opt-in button to the outstanding invoices amber panel": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444687
+      },
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785677982263
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678383182
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678531711
+      }
+    ],
+    "3.5 Include `work_order_id` in the `createInvoice` mutation payload": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444769
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678537501
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678660281
+      }
+    ],
+    "3.6 Verify bug condition exploration test now passes": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673444891
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678666210
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678934756
+      }
+    ],
+    "3.7 Verify preservation tests still pass": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673445018
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678667027
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678935448
+      }
+    ],
+    "4. Checkpoint — Ensure all tests pass": [
+      {
+        "executionId": "6b41def5-963b-4704-9bd9-2883a98a06c5",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785673445102
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678941787
+      },
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785679106477
+      }
+    ],
+    "3. Fix cross-work-order outstanding balance scoping": [
+      {
+        "executionId": "c965abff-ecc5-4d8c-bb13-9bf4497d7b0f",
+        "chatSessionId": "sess_4d26d6aa-9115-4334-8d30-e8b011c3dd15",
+        "timestamp": 1785678935540
+      }
+    ]
+  }
+}

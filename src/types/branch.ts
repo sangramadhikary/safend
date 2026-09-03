@@ -2,6 +2,7 @@ export interface Branch {
   id: string;
   name: string;
   code: string;
+  type: 'main' | 'sub';
   address: string;
   city: string;
   state: string;

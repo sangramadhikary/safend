@@ -1,3 +1,4 @@
+'use client';
 
 import { createContext, useContext, useEffect, useState } from "react";
 
@@ -37,15 +38,25 @@ export function ThemeProvider({
   useEffect(() => {
     const root = window.document.documentElement;
 
+    // Add transitioning class for smooth color interpolation
+    root.classList.add("transitioning-theme");
+
     root.classList.remove("light", "dark");
     root.classList.add(theme);
     localStorage.setItem(storageKey, theme);
+
+    // Remove transitioning class after animation completes
+    const timeout = setTimeout(() => {
+      root.classList.remove("transitioning-theme");
+    }, 300);
     
     // Trigger storage event for cross-tab synchronization
     window.dispatchEvent(new StorageEvent('storage', {
       key: storageKey,
       newValue: theme,
     }));
+
+    return () => clearTimeout(timeout);
   }, [theme, storageKey]);
 
   const value = {

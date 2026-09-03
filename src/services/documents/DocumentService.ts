@@ -1,3 +1,4 @@
+'use client';
 
 import { Document, DocumentCategory, DocumentSignature } from "@/types/documents";
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";

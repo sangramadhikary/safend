@@ -1,3 +1,4 @@
+'use client';
 
 import { SupportTicket, TicketComment, KnowledgeBaseArticle } from "@/types/helpdesk";
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";

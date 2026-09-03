@@ -1,6 +1,7 @@
+'use client';
 
-import React from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import React, { useState, useEffect } from "react";
+import { useRouter, usePathname } from "next/navigation";
 import { Menu } from "lucide-react";
 import { Drawer, DrawerContent, DrawerTrigger } from "@/components/ui/drawer";
 import { Button } from "@/components/ui/button";
@@ -14,10 +15,16 @@ interface NavigationItem {
 }
 
 export const DrawerNavigation = () => {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const [isOpen, setIsOpen] = React.useState(false);
-  const userRole = localStorage.getItem("userRole") || "admin";
+  const router = useRouter();
+  const pathname = usePathname();
+  const [isOpen, setIsOpen] = useState(false);
+  const [userRole, setUserRole] = useState("");
+  
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setUserRole(localStorage.getItem("userRole") || "");
+    }
+  }, []);
   
   const allNavigationItems: NavigationItem[] = [
     { name: "Admin Dashboard", path: "/dashboard", icon: () => <span>📊</span>, roles: ["admin"] },
@@ -35,14 +42,14 @@ export const DrawerNavigation = () => {
   );
 
   const handleNavigation = (path: string) => {
-    navigate(path);
+    router.push(path);
     setIsOpen(false);
   };
 
   return (
     <Drawer open={isOpen} onOpenChange={setIsOpen}>
       <DrawerTrigger asChild>
-        <Button variant="ghost" size="icon" className="md:hidden lg:hidden">
+        <Button variant="ghost" size="icon" className="lg:hidden">
           <Menu className="h-5 w-5" />
         </Button>
       </DrawerTrigger>
@@ -53,10 +60,10 @@ export const DrawerNavigation = () => {
               {navigationItems.map((item) => (
                 <Button
                   key={item.path}
-                  variant={location.pathname === item.path ? "destructive" : "ghost"}
+                  variant={pathname === item.path ? "destructive" : "ghost"}
                   className={cn(
                     "flex justify-start gap-3 text-base",
-                    location.pathname === item.path && "text-white"
+                    pathname === item.path && "text-white"
                   )}
                   onClick={() => handleNavigation(item.path)}
                 >

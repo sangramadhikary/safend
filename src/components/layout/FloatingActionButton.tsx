@@ -1,3 +1,4 @@
+'use client';
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -23,7 +24,6 @@ export const FloatingActionButton = () => {
       icon: UserPlus,
       label: "Add Employee",
       onClick: () => {
-        console.log("Add Employee clicked");
         setIsOpen(false);
       },
       color: "bg-blue-500"
@@ -32,7 +32,6 @@ export const FloatingActionButton = () => {
       icon: FilePlus,
       label: "New Report",
       onClick: () => {
-        console.log("New Report clicked");
         setIsOpen(false);
       },
       color: "bg-green-500"
@@ -41,7 +40,6 @@ export const FloatingActionButton = () => {
       icon: Settings,
       label: "Settings",
       onClick: () => {
-        console.log("Settings clicked");
         setIsOpen(false);
       },
       color: "bg-purple-500"
@@ -122,7 +120,7 @@ export const FloatingActionButton = () => {
                     <item.icon className="h-5 w-5" />
                   </div>
                   <motion.div
-                    className="bg-background border rounded-r-full h-10 flex items-center pr-4 pl-2 shadow-sm"
+                    className="bg-background border rounded-r-full h-10 flex items-center pr-4 pl-2 shadow-xs"
                     initial={{ width: 0, opacity: 0 }}
                     animate={{
                       width: "auto",

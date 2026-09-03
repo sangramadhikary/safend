@@ -1,0 +1,1894 @@
+
+FORMAT: 1A
+HOST: https://dale.staging.shadowfax.in/api
+
+# Shadowfax Reverse Pickup API
+
+Using the Shadowfax Reverse Pickup API collection, developers can integrate our customer pickup platform into their applications. The API is designed to allow application developers to check Pincode serviceability, place and manage orders and then track order status till completion.
+
+*Use this API if the use case is to return the picked item to your warehouse. If you want us to return the picked item
+to the individual seller, please refer to [Reverse Pickup - Seller Delivery document](https://sfxreversepickupsellerdelivery.docs.apiary.io/).*
+
+
+## Glossary
+
+###DCs and Hubs
+*DC*: Large facilities typically located in the outskirts of a city where all shipments(intercity and intracity both) are processed.<br>
+
+
+*Hub*: Small facilities located across the city from where last-mile delivery and first mile pick up happens. 
+
+
+####Following terms are defined with respect to a shipment's location
+* Origin Hub:<br>
+This is the first shadowfax facility where a packet reaches directly from seller or customer
+* Origin DC:<br>
+This is the first DC where a packet is sent from the client Warehouse or origin hub to process further.
+* Destination Hub:<br>
+This is the last shadowfax facility where a packet reaches before delivering to customer or seller
+* Destination DC:<br>
+This is last DC where a packet is sent before sending to destination hub or client Warehouse
+* Via DC:<br>
+All DCs other than origin and destination where a shipment has to go through. Manifest bags are not opened at these DCs and will be directly passed on to the next location.
+
+####Type of Operations
+* Forward Operations:<br>
+Orders that are originating at client warehouse or seller side and are to be delivered to end customer.<br>
+<br>
+* Reverse Operations: <br>
+Return orders that are originating at customer side or forward orders that could not be delivered to the customer and are to be returned to client warehouse or seller. <br>
+
+####Miscellaneous
+<br>
+* AWBs: <br>
+Unique Identification Number for each item/packet <br>
+* LOR: <br>
+Letter of Receipt, a document for acknowledging the delivery or receipt of shipments/ packets <br>
+* POD(Proof of Delivery): <br>
+A receipt of pickup and delivery of items
+
+
+
+##Authentication
+Shadowfax API uses Token Authentication. You will be shared Staging and Production API keys from the Shadowfax Team via an automated email.
+<br><br>The `Authorization` header that should be used while sending request will look like:
+<br>
+`Token e43145811ca6e75cde2d232df3d41485` where `e43145811ca6e75cde2d232df3d41485` is the token shared.
+<br>The `Authorization` value itself contains the Word “Token”.
+
+##Requests
+This is base URL.Please refer to endpoints to make actual request.The base URL for all requests to the Production Shadowfax Server is given below:<br>
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api`|
+|Production|`https://dale.shadowfax.in/api`|
+   
+All our API is REST-based. This means:  
+* It makes use of standard HTTP verbs like GET, POST, DELETE.
+* The API uses standard HTTP error responses to describe errors.
+* Authentication is specified with HTTP Token Authentication.  
+
+POST data should be encoded as standard `application/json`  
+|Accepted Format||
+|--------------------|--------------------|
+|Date|(YYYY:MM:DD)|
+|DateTime |(YYYY:MM:DD HH:MM:SS)|
+
+##Responses
+Shadowfax API uses HTTP status codes to indicate the status of your requests. This includes successful and unsuccessful responses.
+
+* All responses are in [JSON]('http://www.json.org'). 
+
+* All response Timestamps follow [ISO-8061]('https://www.w3.org/TR/NOTE-datetime') format.
+    > Times are expressed in local time, together with a time zone offset in hours and minutes. A time zone offset of "+hh:mm" indicates that the date/time uses a local time zone which is "hh" hours and "mm" minutes ahead of UTC. A time zone offset of "-hh:mm" indicates that the date/time uses a local time zone which is "hh" hours and "mm" minutes behind UTC.
+    
+#### Status Codes
+
+* 200 - OK: Everything went as planned.
+* 400 - Bad Request: You did something wrong. Often a missing argument or parameter.
+* 401 - Unauthorized: Authentication was incorrect.
+* 404 - Not Found
+* 500 - Internal Server Error: We had a problem processing the request.
+* 503 - Service Unavailable: Try again later.
+
+##Order States
+A given pickup order can be in one of the following states. This state will be shared in the `status` field in the Order Tracking APIs.
+
+|Order State                    |comment                                                  |Description                 |
+|-------------------------------|---------------------------------------------------------|--------------------------------|
+| `New`                         | Item New at `<SFX Facility> `                             | When the pickup request is received in the Shadowfax system                         |
+| `Assigned`                    | Item Assigned For Customer Pickup at `<SFX Facility>`     | When the pickup request is assigned to a pickup executive for pickup                |
+| `Out For Pickup`              | Item Out For Pickup at `<SFX Facility>`                   | When the assigned pickup executive is Out for Pickup                                |
+| `Picked`                      | Picked Successfully                                       | When the item is picked by the pickup executive                                     |
+| `Received`                    | Received at hub Successfully                              | When the picked item is received at the hub                                         |
+| `Received at Return DC`       | Received at Return DC Successfully                        | When the picked item is received at the Return DC |
+| `Cancelled`                   | Refer [Appendix](#Appendix_cancelled) for detailed reasons of order Cancelled.| When the pickup request is cancelled                                                |
+| `Cid`                         | Refer [Appendix](#Appendix_cid) for detailed reasons of Cid | When the pickup is delayed by the customer to another date                          |
+| `Not Contactable`             | Refer [Appendix](#Appendix_nc) for detailed reasons of Not Contactable | When the customer is not contactable by the delivery executive                      |
+| `Not Attempted`               | Refer [Appendix](#Appendix_na) for detailed reasons of Not Attempted                                      | When the assigned pickup executive couldn't attempt the pickup                      |
+| `Returned To Client`          | Item Return To Origin Delivered at `<SFX Facility>`       | When the item is returned to the seller destination pincode hub              |
+| `Undelivered`                 | Item Return to Origin Not Delivered at `<SFX Facility>`   | When there is a failed delivery to client warehouse or seller address               |
+| `Lost`                        | Item Lost at `<SFX Facility>`                              | When the picked item is Lost in transit or at hub                                   |
+| `QC Failed`                   | Refer [Appendix](#Appendix_qc) for detailed reasons of QC Failed | When doorstep QC is failed for the pickup item                                      |
+| `On Hold`                     | Refer [Appendix](#Appendix_On_Hold) for detailed reasons of On Hold   | When the item is put On Hold on client orders or due to Operational Concerns  |
+| `Item added to Bag`           | Item added to bag at `<SFX facility>`  | When the order is added to the bag    |            
+| `Bag In Transit`              | Bag in transit from `<SFX Facility>` | This status signifies that the bag (Master Manifest) is in transit.    |            
+| `Bag Received`                | Bag received at `<SFX Facility>` | This status signifies that the bag (Master Manifest) has been received at the destination facility |            
+| `Received`                    | Item Return To Origin at `<SFX Facility>` | The Item Returned To Origin   |            
+| `Item Misrouted`              | Item misrouted at `<SFX Facility>` |  The shipment reached to a wrong sfx facility  |            
+| `Pincode Updated`             | Item destination pincode updated at `<SFX Facility>` | The Item destination pincode updated   |            
+| `In Transit for Return`       | The Bag in transit return from `<SFX Facility>` | This status signifies that the bag (Master Manifest) is in transit during rts journey.|            
+| `Bag in transit for return`   | Bag in transit for return at `<SFX Facility>`| The  Bag in transit for return at sfx facility  |            
+
+
+##Push Callback API
+We have built a generic PUSH API callback for the Reverse model. The client can enable it to get real-time notification of each push notification status change. 
+### Callback Header details
+
+The Standard callback header has below keys:
+
++ Headers
+
+      Authorization: Token c6b780ae9250f3
+      Content-Type: application/json
+
+Here we have the capability to add/modify the hearder keys as shown in the example below:
+
++ Headers
+
+    Content-Type: application/json
+    Authorization: d5eecf30ae6eb8d158dc54c77178ab9
+    account_name:  SF_ACC_STAGING
+
+
+### Request Body details
+
+The callback contains the below parameters:
+
+* `awb_number` - Generated by Shadowfax while placing an order.
+* `order_id` - client_order_id shared while placing an order.
+* `event_timestamp` - event_timestamp of the current status.
+* `current_location` - The current location of the order during the event.
+* `comments` - Contains the remarks associated with the status.
+* `event` - Current status id of the shipment
+* `status` - Current status of the shipment
+* `otp_verifed` - The value indicates whether the status was marked after OTP verification. The possible values are `"Y"/"N"/"NA"`. By Default `"NA"`.
+* `rider_name` - The name of the rider delivering the order.The rider details are shared when the current status is Out For Pickup (ofp).
+* `rider_contact` - The contact details of the rider delivering the order.The rider details are shared when the current status is Out For Pickup (ofp).
+* `type` - The order type is shared over this field. eg: FWD/REV 
+* `recepient_info` - This field contains proof of delivery, and it will be sent only when the current status has been delivered or RTS_D has been confirmed.
+* `qc_images` - This field contains the images taken during QC failed.
+
+This is the structure of the payload data(JSON) that will be pushed to your end.
+
++ Response 200 (application/json)
+
+        {
+            "awb_number": "R18481863TMA",
+            "order_id": "testwebhookrev10",
+            "event_timestamp": "2022-06-17 16:54:49",
+            "current_location": "DEL_Trinagar",
+            "comments": "Item Assigned For Customer Pickup at DEL_Trinagar",
+            "event": "assigned_for_pickup",
+            "status": "Assigned",
+            "otp_verifed" : "NA",
+            "rider_name": null,
+            "rider_contact": null,
+            "client_id": 1707,
+            "recipient_info":[],
+            "qc_images": [],
+            "type": "REV"
+        }
+
+When we want to send a push message to your server, we need to make an API call to a push service. API call would require the following callback details, which can be configured via the Client Portal on the Webhook tab.
+
+`The appropriate URL implemented at your end to trigger a push message(Mandatory).`
+
+`Authentication Key(Non mandatory).`
+
+|Order State                    |comment                                                  |Description                 |
+|-------------------------------|---------------------------------------------------------|--------------------------------|
+| `Assigned`                    | Item Assigned For Customer Pickup at `<SFX Facility>`                             | When the pickup request is received in the Shadowfax system                         |
+| `Out For Pickup`              | Item Out For Pickup at `<SFX Facility>`                   | When the assigned pickup executive is Out for Pickup                                |
+| `Picked`                      | Picked Successfully                                       | When the item is picked by the pickup executive                                     |
+| `Received at Hub`             |Received at hub Successfully                              | When the picked item is received at the hub                                         |
+| `Received at Return DC`       | Item Received at RTS DC at `<SFX Facility>`                       | When the picked item is received at the Return DC |
+| `Cancelled`                   | Refer [Appendix](#Appendix_cancelledpushapiwarehouse) for detailed reasons of order Cancelled.| When the pickup request is cancelled                                                |
+| `Cid`                         | Refer [Appendix](#Appendix_cidpushapiwarehouse) for detailed reasons of Cid | When the pickup is delayed by the customer to another date                          |
+| `Not Contactable`             | Refer [Appendix](#Appendix_ncpushapiwarehouse) for detailed reasons of Not Contactable | When the customer is not contactable by the delivery executive                      |
+| `Not Attempted`               | Refer [Appendix](#Appendix_napushapiwarehouse) for detailed reasons of Not able to attempt                                       | When the assigned pickup executive couldn't attempt the pickup                      |
+| `Returned To Client`          | Item Return To Seller Delivered at `<SFX Facility>`       | When the item is returned to the seller destination pincode hub              |
+| `Undelivered`                 | Item Return to Seller Not Delivered at `<SFX Facility>`   | When there is a failed delivery to client warehouse or seller address               |
+| `Lost`                        | Item Lost at `<SFX Facility>`                              | When the picked item is Lost in transit or at hub                                   |
+| `QC Failed`                   | <Order status Remark> | When doorstep QC is failed for the pickup item                                      |
+| `On Hold`                     | Refer [Appendix](#Appendix_On_Holdpushapiwarehouse) for detailed reasons of On Hold   | When the item is put On Hold on client orders or due to Operational Concerns. |
+| `Returned To Client`          | Item Return To Origin Delivered at `<SFX Facility>`                           |  The Item Return To Origin Delivered     |
+| `Undelivered`                 | Item Return to Origin Not Delivered at `<SFX Facility>`                          |   The Item Return to Origin Not Delivered        |
+| `ReOpen`                      | Product is reopened                              |       The product reopend for delivery     |
+
+
+##QC Process
+We follow the app-based doorstep QC process for all the eligible shipments picked up by our delivery executives.
+Rules for the QC process are currently based on the *Return Reason* shared by the client. These rules can be configured in our internal Operations portal, for which details can be taken from the Sales POC.
+
+In Order Tracking APIs, please look for the values of the following fields in the SKU details - 
+
+* `picked` - If the item is picked, it's value will be `picked`, otherwise it'll be `not_picked`
+* `qc_status` - If the item has passed all QC checks, it's value will be `passed`. If it has failed a check, it's value will be `fail`.
+In some cases, where we do Secondary QC at hub and the item got failed due to Secondary QC, then it's value will be `fail_hub`
+* `qc_remarks` - If the item has failed QC checks, then the reasons for failure are shared in this field
+
+eg: In case of QC failed status:
+
+`"picked": "not_picked"`
+
+`"qc_status": "fail"`
+
+`"qc_remarks": "• Brand : No\n• Is product colour as per description ? : No\n• Category : No"`
+
+##Testing your Integration
+In order to test your integration, you can start by placing sample order requests on our staging server.
+We've created an Order Status Update API as well which works only in the staging environment and it'll allow you to update the order status.
+You can use this API to see if the Pull Tracking APIs are working fine or not.
+
+
+# Group Serviceability
+
+## Unified Pincode Serviceability [/v1/clients/serviceability/?service={service}&page={page}&count={count}&pincodes={pincodes}]
+### List All Serviceable Pin Codes  [GET]
+
+By using this endpoint, you can get a list of all Shadowfax serviceable pincodes, as well as the services provided by each of them.
+
+If pagination is not sent as a parameter then by default 25 pin codes will be retrieved.
+
+While triggering the API enter the service for which the list of pincode needs to be fetched.
+* The service parameter can be:
+    * `seller_pickup` - List all the pincodes where seller pickup is available.
+    * `customer_delivery` - List all the pincodes where customer delivery is available.
+    * `customer_pickup` - List all the pincodes where customer pickup is available.
+    * `seller_delivery` - List all the pincodes where seller delivery is available.
+    * `warehouse_pickup` - List all the pincodes where warehouse pickup is available.
+    * `warehouse_return` - List all the pincodes where warehouse return or rto is available.
+
+
+##Requests
+This is the URL to make an actual request:<br>
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api/v1/clients/serviceability/?service=customer_pickup&page=1&count=10&pincodes=560016,560017`|
+|Production|`https://dale.shadowfax.in/api/v1/clients/serviceability/?service=customer_pickup&page=1&count=10&pincodes=560016,560017`|
+
+
++ Parameters
+    
+    + service:customer_pickup (required, string) - Enter the service for which the list of pincodes needs to be fetched.
+    + page:1 (number)- Enter the page number.
+    + count:10 (number) - Enter the per page count.
+    + pincodes:560017 (number) - Enter the pincodes.
+
+    
++ Request (application/json)
+
+    + Headers 
+    
+            Authorization: Token <token_id here>
+            
++ Response 200 (application/json)
+
+        [
+            {
+                "code": 560008,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 560016,
+                "services": [
+                    "Regular"
+                ]
+            },
+            {
+                "code": 560038,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 560047,
+                "services": [
+                    "Regular"
+                ]
+            },
+            {
+                "code": 560048,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 560067,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 560071,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 560098,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 500484,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            },
+            {
+                "code": 560005,
+                "services": [
+                    "Regular",
+                    "Surface"
+                ]
+            }
+        ]
+
++ Response 401 (application/json)
+
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "message": "Invalid Request"
+        }
+
+# group Reverse AWB Generation  
+## AWB Generation [/v3/clients/orders/generate_awb/]
+
+### Generate AWB [POST]
+We have an automated process of sharing new AWBs once the existing ones are about to exhaust. This endpoint is used to generate the AWB numbers. It takes count of AWB Number as parameters.
+For any changes, please reach out to Shadowfax's Account Manager.
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api/v3/clients/orders/generate_awb/`|
+|Production|`https://dale.shadowfax.in/api/v3/clients/orders/generate_awb/`|
+
++ Request
+
+    + Body 
+    
+            { 
+                "count" : 10
+            }
+            
+    + Headers
+    
+            Authorization: Token <token_id here>
+            
++ Response 200 (application/json)
+    
+        {
+            "message": "success",
+            "awb_numbers": [
+                "R82064314",
+                "R76634196",
+                "R72416059",
+                "R71234141",
+                "R86383023",
+                "R67263848",
+                "R59587413",
+                "R84059950",
+                "R89622149",
+                "R49323697"
+            ]
+        }
++ Response 400 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
+# group Order Creation
+## Order Creation [/v3/clients/requests]
+### Create a Regular Pickup Request[POST]
+This endpoint is used to create a new pickup request in our reverse pickup system.
+It takes pickup customer specific details, pickup destination details and product attributes details.
+
+Below given are sample pincodes for testing in Staging Environment
+*  110009 
+*  110001
+*  560007
+
++ Request (application/json)
+
+    + Body
+        
+            {
+                "client_order_number": "0121001",
+                "warehouse_name": "Client Warehouse",
+                "warehouse_address": "Client Warehouse Address",
+                "destination_pincode": 500001,
+                "unique_code": "warehouse01",
+                "total_amount": 430,
+                "price": 412,
+                "eway_bill": 123456789012,
+                "pickup_type": "regular",
+                "address_attributes": {
+                    "address_line": "ho no-68,bhati mkt,main dadri road,surajpur",
+                    "city": "Noida",
+                    "country": "India",
+                    "pincode": 201301,
+                    "name": "Saurabh Shukla",
+                    "phone_number": "9540914499",
+                    "alternate_contact": "9999999999",
+                    "sms_contact": "9999999999",
+                    "latitude" : "12.00000" ,
+                    "longitude" : "77.00000",
+                    "location_accuracy" : "L" ,
+                    "location_type" : "residential"
+                },
+                "weight_details": {
+                    "actual_weight": 2.01,
+                    "volumetric_weight": 5.5
+                },
+                "skus_attributes": [{
+                    "name": "Puma-Men-Black-Wirko-Xc-Casual-Shoes (Size: 8)",
+                    "client_sku_id": "SC45634",
+                    "price": 100,
+                    "brand": "Puma",
+                    "category": "Shoes",
+                    "return_reason": "Size Mismatch",
+                    "qc_required": "false",
+                    "qc_rules": [{
+                        "question": "Is product colour as per description ?",
+                        "is_mandatory": 1,
+                        "value": "Red"
+                    }],
+                    "seller_details": {
+                        "regd_name": "Seller Name",
+                        "regd_address": "GST Regd address",
+                        "state": "Karnataka",
+                        "gstin": "36AAVCS6697K1Z4"
+                    },
+                     "taxes": {
+                        "cgst_amount": 0.0,
+                        "sgst_amount": 0.0,
+                        "igst_amount": 18.0,
+                        "total_tax_amount": 18.0
+                    },
+                    "hsn_code": "83294089",
+                    "invoice_id": "ADSf",
+                    "additional_details": {
+                        "color": "black",
+                        "size": 8,
+                        "sku_images": ["https://sku_image_url/1/","https://sku_image_url/1/"],
+                        "quantity_value" : 10,
+                        "quantity_unit": "EA"
+                    }
+                }]
+            }
+            
+    + Attributes
+        + Required Parameters (required, object)
+            + client_order_number (required, string) - Order number in client's system. Character limit : 100
+            + warehouse_address (required, string) - Client warehouse address to which the item will be returned
+            + destination_pincode (required, string) - 6 digit valid Pincode. This is the pincode where the picked up product needs to be sent to
+            + unique_code (optional, string) - 255 (max length) a unique warehouse code.
+            + pickup_type (required, string) - Order Pickup Type. Options: regular, slot and surface
+            + total_amount (optional, number) - Total amount (inclusive GST) of the order
+            + price (required, number) - Price (exclusive of GST) of the order 
+            + eway_bill (required, number) - 12 digit E-way bill. If the total amount is greater than 50,000 then this field is mandatory, otherwise optional. Character limit : 12
+            + address_attributes (required, object) - This is the pickup details.
+                + address_line(required, string)- Pickup Address
+                + city(required, string) - Pickup City.Character limit : 50
+                + pincode(required, number) - 6 digit valid pincode of Pickup Address
+                + name (required, string) - Pickup Customer's Name. Character limit : 100
+                + phone_number (required, string) - Pickup Customer's Contact Number.Character limit :13
+                + alternate_contact (optional, string) - Pickup Customer's Alternate Contact Number. If provided, it should. Character limit : 13 be a minimum of 10 digits otherwise validation error will be thrown.
+                + sms_contact (optional, string) - Pickup Customer's Contact Number which will be used to send SMS. If provided, it should be a minimum of 10 digits otherwise validation errors will be thrown.
+                + latitude (optional, string) - Pickup customers latitude.
+                + longitude (optional, string) - Pickup customers longitude.
+                + location_accuracy(optional, string) - It should be H,M,L(High, Medium, Low).
+                + location_type(optional, string) -  residential or commercial .
+            + weight_details (optional, object) - Weight details
+                + actual_weight(optional, number) - Weight of the Product (in gms) default :0.0
+                + volumetric_weight(optional, number) - Volumetric Weight of the Product (in gms). default : 0.0 (volumetric weight=(l*b*h)/5000)
+            + skus_attributes (required, array)
+                + (object)   
+                    + name(required, string) - Product Name
+                    + client_sku_id(optional, string) - Sku Id provided by you (if any). Character limit : 100
+                    + price (required, number)  - Price of the Product
+                    + category(optional, string) - Product Category. Character limit : 200
+                    + brand(optional, string) - Brand name of the Product. Character limit : 200
+                    + return_reason(optional,string) - Return reason for product. Character limit : 200
+                    + qc_required(optional, string) - Flag to determine if qc is required for the product. Default true.
+                    + qc_rules(optional, object) - Customized QC rules for doorstep QC
+                        + question (required, string) - Question to be displayed to the pickup boy for QC. Character limit : 255
+                        + is_mandatory (required, number) - If QC should fail if this check point is not passed then send 1, else send 0
+                        + value (optional, string) - Value of the SKU property which is asked in the question
+                    + seller_details (required, object) - Seller details required for GST management.
+                        + regd_name (required, string) - Registered name of the seller to which item is to be returned. Character limit : 100
+                        + regd_address (required, string) - Registered address of the seller
+                        + state (required, string) - State of Registered Address of the seller. Character limit : 50
+                        + gstin (required, string) - 15 digit GSTIN of the seller. Character limit : 50
+                    + taxes (required, object) - Tax distribution according to GST
+                        + cgst_amount (required, number) - CGST Amount
+                        + sgst_amount (required, number) - SGST Amount
+                        + igst_amount (required, number) - IGST Amount
+                        + total_tax_amount (required, number) - Total GST. It is the sum of above three fields
+                    + hsn_code (required, string) - 8 digit HSN Code of the item.Character limit : 50
+                    + invoice_id (required, string) - Invoice ID. Character limit : 50
+                    + additional_details(optional, object) - To help in better doorstep QC, kindly share the following details as well.
+                        + color (optional, string) - Product Colour
+                        + size (optional, string) - Product Size
+                        + imei (optional, string) - IMEI Number of Mobile Phone (Separated by '/' in case of dual sim phones)
+                        + sku_images (optional, array) - Array of URL of Sku Images
+                        + serial_no (optional, string) - Serial Number of the device
+                        + quantity_value (optional, number) - Number of items in SKU
+                        + quantity (optional, number) - Number of items in SKU
+                        + quantity_unit (optional, number)- Unit value of SKU's
+        + Optional Parameters(optional, object)
+            + client_request_id (optional, string) - Client Request Id. If it is not provided then we will generate it automatically.
+            + warehouse_name (optional, string) - Clients Warehouse Name
+    
+    
+
+    + Headers
+    
+            Authorization: Token <token_id here>
+        
+    
+
++ Response 200 (application/json)
+
+        {
+            "message": "Success",
+            "client_order_number": "0121001",
+            "request_type": "pickup",
+            "client_request_id": "R10000021ZI",
+            "client_id": 31,
+            "destination_pincode": 110009,
+            "total_amount": 430,
+            "price": 412,
+            "eway_bill": 123456789012,
+            "address": {
+                "name": "Saurabh Shukla",
+                "phone_number": "9540914499",
+                "address_line": "ho no-68,bhati mkt,main dadri road,surajpur",
+                "city": "Noida",
+                "pincode": 201301,
+                "alternate_contact": "9999999999"
+            },
+            "skus": [
+                {
+                    "client_sku_id": "SC45634",
+                    "name": "Puma-Men-Black-Wirko-Xc-Casual-Shoes (Size: 8)",
+                    "price": 100,
+                    "return_reason": "Size Mismatch",
+                    "brand": "Puma",
+                    "category": "Shoes",
+                    "seller_details": {
+                        "regd_name": "Seller Name",
+                        "regd_address": "GST Regd address",
+                        "state": "Karnataka",
+                        "gstin": "36AAVCS6697K1Z4"
+                    },
+                    "cost": {
+                        "cgst_amount": 0.0,
+                        "sgst_amount": 0.0,
+                        "igst_amount": 18.0,
+                        "total_tax_amount": 18.0
+                    },
+                    "hsn_code": "83294089",
+                    "invoice_id": "ADSf",
+                    "additional_details": {
+                        "color": "black",
+                        "size": 8,
+                        "sku_images": [
+                            "http://sku_image_url/1/",
+                            "http://sku_image_url/1/"
+                        ],
+                        "quantity_value": 10,
+                        "quantity": 10,
+                        "quantity_unit": "EA"
+                    }
+                }
+            ],
+            "status_last_updated_at": "2017-03-10T05:54:50.043Z",
+            "pickup_request_state_histories": null,
+            "status": "New",
+            "scheduled_date": 1489084200000,
+            "date_created": 1489105490000
+        }
+        
++ Response 401 (application/json)
+       
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Order data can not be empty."
+        }
+
++ Response 400 (application/json)
+
+        {"message": "Your account is not activated yet. Our sales team would reach out to you soon for completing your onboarding process."}
+
+
++ Response 400 (application/json)
+        
+        {
+            "message": "awb_number: [This field must be unique]"
+        }
+        
++ Response 400 (application/json)
+
+        {
+            "COID": "1234",
+            "message": "Failure",
+            "errors": "Order for COID : 1234 is already created with AWB : R17806145san",
+            "AWB": "R17806145san"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Client Order Number is Required"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Address Attributes are Required"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Customer Pincode is Required"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Invalid date format for invoice date. Please use yyyy-MM-dd"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Invalid Customer contact number"
+        }
+        
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Customer phone_number can not be blank"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Return Details are required"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Please Enter E-Way Bill Number",
+            "data": {},
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Failure",
+            "message": "Failure",
+            "errors": "Please Enter Valid 12-digit E-Way Bill Number",
+            "data": {},
+            "responseCode": 400
+        }
+
++ Response 500 (application/json)
+
+        {
+            "message": "Internal Server Error"
+        }
+      
+# group Order Cancellation  
+## Order Cancellation [/v2/clients/requests/mark_cancel]
+
+### Cancel a Pickup Request [POST]
+
+This endpoint is used to cancel a pickup request. It takes AWB Number or unique client order id of the order along with the cancellation reason as parameters.
+
+* A pickup order can be cancelled before if its status is **NOT** in `Out for Pickup`, `Cancelled` and `Picked` 
+
+If you trigger the cancellation API during `Out for Pickup`(ofp) status, API response would return the `responseMsg` & `responseCode` as `Pickup request cannot be cancelled now` & `400` respectively.
+
+If you trigger the cancellation API during `Picked` status, API response would return the `responseMsg` & `responseCode` as `Pickup request cannot be cancelled now` & `400` respectively.
+
+If you trigger the cancellation API during `Cancelled` status, API response would return the `responseMsg` & `responseCode` as `Pickup request cannot be cancelled now` & `400` respectively.
+
+* Following are the valid Cancellation Remarks. These are entered in the `cancel_remarks` field.
+    * Cancelled By Customer
+    * Incorrect/ Incomplete contact info
+    * Payment Issue
+
++ Request
+
+    + Body 
+    
+            { 
+                "request_id": "SFXE220250035SK",
+                "cancel_remarks ": "Request cancelled by customer"
+            }
+            
+    + Headers
+    
+            Authorization: Token <token_id here>
+            
+    + Attributes
+    
+        + Required Parameters(required, object)
+            + request_id(required, string) - AWB number of the order or the client order id of the order. There should be a unique client order id for each order.
+            + cancel_remarks(required , string) - Valid options are discussed in the description
+            
++ Response 200 (application/json)
+    
+        {
+            "responseMsg": "Request has been marked as cancelled",
+            "responseCode": 200
+        }
+
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
+
++ Response 200 (application/json)
+        {
+            "responseMsg": "Invalid Token.",
+            "responseCode": 400
+        }
+        
++ Response 400 (application/json)
+    
+        {
+           "message" : "Invalid AWB Number"
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Multiple Orders found for the given Request Id",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "responseMsg": "Cannot cancel qc order from Out For Pickup",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Cannot cancel order from Picked",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Cannot cancel order from Received",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "Pickup request cannot be cancelled now",
+            "responseCode": 400
+        }
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "request_id and cancel_remarks are required",
+            "responseCode": 400
+        }
+        
++ Response 200 (application/json)
+
+        {
+           "responseMsg": "Order not mapped with the client.",
+           "responseCode": 400
+        }
+
+
+#group Escalation API
+## Escalation API [/v1/clients/support/issue/]
+### Escalation API [POST]
+This endpoint to take escalations from clients on real time. Based on the issue category, a ticket would be raised in the system. This API is to take the escalation input from the clients. The action being taken on those tickets .
+
+####Issue Category options 
+
+|Issue Category                        |Issue Category Code  |Validations                                                                                                     |  Order Type           |
+|--------------------------------------|---------------------|----------------------------------------------------------------------------------------------------------------|---------------------|
+| `Delayed Delivery`                   | 1                   |To be passed post an order is successfully picked in system and not delivered post to Estimated Delivery Date   |    Forward          |
+| `Expedite Pickup - Customer`         | 2                   |To be passed only if the order is not yet picked from the Customer                                              |    Reverse          |
+| `Expedite Pickup - Seller`           | 3                   |To be passed only until the seller pickup is not completed                                                      |    Forward          |
+| `Status Mismatch`                    | 4                   |To be passed when there is a mismatch in expected and received order status                                     |    Forward/Reverse  |
+| `Delivery Dispute`                   | 5                   |To be passed only post the order is marked Delivered in the system                                              |    Forward          |
+
+
++ Request
+    + Body
+            {
+                "awb_number" : "SF00000000TC",
+                "issue_category" : 1
+            }
+    + Headers
+            Authorization: Token Authorization
+    + Attributes
+        + Required Parameters(required, object)
+            + awb_number(required, string) - It should be a valid Awb number.
+            + issue_category(required , number) - Issue category will be one among choices given in Issue Category options .
+
++ Response 200 (application/json)
+
+        {
+               "message": "Issue received",
+               "status": "SUCCESS"
+        }
+         
+
+# Group Order Details
+      
+## Single Pickup Request v4 Version [/v4/clients/requests/{client_request_id}]
+
++ Parameters
+    + client_request_id (required, string) ... AWB Number of the order
+
+### Get Detail of a Pickup Request[GET]
+
+This endpoint is used to get all details of a pickup request defined by its client request id.The v4 version of tracking API provides the additional statuses of the reverse flow like Received at Return DC,Undelivered.
+
++ Request
+
+    + Header
+    
+            Authorization: Token <token>
+
++ Response 200 (application/json)
+
+        {
+            "client_order_number": "SKU12345",
+            "request_type": "pickup",
+            "client_request_id": "R11507439TST",
+            "client_id": 18,
+            "destination_pincode": 999998,
+            "price": 6000.0,
+            "address": {
+                "name": "rtu",
+                "phone_number": null,
+                "address_line": "No 849 Binnamangala, Indiranagar 100 Feet Road",
+                "city": "Bangalore",
+                "state": "Karnataka",
+                "pincode": 999999,
+                "created_at": "2022-02-28T10:26:19.000000+0000",
+                "updated_at": "2022-02-28T10:26:19.000000+0000",
+                "alternate_contact": "9999999999"
+            },
+            "skus": [
+                {
+                    "client_sku_id": "1234",
+                    "name": "Hawes and Curtis Light Blue Solid Shirt",
+                    "price": 0.0,
+                    "return_reason": "Looks Different, Size Mismatch",
+                    "brand": "Brand1",
+                    "category": "ShirT",
+                    "additional_details": {
+                        "colour": "Light Blue",
+                        "size": "S1",
+                        "quantity": "4",
+                        "sku_images": [
+                            "2342222222222220066816"
+                        ]
+                    },
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": "ABC",
+                        "regd_address": "Something Something",
+                        "state": "Karnataka",
+                        "gstin": "098324"
+                    },
+                    "taxes": {
+                        "cgst_amount": 12.0,
+                        "sgst_amount": 12.0,
+                        "igst_amount": 0.0,
+                        "total_tax_amount": 24.0
+                    },
+                    "hsn_code": "2343413",
+                    "invoice_no": "1",
+                    "qc_images": []
+                },
+                {
+                    "client_sku_id": "1237",
+                    "name": "my item9",
+                    "price": 0.0,
+                    "return_reason": null,
+                    "brand": "Brand2",
+                    "category": "Dress",
+                    "additional_details": {
+                        "colour": " Pink",
+                        "size": " S2"
+                    },
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": "BAC",
+                        "regd_address": "Something",
+                        "state": "Karnataka",
+                        "gstin": "3289437"
+                    },
+                    "taxes": {
+                        "cgst_amount": 0.0,
+                        "sgst_amount": 0.0,
+                        "igst_amount": 12.0,
+                        "total_tax_amount": 12.0
+                    },
+                    "hsn_code": "42536",
+                    "invoice_no": "2",
+                    "qc_images": []
+                },
+                {
+                    "client_sku_id": "1236",
+                    "name": "item3",
+                    "price": 0.0,
+                    "return_reason": null,
+                    "brand": null,
+                    "category": null,
+                    "additional_details": {},
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": null,
+                        "regd_address": "",
+                        "state": null,
+                        "gstin": null
+                    },
+                    "taxes": {
+                        "cgst_amount": null,
+                        "sgst_amount": null,
+                        "igst_amount": null,
+                        "total_tax_amount": null
+                    },
+                    "hsn_code": null,
+                    "invoice_no": null,
+                    "qc_images": []
+                },
+                {
+                    "client_sku_id": "1232",
+                    "name": "item4",
+                    "price": 0.0,
+                    "return_reason": null,
+                    "brand": null,
+                    "category": null,
+                    "additional_details": {},
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": null,
+                        "regd_address": "",
+                        "state": null,
+                        "gstin": null
+                    },
+                    "taxes": {
+                        "cgst_amount": null,
+                        "sgst_amount": null,
+                        "igst_amount": null,
+                        "total_tax_amount": null
+                    },
+                    "hsn_code": null,
+                    "invoice_no": null,
+                    "qc_images": []
+                }
+            ],
+            "seller": null,
+            "status_last_updated_at": "2022-02-28T10:42:47Z",
+            "pickup_request_state_histories": [
+                {
+                    "created_at": "2022-02-28T10:26:19Z",
+                    "current_location": "SFX TestHub",
+                    "state": "New",
+                    "comment": "Item New at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:26:50Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Assigned",
+                    "comment": "Item Assigned For Customer Pickup at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:27:00Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Out For Pickup",
+                    "comment": "Item Out For Pickup at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:27:28Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Received",
+                    "comment": "Item Return To Origin at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:27:28Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Received",
+                    "comment": "Received at hub Successfully"
+                },
+                {
+                    "created_at": "2022-02-28T10:29:36Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Item added to Bag",
+                    "comment": "Item added to bag at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:29:52Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Bag in transit for return",
+                    "comment": "Bag in transit for return at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:31:39Z",
+                    "current_location": "TEST DC",
+                    "state": "Bag Received at Via",
+                    "comment": "Bag received at via TEST DC"
+                },
+                {
+                    "created_at": "2022-02-28T10:32:58Z",
+                    "current_location": "TEST DC",
+                    "state": "Bag in transit for return",
+                    "comment": "Bag in transit for return at TEST DC"
+                },
+                {
+                    "created_at": "2022-02-28T10:33:39Z",
+                    "current_location": "testdc3",
+                    "state": "Bag Received",
+                    "comment": "Bag received at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:39:07Z",
+                    "current_location": "testdc3",
+                    "state": "Received at Return DC",
+                    "comment": "Item Received at dc at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:39:26Z",
+                    "current_location": "testdc3",
+                    "state": "Item added to Bag",
+                    "comment": "Item added to bag at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:39:45Z",
+                    "current_location": "testdc3",
+                    "state": "Bag in transit for return",
+                    "comment": "Bag in transit for return at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:40:11Z",
+                    "current_location": "TestDC2",
+                    "state": "Bag Received",
+                    "comment": "Bag received at TestDC2"
+                },
+                {
+                    "created_at": "2022-02-28T10:40:24Z",
+                    "current_location": "TestDC2",
+                    "state": "Received at Return DC",
+                    "comment": "Item Received at dc at TestDC2"
+                },
+                {
+                    "created_at": "2022-02-28T10:42:47Z",
+                    "current_location": "TestDC2",
+                    "state": "Returned To Client",
+                    "comment": "Item Return To Origin Delivered at TestDC2"
+                }
+            ],
+            "status": "Returned To Client",
+            "scheduled_date": 1645986600000.0,
+            "date_created": 1646024179000.0,
+            "pickup_type": "regular",
+            "slot_start_time": null,
+            "slot_end_time": null
+        }
+        
++ Response 401 (application/json)
+
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+    
+        {
+           "message" : "Invalid AWB Number"
+        }
+
+## Bulk Pickup Requests v4 Version [/v4/clients/requests/bulk_query]
+
+###Get Details of Bulk Pickup Requests [POST]
+
+This endpoint is used to get details of multiple pickup requests in one go. The requests are defined by their client request id. The API can be used to track up to 50 AWBs in a single API call. The v4 version of tracking API provides the additional statuses of the reverse flow like Received at Return DC, Undelivered.
+
++ Request
+
+    + Header
+    
+            Authorization: Token Authorization
+            
+    + Body
+        
+            {
+            "request_ids": ["R11507439TST"]
+            }
+            
+    + Attributes
+    
+            + request_ids (required, array) - Array of AWB numbers for which details are required
+            
+
++ Response 200 (application/json)
+
+{
+    "R11507439TST": [
+        {
+            "client_order_number": "SKU12345",
+            "request_type": "pickup",
+            "client_request_id": "R11507439TST",
+            "client_id": 18,
+            "destination_pincode": 999998,
+            "price": 6000.0,
+            "address": {
+                "name": "rtu",
+                "phone_number": null,
+                "address_line": "No 849 Binnamangala, Indiranagar 100 Feet Road",
+                "city": "Bangalore",
+                "state": "Karnataka",
+                "pincode": 999999,
+                "created_at": "2022-02-28T10:26:19.000000+0000",
+                "updated_at": "2022-02-28T10:26:19.000000+0000",
+                "alternate_contact": "9999999999"
+            },
+            "skus": [
+                {
+                    "client_sku_id": "1234",
+                    "name": "Hawes and Curtis Light Blue Solid Shirt",
+                    "price": 0.0,
+                    "return_reason": "Looks Different, Size Mismatch",
+                    "brand": "Brand1",
+                    "category": "ShirT",
+                    "additional_details": {
+                        "colour": "Light Blue",
+                        "size": "S1",
+                        "quantity": "4",
+                        "sku_images": [
+                            "2342222222222220066816"
+                        ]
+                    },
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": "ABC",
+                        "regd_address": "Something Something",
+                        "state": "Karnataka",
+                        "gstin": "098324"
+                    },
+                    "taxes": {
+                        "cgst_amount": 12.0,
+                        "sgst_amount": 12.0,
+                        "igst_amount": 0.0,
+                        "total_tax_amount": 24.0
+                    },
+                    "hsn_code": "2343413",
+                    "invoice_no": "1",
+                    "qc_images": []
+                },
+                {
+                    "client_sku_id": "1237",
+                    "name": "my item9",
+                    "price": 0.0,
+                    "return_reason": null,
+                    "brand": "Brand2",
+                    "category": "Dress",
+                    "additional_details": {
+                        "colour": " Pink",
+                        "size": " S2"
+                    },
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": "BAC",
+                        "regd_address": "Something",
+                        "state": "Karnataka",
+                        "gstin": "3289437"
+                    },
+                    "taxes": {
+                        "cgst_amount": 0.0,
+                        "sgst_amount": 0.0,
+                        "igst_amount": 12.0,
+                        "total_tax_amount": 12.0
+                    },
+                    "hsn_code": "42536",
+                    "invoice_no": "2",
+                    "qc_images": []
+                },
+                {
+                    "client_sku_id": "1236",
+                    "name": "item3",
+                    "price": 0.0,
+                    "return_reason": null,
+                    "brand": null,
+                    "category": null,
+                    "additional_details": {},
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": null,
+                        "regd_address": "",
+                        "state": null,
+                        "gstin": null
+                    },
+                    "taxes": {
+                        "cgst_amount": null,
+                        "sgst_amount": null,
+                        "igst_amount": null,
+                        "total_tax_amount": null
+                    },
+                    "hsn_code": null,
+                    "invoice_no": null,
+                    "qc_images": []
+                },
+                {
+                    "client_sku_id": "1232",
+                    "name": "item4",
+                    "price": 0.0,
+                    "return_reason": null,
+                    "brand": null,
+                    "category": null,
+                    "additional_details": {},
+                    "picked": "picked",
+                    "qc_status": "passed",
+                    "qc_remarks": "",
+                    "seller_details": {
+                        "regd_name": null,
+                        "regd_address": "",
+                        "state": null,
+                        "gstin": null
+                    },
+                    "taxes": {
+                        "cgst_amount": null,
+                        "sgst_amount": null,
+                        "igst_amount": null,
+                        "total_tax_amount": null
+                    },
+                    "hsn_code": null,
+                    "invoice_no": null,
+                    "qc_images": []
+                }
+            ],
+            "seller": null,
+            "status_last_updated_at": "2022-02-28T10:42:47Z",
+            "pickup_request_state_histories": [
+                {
+                    "created_at": "2022-02-28T10:26:19Z",
+                    "current_location": "SFX TestHub",
+                    "state": "New",
+                    "comment": "Item New at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:26:50Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Assigned",
+                    "comment": "Item Assigned For Customer Pickup at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:27:00Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Out For Pickup",
+                    "comment": "Item Out For Pickup at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:27:28Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Received",
+                    "comment": "Item Return To Origin at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:27:28Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Received",
+                    "comment": "Received at hub Successfully"
+                },
+                {
+                    "created_at": "2022-02-28T10:29:36Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Item added to Bag",
+                    "comment": "Item added to bag at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:29:52Z",
+                    "current_location": "SFX TestHub",
+                    "state": "Bag in transit for return",
+                    "comment": "Bag in transit for return at SFX TestHub"
+                },
+                {
+                    "created_at": "2022-02-28T10:31:39Z",
+                    "current_location": "TEST DC",
+                    "state": "Bag Received at Via",
+                    "comment": "Bag received at via TEST DC"
+                },
+                {
+                    "created_at": "2022-02-28T10:32:58Z",
+                    "current_location": "TEST DC",
+                    "state": "Bag in transit for return",
+                    "comment": "Bag in transit for return at TEST DC"
+                },
+                {
+                    "created_at": "2022-02-28T10:33:39Z",
+                    "current_location": "testdc3",
+                    "state": "Bag Received",
+                    "comment": "Bag received at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:39:07Z",
+                    "current_location": "testdc3",
+                    "state": "Received at Return DC",
+                    "comment": "Item Received at dc at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:39:26Z",
+                    "current_location": "testdc3",
+                    "state": "Item added to Bag",
+                    "comment": "Item added to bag at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:39:45Z",
+                    "current_location": "testdc3",
+                    "state": "Bag in transit for return",
+                    "comment": "Bag in transit for return at testdc3"
+                },
+                {
+                    "created_at": "2022-02-28T10:40:11Z",
+                    "current_location": "TestDC2",
+                    "state": "Bag Received",
+                    "comment": "Bag received at TestDC2"
+                },
+                {
+                    "created_at": "2022-02-28T10:40:24Z",
+                    "current_location": "TestDC2",
+                    "state": "Received at Return DC",
+                    "comment": "Item Received at dc at TestDC2"
+                },
+                {
+                    "created_at": "2022-02-28T10:42:47Z",
+                    "current_location": "TestDC2",
+                    "state": "Returned To Client",
+                    "comment": "Item Return To Origin Delivered at TestDC2"
+                }
+            ],
+            "status": "Returned To Client",
+            "scheduled_date": 1645986600000.0,
+            "date_created": 1646024179000.0,
+            "pickup_type": "regular",
+            "slot_start_time": null,
+            "slot_end_time": null
+        }
+    ]
+}
+
++ Response 401 (application/json)
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 400 (application/json)
+    
+        {
+           "message" : "Invalid AWB Number"
+        }
+        
++ Response 400 (application/json)
+
+        {
+            "message": "Number of AWBs exceeded. Max count allowed is 50"
+        }
+        
+
+#group Get POD Details
+
+## Get POD Details [/v1/clients/pod_details/]
+
+### Get POD Details[GET]
+
+Using this API, you can get POD (proof of delivery) details for multiple reverse delivery requests, each defined by their AWB number.
+This API will allow you to get pod details for up to 100 AWB numbers.
+`To obtain POD details, the order status of the AWB_number's passed must be rto_d`
+
++ Request (application/json)
+    
+    + Headers
+    
+            Authorization: Token 1234567890abc1234567890xyz
+            
+
+    + Body
+
+        {
+            "awb_numbers": [
+                "R18432490TER",
+                "R18443342TER"
+            ]
+        }
+
++ Response 200 (application/json)
+
+
+        {
+            "message": "Success",
+            "pod_details": {
+                "R18432490TER": {
+                    "recipient": null,
+                    "recipient_contact": "None",
+                    "recipient_signature": "[[u'https://s3-us-west-2.amazonaws.com/sfxdocs/seller/delivery_report/report_1827_1641812277.pdf']]",
+                    "recipient_name": "None"
+                },
+                "R18443342TER": {
+                    "recipient": null,
+                    "recipient_contact": "None",
+                    "recipient_signature": "[u'https://s3.ap-south-1.amazonaws.com/sfxdocs-mumbai/delivery/pod-images/staging/seller_pod-image-50702-KBWN-1-file.jpeg']",
+                    "recipient_name": "None"
+                }
+            }
+        }
+    
++ Response 400 (application/json)   
+
+            {
+                "message": "AWB does not belong to this client"
+            }
+            
++ Response 400 (application/json)
+
+            {
+                "message": "Incorrect AWB"
+            }
+            
++ Response 400 (application/json)
+
+        {
+            "message": "Max limit on count is 100. Please send a list within 100 AWBs"
+        }
+          
++ Response 400 (application/json)
+
+        {
+            "message": "Incorrect Status"
+        }
+        
++ Response 401 (application/json)
+
+        {
+            "detail": "Invalid token."
+        }
+
+
+
+# group Order Data Update
+
+## Update QC Flag [/v2/clients/requests/update_qc/]
+
+### Update QC flag for an AWB or SKU [PUT]
+
+This endpoint is used to update the QC flag for a pickup request (or individual SKU) after request creation. Users can update the qc flag either for all the SKUs or for an individual SKU.
+QC flag shall not be updated once the AWB is Out of Pickup. If it returns to the hub for pickup on another day, you can then update the QC flag. 
+
++ Request
+
+    + Body 
+    
+            { 
+                "awb_number": "R12688537SC",
+                "qc_flag": true,
+                "sku_id": "apple01"
+            }
+            
+    + Headers
+    
+            Authorization: Token <token_id here>
+            
+    + Attributes
+    
+        + Required Parameters(required, object)
+            + awb (required, string) - AWB number of the order
+            + qc_flag (required, string) - Boolean representing what should be the new QC required flag of the SKU
+        + Optional Parameters (optional, object)
+            + sku_id (optional, string) - Representing the SKU ID. If this is empty then all SKUs of the AWB Number is updated with the QC flag
+            
++ Response 200 (application/json)
+
+        {
+            "responseMsg": "QC flags are updated",
+            "responseCode": 200
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "responseMsg": "No valid SKU IDs exist for the given AWB Number",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+
+        {
+            "responseMsg": "QC flag can't be changed now since the order is Out For Pickup",
+            "responseCode": 400
+        }
+
++ Response 400 (application/json)
+ 
+        {
+            "responseMsg": "Please specify the AWB number",
+            "responseCode": 400
+        }
+
++ Response 401 (application/json)
+
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
+## Update Order Data latest  [/v1/clients/order_update/]
+
+### Request to Update Order Data [POST]
+The endpoint allows you to edit customer details, cod amount and payment mode for an order.
+
+The API functionalities are as follows:
+
+* This API cannot be used to update the order status but since the status field is `required` it should be passed as `null`.            
+* The API can be used to update customer details along with the Pincode, but the Pincode can only be updated twice per order and only for intra-city orders.
+* The mandatory/required attributes should be passed as `null` if they do not need to be updated.
+* The Pincode cannot be updated when the current status of the order is `picked`.
+* If you try to update the customer details prior to the pickup then the update would occur on pickup details i.e. the end user in case of reverse shipments. If you try to update customer details after pickup, the update would occur on drop details i.e. the seller in case of reverse shipment.
+
+<br><br>The `Authorization` header that should be used while sending request will look like:
+<br>
+`Token <auth token here>` 
+<br>The `Authorization` value itself contains the Word “Token”.
+
+##Requests
+This is the URL to make an actual request:<br>
+|||
+|------------|-----------|
+|Staging|`https://dale.staging.shadowfax.in/api/v1/clients/order_update/ `|
+|Production|`https://dale.shadowfax.in/api/v1/clients/order_update/ `|
+
++ Request
+
+    + Attributes
+    
+        + awb_numbers (required) - Awb number of an order needs to be passed.
+        + customer_details  - Pass the customer/ delivery details
+            + contact  - Pass customer contact.
+            + alternate_contact  - Pass customer contact.
+            + customer_address  - Pass customer address.
+            + pincode  - Pass customer/delivery pincode.
+            + latitude - Pickup customers latitude.
+            + longitude - Pickup customers longitude.
+       
+        + status_update 
+            + status  - Pass `null`.
+        
+
+    + Body 
+    
+            {
+                "awb_number": "SF36901801TED",
+                "customer_details": {
+                    "contact": "+919999955555",
+                    "alternate_contact": "9999955555",
+                    "customer_address": "#253, 2nd cross hebbal",
+                    "pincode": 560008,
+                    "latitude": "12.00000",
+                    "longitude": "77.00000"
+                },
+              
+                "status_update": {
+                    "status": null
+                }
+            }
+            
+    + Headers
+    
+            Authorization: Token <token_id here>
+            Content-Type: application/json
+
++ Response 200 (application/json)
+    
+        {
+            "message": "Request accepted."
+        }
+
++ Response 401 (application/json)
+    
+        {
+            "status": "FAILED",
+            "errorCode": "Authentication credentials not provided",
+            "message": "Authentication credentials not provided"
+        }
+
++ Response 401 (application/json)
+    
+        {
+           "detail": "Invalid token."
+        }
+        
++ Response 400 (application/json)
+    
+        {
+            "message": "Status transition from recd_at_fwd_hub to ndr is not allowed"
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "message": "{\"message\":\"SF36981974TED pincode has been updated 2 times. The Pincode request is stored, will be validated and updated.\"}"
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "message": "{\"message\":\"Intercity pincode updates are not allowed\"}"
+        }
+
++ Response 400 (application/json)
+    
+        {
+            "message": "Customer details could not be updated for SF36981985TED due to invalid status. Current status is Delivered to customer"
+        }
+        
++ Response 400 (application/json)
+
+        {
+            "message": "Customer contact number can not be blank"
+        }
+
+
+
+
+# Group Issues and Bugs
+Please drop in a mail to <ecom.techsupport@shadowfax.in> to report any bug(s) in the Client APIs. Any issue with respect to integration
+can also be raised on this forum. Our team shall review the issue and get back to you in due time.
+        
+ Client Queries Troubleshooter - https://docs.google.com/spreadsheets/d/1c7EfdwrxQrqz9zhwaa4bE0dI0EI41PT5ynY74aDJ7S8/edit#gid=1815509323
+        
+    
+# Group Appendix
+
+
+## <a name = "Appendix_On_Hold" > On Hold Remarks </a>
+
+Following are the remarks shared in the cases when the order is marked as `On Hold`.
+
+| Status  | Remarks                            |
+|---------|------------------------------------|
+| On Hold | Customer want pick-up from Non-Serviceable area                    |
+| On Hold | Pincode Address Mismatch           |
+| On Hold | Incorrect contact number               |
+| On Hold | Address issue           |
+| On Hold | Customer wants replacement/refund first        |
+| On Hold | Incomplete information received from client      |
+| On Hold | Mandatory check not available          |
+| On Hold | Pickup already done by other DSP           |
+| On Hold | Shipment is not picked           |
+| On Hold | Successful 3 attempts done        |
+| On Hold | Large Shipment                      |
+| On Hold | Customer wants pickup beyond cut off time        |
+| On Hold | Customer changed his/her mind |
+| On Hold | Doorstep QC Brandbox not available      |
+| On Hold | Doorstep QC Price Tag missing        |
+| On Hold | Doorstep QC Product Damage       |
+| On Hold | Doorstep QC Product Mismatch              |
+| On Hold | Doorstep QC Used Item            |
+| On Hold | Unable to pickup in given slot                      |
+| On Hold | Non Serviceable Area     |
+| On Hold | Seller wants pickup beyond cut off time |
+| On Hold | COVID Restricted Area      |
+| On Hold | Customer does not provide OTP |
+| On Hold | Customer is fraud     |
+| On Hold | Address is junk     |
+| On Hold | Same City Pincode Update     |
+| On Hold | InterCity Shipment             |
+
+
+## <a name = "Appendix_cancelled" > Cancelled Remarks </a>
+
+Following are the remarks shared in the cases when the order is marked as `cancelled`.
+
+| Status    | Remarks                            |
+|-----------|------------------------------------|
+| Cancelled | Customer cancelled the pickup      |
+| Cancelled | Cancelled by Client                |
+| Cancelled | Seller cancelled the pickup        |
+| Cancelled | Customer is fraud        |
+
+## <a name = "Appendix_nc" > Not Contactable Remarks </a>
+
+Following are the remarks shared in the cases when the order is marked as `nc`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Contactable | Address issue                      |
+| Not Contactable | Customer not reachable             |
+| Not Contactable | Seller not reachable               |
+
+## <a name = "Appendix_qc" > QC Failed Remarks </a>
+
+Following are the remarks shared in the cases when the order is marked as `qc_failed`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| QC Failed       | QC Failed at Doorstep              |
+
+## <a name = "Appendix_cid" > Cid Remarks </a>
+
+Following are the remarks shared in the cases when the order is marked as `cid`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Cid             | Customer Delayed Pickup            |
+| Cid             | Seller Initiated Delay             |
+
+## <a name = "Appendix_na" > Not Attempted Remarks </a>
+
+Following are the remarks shared in the cases when the order is marked as `na`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Attempted | Not able to attempt                  |
+| Not Attempted | Heavy Rain                           |
+| Not Attempted | Vehicle Breakdown                    |
+
+
+## <a name = "Appendix_cancelledpushapiwarehouse" > Cancelled Remarks for PUSH Api </a>
+
+Following are the remarks shared in the cases when the order is marked as `cancelled`.
+
+| Status    | Remarks                            |
+|-----------|------------------------------------|
+| Cancelled | Customer cancelled the pickup      |
+| Cancelled | Cancelled by Client                |
+| Cancelled | Seller cancelled the pickup        |
+
+
+## <a name = "Appendix_cidpushapiwarehouse" > Cid Remarks for Push Api </a>
+
+Following are the remarks shared in the cases when the order is marked as `cid`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Cid             | Customer Delayed Pickup            |
+| Cid             | Seller Initiated Delay             |
+
+
+## <a name = "Appendix_ncpushapiwarehouse" > Not Contactable Remarks for PUSH Api </a>
+
+Following are the remarks shared in the cases when the order is marked as `nc`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Contactable | Address issue                      |
+| Not Contactable | Customer not reachable             |
+| Not Contactable | Seller not reachable               |
+
+## <a name = "Appendix_napushapiwarehouse" > Not Attempted Remarks for PUSH Api </a>
+
+Following are the remarks shared in the cases when the order is marked as `Not Attempted`.
+
+| Status          | Remarks                            |
+|-----------------|------------------------------------|
+| Not Attempted   | Not able to attempt                |
+
+
+## <a name = "Appendix_On_Holdpushapiwarehouse" > On Hold Remarks for PUSH Api </a>
+
+Following are the remarks shared in the cases when the order is marked as `On Hold`.
+
+| Status  | Remarks                                            |
+|---------|----------------------------------------------------|
+| On Hold | Customer want pick-up from Non-Serviceable area    |
+| On Hold | Pincode Address Mismatch                           |
+| On Hold | Incorrect contact number                           |
+| On Hold | Address issue                                      |
+| On Hold | Customer wants replacement/refund first            |
+| On Hold | Incomplete information received from client        |
+| On Hold | Mandatory check not available                      |
+| On Hold | Pickup already done by other DSP                   |
+| On Hold | Shipment is not picked                             |
+| On Hold | Successful 3 attempts done                         |
+| On Hold | Large Shipment                                     |
+| On Hold | Customer wants pickup beyond cut off time          |
+| On Hold | Customer changed his/her mind                      |
+| On Hold | Doorstep QC Brandbox not available                 |
+| On Hold | Doorstep QC Price Tag missing                      |
+| On Hold | Doorstep QC Product Damage                         |
+| On Hold | Doorstep QC Product Mismatch                       |
+| On Hold | Doorstep QC Used Item                              |
+| On Hold | Unable to pickup in given slot                     |
+| On Hold | Non Serviceable Area                               |
+| On Hold | Seller wants pickup beyond cut off time            |
+| On Hold | COVID Restricted Area                              |

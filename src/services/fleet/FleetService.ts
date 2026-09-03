@@ -1,354 +1,477 @@
+'use client';
 
 import { Vehicle, TripLog, FuelLog } from "@/types/fleet";
+import { supabaseClient } from '@/integrations/supabase/client';
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";
 
-// Mock data for vehicles
-const mockVehicles: Vehicle[] = [
-  {
-    id: "VEH001",
-    branchId: "branch-001",
-    model: "Toyota Innova",
-    type: "suv",
-    registrationNumber: "DL01AB1234",
-    status: "available",
-    fuelType: "diesel",
-    currentOdometer: 45678,
-    purchaseDate: "2023-06-15T00:00:00Z",
-    insuranceExpiryDate: "2025-06-14T00:00:00Z",
-    pollutionCertExpiryDate: "2025-12-14T00:00:00Z",
-    lastMaintenanceDate: "2025-04-10T00:00:00Z",
-    nextMaintenanceDue: "2025-07-10T00:00:00Z",
-    maintenanceInterval: 5000,
-    createdAt: "2023-06-15T12:30:00Z",
-    updatedAt: "2025-04-10T15:45:00Z"
-  },
-  {
-    id: "VEH002",
-    branchId: "branch-001",
-    model: "Maruti Swift",
-    type: "car",
-    registrationNumber: "DL01CD5678",
-    status: "in-use",
-    fuelType: "petrol",
-    currentOdometer: 32456,
-    assignedDriver: "Rajesh Kumar",
-    purchaseDate: "2024-01-20T00:00:00Z",
-    insuranceExpiryDate: "2026-01-19T00:00:00Z",
-    pollutionCertExpiryDate: "2025-07-19T00:00:00Z",
-    lastMaintenanceDate: "2025-03-25T00:00:00Z",
-    nextMaintenanceDue: "2025-06-25T00:00:00Z",
-    maintenanceInterval: 3000,
-    createdAt: "2024-01-20T10:15:00Z",
-    updatedAt: "2025-03-25T14:20:00Z"
-  },
-  {
-    id: "VEH003",
-    branchId: "branch-002",
-    model: "Tata Winger",
-    type: "van",
-    registrationNumber: "MH02EF9012",
-    status: "maintenance",
-    fuelType: "diesel",
-    currentOdometer: 78901,
-    purchaseDate: "2022-11-05T00:00:00Z",
-    insuranceExpiryDate: "2025-11-04T00:00:00Z",
-    pollutionCertExpiryDate: "2025-05-04T00:00:00Z",
-    lastMaintenanceDate: "2025-05-01T00:00:00Z",
-    nextMaintenanceDue: "2025-08-01T00:00:00Z",
-    maintenanceInterval: 5000,
-    createdAt: "2022-11-05T09:30:00Z",
-    updatedAt: "2025-05-01T11:45:00Z"
-  }
-];
-
-// Mock data for trip logs
-const mockTripLogs: TripLog[] = [
-  {
-    id: "TRP001",
-    vehicleId: "VEH001",
-    branchId: "branch-001",
-    startDate: "2025-05-01T09:00:00Z",
-    endDate: "2025-05-01T14:30:00Z",
-    startOdometer: 45500,
-    endOdometer: 45678,
-    purpose: "Client Meeting",
-    driver: "Anil Sharma",
-    authorizedBy: "Branch Manager",
-    status: "completed",
-    startLocation: "Delhi Office",
-    destination: "Client Site, Gurugram",
-    notes: "Successful meeting with client",
-    createdAt: "2025-05-01T08:45:00Z",
-    updatedAt: "2025-05-01T14:45:00Z"
-  },
-  {
-    id: "TRP002",
-    vehicleId: "VEH002",
-    branchId: "branch-001",
-    startDate: "2025-05-05T10:00:00Z",
-    status: "in-progress",
-    startOdometer: 32456,
-    purpose: "Site Inspection",
-    driver: "Rajesh Kumar",
-    authorizedBy: "Operations Manager",
-    startLocation: "Delhi Office",
-    destination: "Construction Site, Noida",
-    createdAt: "2025-05-05T09:30:00Z",
-    updatedAt: "2025-05-05T10:05:00Z"
-  },
-  {
-    id: "TRP003",
-    vehicleId: "VEH001",
-    branchId: "branch-001",
-    startDate: "2025-05-07T08:00:00Z",
-    status: "planned",
-    startOdometer: 45678,
-    purpose: "Airport Pickup",
-    driver: "Anil Sharma",
-    authorizedBy: "HR Manager",
-    startLocation: "Delhi Office",
-    destination: "Delhi International Airport",
-    notes: "Pickup new consultant arriving from Mumbai",
-    createdAt: "2025-05-06T16:30:00Z",
-    updatedAt: "2025-05-06T16:30:00Z"
-  }
-];
-
-// Mock data for fuel logs
-const mockFuelLogs: FuelLog[] = [
-  {
-    id: "FUEL001",
-    vehicleId: "VEH001",
-    branchId: "branch-001",
-    date: "2025-04-28T11:15:00Z",
-    odometerReading: 45300,
-    fuelAmount: 45.5,
-    fuelCost: 4550,
-    fuelType: "diesel",
-    filledBy: "Anil Sharma",
-    paymentMode: "card",
-    receiptNumber: "IN78901234",
-    createdAt: "2025-04-28T11:20:00Z",
-    updatedAt: "2025-04-28T11:20:00Z"
-  },
-  {
-    id: "FUEL002",
-    vehicleId: "VEH002",
-    branchId: "branch-001",
-    date: "2025-05-02T18:30:00Z",
-    odometerReading: 32300,
-    fuelAmount: 35,
-    fuelCost: 3850,
-    fuelType: "petrol",
-    filledBy: "Rajesh Kumar",
-    paymentMode: "cash",
-    createdAt: "2025-05-02T18:35:00Z",
-    updatedAt: "2025-05-02T18:35:00Z"
-  },
-  {
-    id: "FUEL003",
-    vehicleId: "VEH003",
-    branchId: "branch-002",
-    date: "2025-04-25T16:45:00Z",
-    odometerReading: 78700,
-    fuelAmount: 60,
-    fuelCost: 6000,
-    fuelType: "diesel",
-    filledBy: "Maintenance Team",
-    paymentMode: "account",
-    receiptNumber: "AC12345",
-    notes: "Full tank before scheduled maintenance",
-    createdAt: "2025-04-25T16:50:00Z",
-    updatedAt: "2025-04-25T16:50:00Z"
-  }
-];
-
-// Fleet Service functions
-export const getVehicles = (branchId: string): Vehicle[] => {
-  return mockVehicles.filter(vehicle => vehicle.branchId === branchId);
-};
-
-export const getVehicleById = (vehicleId: string): Vehicle | undefined => {
-  return mockVehicles.find(vehicle => vehicle.id === vehicleId);
-};
-
-export const createVehicle = (vehicle: Omit<Vehicle, 'id' | 'createdAt' | 'updatedAt'>): Vehicle => {
-  const newVehicle: Vehicle = {
-    ...vehicle,
-    id: `VEH${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+// ─── Helper: Map DB row (snake_case) → Vehicle (camelCase) ──────────────────
+function mapRowToVehicle(row: any): Vehicle {
+  return {
+    id: row.id,
+    branchId: row.branch_id,
+    model: row.model,
+    type: row.type,
+    registrationNumber: row.registration_number,
+    ownership: row.ownership,
+    status: row.status,
+    fuelType: row.fuel_type,
+    currentOdometer: Number(row.current_odometer),
+    ratePerKm: Number(row.rate_per_km),
+    purchaseDate: row.purchase_date || '',
+    insuranceExpiryDate: row.insurance_expiry_date || '',
+    pollutionCertExpiryDate: row.pollution_cert_expiry_date || '',
+    assignedDriver: row.assigned_driver || undefined,
+    ownerName: row.owner_name || undefined,
+    ownerEmployeeId: row.owner_employee_id || undefined,
+    department: row.department || undefined,
+    traccarDeviceId: row.traccar_device_id || undefined,
+    traccarDeviceName: row.traccar_device_name || undefined,
+    dlNumber: row.dl_number || undefined,
+    dlExpiryDate: row.dl_expiry_date || undefined,
+    lastMaintenanceDate: row.last_maintenance_date || undefined,
+    nextMaintenanceDue: row.next_maintenance_due || undefined,
+    maintenanceInterval: Number(row.maintenance_interval),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
-  
-  mockVehicles.push(newVehicle);
-  return newVehicle;
-};
+}
 
-export const updateVehicle = (vehicle: Vehicle): Vehicle => {
-  const index = mockVehicles.findIndex(v => v.id === vehicle.id);
-  
-  if (index !== -1) {
-    const updatedVehicle = {
-      ...vehicle,
-      updatedAt: new Date().toISOString(),
-    };
-    
-    mockVehicles[index] = updatedVehicle;
-    return updatedVehicle;
-  }
-  
-  throw new Error(`Vehicle with ID ${vehicle.id} not found`);
-};
+// ─── Helper: Map Vehicle (camelCase) → DB row (snake_case) ──────────────────
+function mapVehicleToRow(vehicle: Partial<Vehicle> & { branchId: string }) {
+  const row: Record<string, any> = {};
+  if (vehicle.branchId !== undefined) row.branch_id = vehicle.branchId;
+  if (vehicle.model !== undefined) row.model = vehicle.model;
+  if (vehicle.type !== undefined) row.type = vehicle.type;
+  if (vehicle.registrationNumber !== undefined) row.registration_number = vehicle.registrationNumber;
+  if (vehicle.ownership !== undefined) row.ownership = vehicle.ownership;
+  if (vehicle.status !== undefined) row.status = vehicle.status;
+  if (vehicle.fuelType !== undefined) row.fuel_type = vehicle.fuelType;
+  if (vehicle.currentOdometer !== undefined) row.current_odometer = vehicle.currentOdometer;
+  if (vehicle.ratePerKm !== undefined) row.rate_per_km = vehicle.ratePerKm;
+  if (vehicle.purchaseDate !== undefined) row.purchase_date = vehicle.purchaseDate || null;
+  if (vehicle.insuranceExpiryDate !== undefined) row.insurance_expiry_date = vehicle.insuranceExpiryDate || null;
+  if (vehicle.pollutionCertExpiryDate !== undefined) row.pollution_cert_expiry_date = vehicle.pollutionCertExpiryDate || null;
+  if (vehicle.assignedDriver !== undefined) row.assigned_driver = vehicle.assignedDriver || null;
+  if (vehicle.ownerName !== undefined) row.owner_name = vehicle.ownerName || null;
+  if (vehicle.ownerEmployeeId !== undefined) row.owner_employee_id = vehicle.ownerEmployeeId || null;
+  if (vehicle.department !== undefined) row.department = vehicle.department || null;
+  if (vehicle.traccarDeviceId !== undefined) row.traccar_device_id = vehicle.traccarDeviceId || null;
+  if (vehicle.traccarDeviceName !== undefined) row.traccar_device_name = vehicle.traccarDeviceName || null;
+  if (vehicle.dlNumber !== undefined) row.dl_number = vehicle.dlNumber || null;
+  if (vehicle.dlExpiryDate !== undefined) row.dl_expiry_date = vehicle.dlExpiryDate || null;
+  if (vehicle.lastMaintenanceDate !== undefined) row.last_maintenance_date = vehicle.lastMaintenanceDate || null;
+  if (vehicle.nextMaintenanceDue !== undefined) row.next_maintenance_due = vehicle.nextMaintenanceDue || null;
+  if (vehicle.maintenanceInterval !== undefined) row.maintenance_interval = vehicle.maintenanceInterval;
+  return row;
+}
 
-export const getTripLogs = (branchId: string, vehicleId?: string): TripLog[] => {
-  return mockTripLogs.filter(
-    log => log.branchId === branchId && (vehicleId ? log.vehicleId === vehicleId : true)
-  );
-};
-
-export const createTripLog = (tripLog: Omit<TripLog, 'id' | 'createdAt' | 'updatedAt'>): TripLog => {
-  const newTripLog: TripLog = {
-    ...tripLog,
-    id: `TRP${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+// ─── Helper: Map DB row → TripLog ───────────────────────────────────────────
+function mapRowToTripLog(row: any): TripLog {
+  return {
+    id: row.id,
+    vehicleId: row.vehicle_id,
+    branchId: row.branch_id,
+    startDate: row.start_date,
+    endDate: row.end_date || undefined,
+    startOdometer: Number(row.start_odometer),
+    endOdometer: row.end_odometer ? Number(row.end_odometer) : undefined,
+    purpose: row.purpose,
+    driver: row.driver,
+    authorizedBy: row.authorized_by,
+    status: row.status,
+    startLocation: row.start_location,
+    destination: row.destination,
+    actualRoute: row.actual_route || undefined,
+    notes: row.notes || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
-  
-  mockTripLogs.push(newTripLog);
-  
+}
+
+// ─── Helper: Map DB row → FuelLog ───────────────────────────────────────────
+function mapRowToFuelLog(row: any): FuelLog {
+  return {
+    id: row.id,
+    vehicleId: row.vehicle_id,
+    branchId: row.branch_id,
+    date: row.date,
+    odometerReading: Number(row.odometer_reading),
+    fuelAmount: Number(row.fuel_amount),
+    fuelCost: Number(row.fuel_cost),
+    fuelType: row.fuel_type,
+    filledBy: row.filled_by,
+    paymentMode: row.payment_mode,
+    receiptNumber: row.receipt_number || undefined,
+    billImageUrl: row.bill_image_url || undefined,
+    notes: row.notes || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// ─── Vehicle Service Functions (async, Supabase-backed) ─────────────────────
+export const getVehicles = async (branchId: string): Promise<Vehicle[]> => {
+  const { data, error } = await supabaseClient
+    .from('vehicles')
+    .select('*')
+    .eq('branch_id', branchId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error fetching vehicles:', error);
+    return [];
+  }
+  return (data || []).map(mapRowToVehicle);
+};
+
+export const getAllVehicles = async (): Promise<Vehicle[]> => {
+  const { data, error } = await supabaseClient
+    .from('vehicles')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error fetching all vehicles:', error);
+    return [];
+  }
+  return (data || []).map(mapRowToVehicle);
+};
+
+export const getVehicleById = async (vehicleId: string): Promise<Vehicle | undefined> => {
+  const { data, error } = await supabaseClient
+    .from('vehicles')
+    .select('*')
+    .eq('id', vehicleId)
+    .single();
+
+  if (error || !data) return undefined;
+  return mapRowToVehicle(data);
+};
+
+export const createVehicle = async (
+  vehicle: Omit<Vehicle, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<Vehicle> => {
+  const id = `VEH${Date.now().toString().slice(-6)}`;
+  const now = new Date().toISOString();
+
+  const row = {
+    id,
+    ...mapVehicleToRow(vehicle as any),
+    created_at: now,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabaseClient
+    .from('vehicles')
+    .insert(row)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error creating vehicle:', error);
+    throw new Error(`Failed to create vehicle: ${error.message}`);
+  }
+
+  return mapRowToVehicle(data);
+};
+
+export const updateVehicle = async (vehicle: Vehicle): Promise<Vehicle> => {
+  const now = new Date().toISOString();
+  const row = {
+    ...mapVehicleToRow(vehicle as any),
+    updated_at: now,
+  };
+
+  const { data, error } = await supabaseClient
+    .from('vehicles')
+    .update(row)
+    .eq('id', vehicle.id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error updating vehicle:', error);
+    throw new Error(`Failed to update vehicle: ${error.message}`);
+  }
+
+  return mapRowToVehicle(data);
+};
+
+export const deleteVehicle = async (vehicleId: string): Promise<boolean> => {
+  const { error } = await supabaseClient
+    .from('vehicles')
+    .delete()
+    .eq('id', vehicleId);
+
+  if (error) {
+    console.error('Error deleting vehicle:', error);
+    throw new Error(`Failed to delete vehicle: ${error.message}`);
+  }
+  return true;
+};
+
+export const getEmployeeOwnedVehicles = async (): Promise<Vehicle[]> => {
+  const { data, error } = await supabaseClient
+    .from('vehicles')
+    .select('*')
+    .eq('ownership', 'employee-owned');
+
+  if (error) return [];
+  return (data || []).map(mapRowToVehicle);
+};
+
+export const getCompanyOwnedVehicles = async (branchId?: string): Promise<Vehicle[]> => {
+  let query = supabaseClient
+    .from('vehicles')
+    .select('*')
+    .eq('ownership', 'company-owned');
+
+  if (branchId) {
+    query = query.eq('branch_id', branchId);
+  }
+
+  const { data, error } = await query;
+  if (error) return [];
+  return (data || []).map(mapRowToVehicle);
+};
+
+// ─── Trip Log Service Functions ─────────────────────────────────────────────
+export const getTripLogs = async (branchId: string, vehicleId?: string): Promise<TripLog[]> => {
+  let query = supabaseClient
+    .from('trip_logs')
+    .select('*')
+    .eq('branch_id', branchId)
+    .order('created_at', { ascending: false });
+
+  if (vehicleId) {
+    query = query.eq('vehicle_id', vehicleId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('Error fetching trip logs:', error);
+    return [];
+  }
+  return (data || []).map(mapRowToTripLog);
+};
+
+export const createTripLog = async (
+  tripLog: Omit<TripLog, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<TripLog> => {
+  const id = `TRP${Date.now().toString().slice(-6)}`;
+  const now = new Date().toISOString();
+
+  const row = {
+    id,
+    vehicle_id: tripLog.vehicleId,
+    branch_id: tripLog.branchId,
+    start_date: tripLog.startDate,
+    end_date: tripLog.endDate || null,
+    start_odometer: tripLog.startOdometer,
+    end_odometer: tripLog.endOdometer || null,
+    purpose: tripLog.purpose,
+    driver: tripLog.driver,
+    authorized_by: tripLog.authorizedBy,
+    status: tripLog.status,
+    start_location: tripLog.startLocation,
+    destination: tripLog.destination,
+    actual_route: tripLog.actualRoute || null,
+    notes: tripLog.notes || null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabaseClient
+    .from('trip_logs')
+    .insert(row)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create trip log: ${error.message}`);
+  }
+
+  const result = mapRowToTripLog(data);
+
   emitEvent(EVENT_TYPES.FLEET_TRIP_LOGGED, {
-    tripId: newTripLog.id,
-    vehicleId: newTripLog.vehicleId,
-    purpose: newTripLog.purpose,
+    tripId: result.id,
+    vehicleId: result.vehicleId,
+    purpose: result.purpose,
   });
-  
-  return newTripLog;
+
+  return result;
 };
 
-export const updateTripLog = (tripLog: TripLog): TripLog => {
-  const index = mockTripLogs.findIndex(t => t.id === tripLog.id);
-  
-  if (index !== -1) {
-    const updatedTripLog = {
-      ...tripLog,
-      updatedAt: new Date().toISOString(),
-    };
-    
-    mockTripLogs[index] = updatedTripLog;
-    
-    // If trip is completed, update vehicle odometer
-    if (updatedTripLog.status === 'completed' && updatedTripLog.endOdometer) {
-      const vehicleIndex = mockVehicles.findIndex(v => v.id === updatedTripLog.vehicleId);
-      if (vehicleIndex !== -1) {
-        mockVehicles[vehicleIndex] = {
-          ...mockVehicles[vehicleIndex],
-          currentOdometer: updatedTripLog.endOdometer,
-          updatedAt: new Date().toISOString(),
-        };
-        
-        // Check if maintenance is due
-        const vehicle = mockVehicles[vehicleIndex];
-        const lastMaintenance = vehicle.lastMaintenanceDate ? new Date(vehicle.lastMaintenanceDate) : null;
-        const nextMaintenanceDue = vehicle.nextMaintenanceDue ? new Date(vehicle.nextMaintenanceDue) : null;
-        
-        if (nextMaintenanceDue && new Date() >= nextMaintenanceDue) {
-          emitEvent(EVENT_TYPES.FLEET_MAINTENANCE_DUE, {
-            vehicleId: vehicle.id,
-            vehicle: vehicle.model,
-            registrationNumber: vehicle.registrationNumber,
-          });
-        }
+export const updateTripLog = async (tripLog: TripLog): Promise<TripLog> => {
+  const now = new Date().toISOString();
+
+  const row = {
+    vehicle_id: tripLog.vehicleId,
+    branch_id: tripLog.branchId,
+    start_date: tripLog.startDate,
+    end_date: tripLog.endDate || null,
+    start_odometer: tripLog.startOdometer,
+    end_odometer: tripLog.endOdometer || null,
+    purpose: tripLog.purpose,
+    driver: tripLog.driver,
+    authorized_by: tripLog.authorizedBy,
+    status: tripLog.status,
+    start_location: tripLog.startLocation,
+    destination: tripLog.destination,
+    actual_route: tripLog.actualRoute || null,
+    notes: tripLog.notes || null,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabaseClient
+    .from('trip_logs')
+    .update(row)
+    .eq('id', tripLog.id)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update trip log: ${error.message}`);
+  }
+
+  const result = mapRowToTripLog(data);
+
+  // If trip is completed, update vehicle odometer
+  if (result.status === 'completed' && result.endOdometer) {
+    const { data: vehicleData } = await supabaseClient
+      .from('vehicles')
+      .update({ current_odometer: result.endOdometer, updated_at: now })
+      .eq('id', result.vehicleId)
+      .select()
+      .single();
+
+    if (vehicleData) {
+      const vehicle = mapRowToVehicle(vehicleData);
+      const nextMaintenanceDue = vehicle.nextMaintenanceDue ? new Date(vehicle.nextMaintenanceDue) : null;
+      if (nextMaintenanceDue && new Date() >= nextMaintenanceDue) {
+        emitEvent(EVENT_TYPES.FLEET_MAINTENANCE_DUE, {
+          vehicleId: vehicle.id,
+          vehicle: vehicle.model,
+          registrationNumber: vehicle.registrationNumber,
+        });
       }
     }
-    
-    return updatedTripLog;
   }
-  
-  throw new Error(`Trip log with ID ${tripLog.id} not found`);
+
+  return result;
 };
 
-export const getFuelLogs = (branchId: string, vehicleId?: string): FuelLog[] => {
-  return mockFuelLogs.filter(
-    log => log.branchId === branchId && (vehicleId ? log.vehicleId === vehicleId : true)
-  );
+// ─── Fuel Log Service Functions ─────────────────────────────────────────────
+export const getFuelLogs = async (branchId: string, vehicleId?: string): Promise<FuelLog[]> => {
+  let query = supabaseClient
+    .from('fuel_logs')
+    .select('*')
+    .eq('branch_id', branchId)
+    .order('created_at', { ascending: false });
+
+  if (vehicleId) {
+    query = query.eq('vehicle_id', vehicleId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('Error fetching fuel logs:', error);
+    return [];
+  }
+  return (data || []).map(mapRowToFuelLog);
 };
 
-export const createFuelLog = (fuelLog: Omit<FuelLog, 'id' | 'createdAt' | 'updatedAt'>): FuelLog => {
-  const newFuelLog: FuelLog = {
-    ...fuelLog,
-    id: `FUEL${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+export const createFuelLog = async (
+  fuelLog: Omit<FuelLog, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<FuelLog> => {
+  const id = `FUEL${Date.now().toString().slice(-6)}`;
+  const now = new Date().toISOString();
+
+  const row = {
+    id,
+    vehicle_id: fuelLog.vehicleId,
+    branch_id: fuelLog.branchId,
+    date: fuelLog.date,
+    odometer_reading: fuelLog.odometerReading,
+    fuel_amount: fuelLog.fuelAmount,
+    fuel_cost: fuelLog.fuelCost,
+    fuel_type: fuelLog.fuelType,
+    filled_by: fuelLog.filledBy,
+    payment_mode: fuelLog.paymentMode,
+    receipt_number: fuelLog.receiptNumber || null,
+    bill_image_url: fuelLog.billImageUrl || null,
+    notes: fuelLog.notes || null,
+    created_at: now,
+    updated_at: now,
   };
-  
-  mockFuelLogs.push(newFuelLog);
-  return newFuelLog;
+
+  const { data, error } = await supabaseClient
+    .from('fuel_logs')
+    .insert(row)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create fuel log: ${error.message}`);
+  }
+
+  return mapRowToFuelLog(data);
 };
 
-export const updateFuelLog = (fuelLog: FuelLog): FuelLog => {
-  const index = mockFuelLogs.findIndex(f => f.id === fuelLog.id);
-  
-  if (index !== -1) {
-    const updatedFuelLog = {
-      ...fuelLog,
-      updatedAt: new Date().toISOString(),
-    };
-    
-    mockFuelLogs[index] = updatedFuelLog;
-    return updatedFuelLog;
+export const updateFuelLog = async (fuelLog: FuelLog): Promise<FuelLog> => {
+  const now = new Date().toISOString();
+
+  const row = {
+    vehicle_id: fuelLog.vehicleId,
+    branch_id: fuelLog.branchId,
+    date: fuelLog.date,
+    odometer_reading: fuelLog.odometerReading,
+    fuel_amount: fuelLog.fuelAmount,
+    fuel_cost: fuelLog.fuelCost,
+    fuel_type: fuelLog.fuelType,
+    filled_by: fuelLog.filledBy,
+    payment_mode: fuelLog.paymentMode,
+    receipt_number: fuelLog.receiptNumber || null,
+    bill_image_url: fuelLog.billImageUrl || null,
+    notes: fuelLog.notes || null,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabaseClient
+    .from('fuel_logs')
+    .update(row)
+    .eq('id', fuelLog.id)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update fuel log: ${error.message}`);
   }
-  
-  throw new Error(`Fuel log with ID ${fuelLog.id} not found`);
+
+  return mapRowToFuelLog(data);
 };
 
-export const checkMaintenanceDue = (vehicleId: string): boolean => {
-  const vehicle = mockVehicles.find(v => v.id === vehicleId);
-  
-  if (!vehicle) {
-    throw new Error(`Vehicle with ID ${vehicleId} not found`);
-  }
-  
-  if (!vehicle.nextMaintenanceDue) {
-    return false;
-  }
-  
+// ─── Maintenance Helpers ────────────────────────────────────────────────────
+export const checkMaintenanceDue = async (vehicleId: string): Promise<boolean> => {
+  const vehicle = await getVehicleById(vehicleId);
+  if (!vehicle) throw new Error(`Vehicle with ID ${vehicleId} not found`);
+  if (!vehicle.nextMaintenanceDue) return false;
   return new Date() >= new Date(vehicle.nextMaintenanceDue);
 };
 
-export const scheduleMaintenance = (
-  vehicleId: string, 
-  maintenanceDate: string,
-  details: string
-): void => {
-  const vehicle = mockVehicles.find(v => v.id === vehicleId);
-  
-  if (!vehicle) {
-    throw new Error(`Vehicle with ID ${vehicleId} not found`);
-  }
-  
-  // Update vehicle status to maintenance on the scheduled date
-  const index = mockVehicles.findIndex(v => v.id === vehicleId);
-  mockVehicles[index] = {
-    ...vehicle,
-    status: 'maintenance',
-    updatedAt: new Date().toISOString(),
-  };
-  
-  // Create maintenance ticket
-  createMaintenanceTicket(vehicleId, maintenanceDate, details);
-};
-
-const createMaintenanceTicket = (
+export const scheduleMaintenance = async (
   vehicleId: string,
   maintenanceDate: string,
   details: string
-): void => {
-  const vehicle = mockVehicles.find(v => v.id === vehicleId);
-  
-  if (!vehicle) {
-    throw new Error(`Vehicle with ID ${vehicleId} not found`);
+): Promise<void> => {
+  const now = new Date().toISOString();
+
+  const { error } = await supabaseClient
+    .from('vehicles')
+    .update({ status: 'maintenance', updated_at: now })
+    .eq('id', vehicleId);
+
+  if (error) {
+    throw new Error(`Failed to schedule maintenance: ${error.message}`);
   }
-  
-  // In a real implementation, this would create an entry in a maintenance system
-  console.log(`Maintenance scheduled for ${vehicle.model} (${vehicle.registrationNumber}) on ${maintenanceDate}: ${details}`);
 };

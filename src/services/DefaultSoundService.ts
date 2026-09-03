@@ -1,8 +1,9 @@
+'use client';
 
 // Fallback sound service that generates tones using Web Audio API
 // This will be used when actual sound files aren't available
 
-type FallbackSoundType = 'welcome' | 'click' | 'success' | 'add' | 'delete' | 'error' | 'download' | 'notification' | 'default';
+type FallbackSoundType = 'welcome' | 'click' | 'success' | 'add' | 'delete' | 'error' | 'download' | 'notification' | 'create' | 'edit' | 'approve' | 'reject' | 'default';
 
 // Sound configuration for fallback tones
 interface ToneConfig {
@@ -17,6 +18,10 @@ const soundConfigs: Record<FallbackSoundType, ToneConfig> = {
   click: { frequency: 800, duration: 120, volume: 0.1, type: 'sine' },
   success: { frequency: 600, duration: 250, volume: 0.2, type: 'sine' },
   add: { frequency: 500, duration: 200, volume: 0.2, type: 'sine' },
+  create: { frequency: 520, duration: 300, volume: 0.2, type: 'sine' },
+  edit: { frequency: 480, duration: 200, volume: 0.15, type: 'sine' },
+  approve: { frequency: 700, duration: 350, volume: 0.2, type: 'sine' },
+  reject: { frequency: 250, duration: 400, volume: 0.2, type: 'square' },
   delete: { frequency: 300, duration: 300, volume: 0.2, type: 'sine' },
   error: { frequency: 200, duration: 350, volume: 0.2, type: 'square' },
   download: { frequency: 440, duration: 500, volume: 0.2, type: 'sine' },
@@ -31,7 +36,6 @@ const initAudioContext = (): AudioContext => {
   if (!audioContext) {
     try {
       audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      console.log("Fallback sound system initialized");
     } catch (error) {
       console.error("Web Audio API not supported:", error);
     }
@@ -68,8 +72,6 @@ export const playFallbackSound = (type: FallbackSoundType = 'default') => {
     // Play sound
     oscillator.start(ctx.currentTime);
     oscillator.stop(ctx.currentTime + config.duration / 1000);
-
-    console.log(`Played fallback sound: ${type}`);
   } catch (error) {
     console.warn("Error playing fallback sound:", error);
   }

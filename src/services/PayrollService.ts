@@ -1,8 +1,13 @@
+'use client';
 
 import { emitEvent, EVENT_TYPES } from "./EventService";
-import { RequestStatus } from "./LoanService";
+import { supabaseClient } from "@/integrations/supabase/client";
+import { auditActions } from "@/utils/auditLog";
 
-// Interface for salary payment request
+export type RequestStatus = 'DRAFT' | 'SENT_TO_ACCOUNTS' | 'APPROVED_BY_ACCOUNTS' | 'REJECTED_BY_ACCOUNTS' | 'PROCESSING' | 'COMPLETED';
+
+// ─── Interfaces ───────────────────────────────────────────────────────────────
+
 export interface SalaryPaymentRequest {
   id: string;
   employeeIds: string[];
@@ -22,12 +27,10 @@ export interface SalaryPaymentRequest {
   rejectionReason?: string;
   processedOn?: string;
   paymentReference?: string;
-  // New fields for individual employee requests
   employeeDetails?: EmployeeSalaryDetail[];
   heldSalaries?: HeldSalaryRecord[];
 }
 
-// Interface for individual employee salary details
 export interface EmployeeSalaryDetail {
   employeeId: string;
   employeeName: string;
@@ -40,15 +43,13 @@ export interface EmployeeSalaryDetail {
   holdReason?: string;
 }
 
-// Interface for salary deductions
 export interface SalaryDeduction {
   type: 'PF' | 'ESI' | 'PT' | 'TDS' | 'LOAN' | 'MESS' | 'OTHER';
   description: string;
   amount: number;
-  reference?: string; // For example, loan ID or mess bill ID
+  reference?: string;
 }
 
-// Interface for held salary records
 export interface HeldSalaryRecord {
   employeeId: string;
   employeeName: string;
@@ -62,252 +63,375 @@ export interface HeldSalaryRecord {
   resolutionNotes?: string;
 }
 
-// Store payment requests in memory
-let salaryPaymentRequests: SalaryPaymentRequest[] = [];
+// ─── In-memory cache (populated from Supabase on first read) ─────────────────
+// This avoids a full DB round-trip on every function call while ensuring
+// data survives server restarts (primary source of truth is payroll_requests table).
+let _cache: SalaryPaymentRequest[] | null = null;
 
-// Generate a unique request ID
-const generateRequestId = () => {
-  return `SALARY-REQ-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
-};
+async function getCache(): Promise<SalaryPaymentRequest[]> {
+  if (_cache !== null) return _cache;
+  const { data, error } = await supabaseClient
+    .from('payroll_requests')
+    .select('*')
+    .order('created_at', { ascending: false });
 
-// Create a new salary payment request
-export const createSalaryPaymentRequest = (requestData: Omit<SalaryPaymentRequest, 'id' | 'status' | 'requestDate'>) => {
+  if (error) {
+    console.error('[PayrollService] Failed to load from DB, using empty cache:', error.message);
+    _cache = [];
+    return _cache;
+  }
+
+  // Map snake_case DB columns back to camelCase TS interface
+  _cache = (data ?? []).map(row => ({
+    id: row.id,
+    employeeIds: row.employee_ids ?? [],
+    department: row.department ?? undefined,
+    totalAmount: Number(row.total_amount),
+    requestDate: row.request_date,
+    requestedBy: row.requested_by,
+    description: row.description ?? '',
+    month: row.month,
+    year: row.year,
+    status: row.status as RequestStatus,
+    sentToAccountsOn: row.sent_to_accounts_on ?? undefined,
+    accountsApprovedOn: row.accounts_approved_on ?? undefined,
+    accountsApprovedBy: row.accounts_approved_by ?? undefined,
+    accountsRejectedOn: row.accounts_rejected_on ?? undefined,
+    accountsRejectedBy: row.accounts_rejected_by ?? undefined,
+    rejectionReason: row.rejection_reason ?? undefined,
+    processedOn: row.processed_on ?? undefined,
+    paymentReference: row.payment_reference ?? undefined,
+    employeeDetails: row.employee_details ?? undefined,
+  }));
+  return _cache;
+}
+
+function invalidateCache() {
+  _cache = null;
+}
+
+// ─── ID generator ─────────────────────────────────────────────────────────────
+const generateRequestId = () =>
+  `SALARY-REQ-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+
+// ─── CRUD operations ──────────────────────────────────────────────────────────
+
+export const createSalaryPaymentRequest = async (
+  requestData: Omit<SalaryPaymentRequest, 'id' | 'status' | 'requestDate'>
+): Promise<SalaryPaymentRequest> => {
   const newRequest: SalaryPaymentRequest = {
     id: generateRequestId(),
     status: 'DRAFT',
-    requestDate: new Date().toISOString(),
-    ...requestData
+    requestDate: new Date().toISOString(), // UI display only; DB uses server-side created_at
+    ...requestData,
   };
-  
-  salaryPaymentRequests.push(newRequest);
-  
-  // Emit event for salary payment requested
+
+  const { error } = await supabaseClient.from('payroll_requests').insert({
+    id: newRequest.id,
+    employee_ids: newRequest.employeeIds,
+    department: newRequest.department ?? null,
+    total_amount: newRequest.totalAmount,
+    // request_date uses DB default now() — not client time
+    requested_by: newRequest.requestedBy,
+    description: newRequest.description,
+    month: newRequest.month,
+    year: newRequest.year,
+    status: newRequest.status,
+    employee_details: newRequest.employeeDetails ?? null,
+  });
+
+  if (error) {
+    console.error('[PayrollService] createSalaryPaymentRequest DB error:', error.message);
+  }
+
+  // Every payroll mutation in this service already holds both the prior request
+  // and the updated one, so the audit diff comes free — no extra read needed.
+  void auditActions.payrollGenerated(
+    `${newRequest.month} ${newRequest.year}`,
+    newRequest.employeeIds?.length ?? 0,
+    {
+      requestId: newRequest.id,
+      totalAmount: newRequest.totalAmount,
+      department: newRequest.department,
+      requestedBy: newRequest.requestedBy,
+    }
+  );
+
+  invalidateCache();
   emitEvent(EVENT_TYPES.SALARY_PAYMENT_REQUESTED, newRequest);
-  
   return newRequest;
 };
 
-// Submit salary payment request to accounts
-export const submitSalaryRequestToAccounts = (requestId: string) => {
-  const requestIndex = salaryPaymentRequests.findIndex(req => req.id === requestId);
-  
-  if (requestIndex === -1 || salaryPaymentRequests[requestIndex].status !== 'DRAFT') {
-    return null;
-  }
-  
-  // Update status to sent to accounts
-  salaryPaymentRequests[requestIndex] = {
-    ...salaryPaymentRequests[requestIndex],
+export const submitSalaryRequestToAccounts = async (requestId: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  const req = cache.find(r => r.id === requestId);
+  if (!req || req.status !== 'DRAFT') return null;
+
+  const updated: SalaryPaymentRequest = {
+    ...req,
     status: 'SENT_TO_ACCOUNTS',
-    sentToAccountsOn: new Date().toISOString()
+    sentToAccountsOn: new Date().toISOString(), // UI display; DB trigger sets authoritative value
   };
-  
-  return salaryPaymentRequests[requestIndex];
+
+  const { error } = await supabaseClient.from('payroll_requests').update({
+    status: updated.status,
+    // sent_to_accounts_on set by DB trigger (trg_payroll_requests_updated_at)
+  }).eq('id', requestId);
+
+  if (error) console.error('[PayrollService] submitSalaryRequestToAccounts DB error:', error.message);
+
+  void auditActions.payrollTransition('hr.payroll.submit', requestId, req, updated, {
+    totalAmount: updated.totalAmount,
+    employeeCount: updated.employeeIds?.length ?? 0,
+    period: `${updated.month} ${updated.year}`,
+  });
+
+  invalidateCache();
+  return updated;
 };
 
-// Approve salary payment request by accounts
-export const approveSalaryRequestByAccounts = (requestId: string, approver: string) => {
-  const requestIndex = salaryPaymentRequests.findIndex(req => req.id === requestId);
-  
-  if (requestIndex === -1 || salaryPaymentRequests[requestIndex].status !== 'SENT_TO_ACCOUNTS') {
-    return null;
-  }
-  
-  // Update status to approved by accounts
-  salaryPaymentRequests[requestIndex] = {
-    ...salaryPaymentRequests[requestIndex],
+export const approveSalaryRequestByAccounts = async (requestId: string, approver: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  const req = cache.find(r => r.id === requestId);
+  if (!req || req.status !== 'SENT_TO_ACCOUNTS') return null;
+
+  const updated: SalaryPaymentRequest = {
+    ...req,
     status: 'APPROVED_BY_ACCOUNTS',
-    accountsApprovedOn: new Date().toISOString(),
-    accountsApprovedBy: approver
+    accountsApprovedOn: new Date().toISOString(), // UI display; DB trigger sets authoritative value
+    accountsApprovedBy: approver,
   };
-  
-  // Emit event for salary payment approved
-  emitEvent(EVENT_TYPES.SALARY_PAYMENT_APPROVED, salaryPaymentRequests[requestIndex]);
-  
-  return salaryPaymentRequests[requestIndex];
+
+  const { error } = await supabaseClient.from('payroll_requests').update({
+    status: updated.status,
+    // accounts_approved_on set by DB trigger
+    accounts_approved_by: updated.accountsApprovedBy,
+  }).eq('id', requestId);
+
+  if (error) console.error('[PayrollService] approveSalaryRequest DB error:', error.message);
+
+  void auditActions.payrollTransition('hr.payroll.approve', requestId, req, updated, {
+    approver,
+    totalAmount: updated.totalAmount,
+    employeeCount: updated.employeeIds?.length ?? 0,
+    period: `${updated.month} ${updated.year}`,
+  });
+
+  invalidateCache();
+  emitEvent(EVENT_TYPES.SALARY_PAYMENT_APPROVED, updated);
+  return updated;
 };
 
-// Reject salary payment request by accounts
-export const rejectSalaryRequestByAccounts = (requestId: string, reason: string, rejectedBy: string) => {
-  const requestIndex = salaryPaymentRequests.findIndex(req => req.id === requestId);
-  
-  if (requestIndex === -1 || salaryPaymentRequests[requestIndex].status !== 'SENT_TO_ACCOUNTS') {
-    return null;
-  }
-  
-  // Update status to rejected by accounts
-  salaryPaymentRequests[requestIndex] = {
-    ...salaryPaymentRequests[requestIndex],
+export const rejectSalaryRequestByAccounts = async (requestId: string, reason: string, rejectedBy: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  const req = cache.find(r => r.id === requestId);
+  if (!req || req.status !== 'SENT_TO_ACCOUNTS') return null;
+
+  const updated: SalaryPaymentRequest = {
+    ...req,
     status: 'REJECTED_BY_ACCOUNTS',
-    accountsRejectedOn: new Date().toISOString(),
+    accountsRejectedOn: new Date().toISOString(), // UI display; DB trigger sets authoritative value
     accountsRejectedBy: rejectedBy,
-    rejectionReason: reason
+    rejectionReason: reason,
   };
-  
-  // Emit event for salary payment rejected
-  emitEvent(EVENT_TYPES.SALARY_PAYMENT_REJECTED, salaryPaymentRequests[requestIndex]);
-  
-  return salaryPaymentRequests[requestIndex];
+
+  const { error } = await supabaseClient.from('payroll_requests').update({
+    status: updated.status,
+    // accounts_rejected_on set by DB trigger
+    accounts_rejected_by: updated.accountsRejectedBy,
+    rejection_reason: updated.rejectionReason,
+  }).eq('id', requestId);
+
+  if (error) console.error('[PayrollService] rejectSalaryRequest DB error:', error.message);
+
+  void auditActions.payrollTransition('hr.payroll.reject', requestId, req, updated, {
+    rejectedBy,
+    reason,
+    totalAmount: updated.totalAmount,
+    period: `${updated.month} ${updated.year}`,
+  });
+
+  invalidateCache();
+  emitEvent(EVENT_TYPES.SALARY_PAYMENT_REJECTED, updated);
+  return updated;
 };
 
-// Mark salary payment as processed
-export const markSalaryPaymentAsProcessed = (requestId: string, paymentReference: string) => {
-  const requestIndex = salaryPaymentRequests.findIndex(req => req.id === requestId);
-  
-  if (requestIndex === -1 || salaryPaymentRequests[requestIndex].status !== 'APPROVED_BY_ACCOUNTS') {
-    return null;
-  }
-  
-  // Update status to completed
-  salaryPaymentRequests[requestIndex] = {
-    ...salaryPaymentRequests[requestIndex],
+export const markSalaryPaymentAsProcessed = async (requestId: string, paymentReference: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  const req = cache.find(r => r.id === requestId);
+  if (!req || req.status !== 'APPROVED_BY_ACCOUNTS') return null;
+
+  const updated: SalaryPaymentRequest = {
+    ...req,
     status: 'COMPLETED',
-    processedOn: new Date().toISOString(),
-    paymentReference
+    processedOn: new Date().toISOString(), // UI display; DB trigger sets authoritative value
+    paymentReference,
   };
-  
-  return salaryPaymentRequests[requestIndex];
+
+  const { error } = await supabaseClient.from('payroll_requests').update({
+    status: updated.status,
+    // processed_on set by DB trigger
+    payment_reference: updated.paymentReference,
+  }).eq('id', requestId);
+
+  if (error) console.error('[PayrollService] markProcessed DB error:', error.message);
+
+  void auditActions.payrollTransition('hr.payroll.process', requestId, req, updated, {
+    paymentReference,
+    totalAmount: updated.totalAmount,
+    employeeCount: updated.employeeIds?.length ?? 0,
+    period: `${updated.month} ${updated.year}`,
+  });
+
+  invalidateCache();
+  return updated;
 };
 
-// Hold an employee's salary
-export const holdEmployeeSalary = (requestId: string, employeeId: string, reason: string, heldBy: string) => {
-  const requestIndex = salaryPaymentRequests.findIndex(req => req.id === requestId);
-  
-  if (requestIndex === -1) {
-    return null;
-  }
-  
-  const request = salaryPaymentRequests[requestIndex];
-  if (!request.employeeDetails) {
-    return null;
-  }
-  
-  // Find the employee in the salary details
-  const employeeIndex = request.employeeDetails.findIndex(emp => emp.employeeId === employeeId);
-  if (employeeIndex === -1) {
-    return null;
-  }
-  
-  // Create held salary record
+export const holdEmployeeSalary = async (requestId: string, employeeId: string, reason: string, heldBy: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  const req = cache.find(r => r.id === requestId);
+  if (!req?.employeeDetails) return null;
+
+  const empIdx = req.employeeDetails.findIndex(e => e.employeeId === employeeId);
+  if (empIdx === -1) return null;
+
+  const emp = req.employeeDetails[empIdx];
   const heldRecord: HeldSalaryRecord = {
     employeeId,
-    employeeName: request.employeeDetails[employeeIndex].employeeName,
-    amount: request.employeeDetails[employeeIndex].netSalary,
+    employeeName: emp.employeeName,
+    amount: emp.netSalary,
     reason,
     heldBy,
     heldOn: new Date().toISOString(),
-    resolved: false
+    resolved: false,
   };
-  
-  // Update employee status
-  request.employeeDetails[employeeIndex].status = 'HELD';
-  request.employeeDetails[employeeIndex].holdReason = reason;
-  
-  // Add to held salaries
-  if (!request.heldSalaries) {
-    request.heldSalaries = [];
-  }
-  
-  request.heldSalaries.push(heldRecord);
-  
-  // Update the request in the array
-  salaryPaymentRequests[requestIndex] = request;
-  
-  return request;
+
+  const updatedDetails = [...req.employeeDetails];
+  updatedDetails[empIdx] = { ...emp, status: 'HELD', holdReason: reason };
+
+  const updatedHeld = [...(req.heldSalaries ?? []), heldRecord];
+  const updated: SalaryPaymentRequest = {
+    ...req,
+    employeeDetails: updatedDetails,
+    heldSalaries: updatedHeld,
+  };
+
+  // Persist the updated employee_details JSONB and insert into held_salaries table
+  const [updateRes, insertRes] = await Promise.all([
+    supabaseClient.from('payroll_requests').update({
+      employee_details: updatedDetails,
+    }).eq('id', requestId),
+    supabaseClient.from('held_salaries').insert({
+      employee_id: employeeId,
+      employee_name: emp.employeeName,
+      amount: emp.netSalary,
+      reason,
+      held_by: heldBy,
+      held_on: heldRecord.heldOn,
+    }),
+  ]);
+
+  if (updateRes.error) console.error('[PayrollService] holdEmployee update error:', updateRes.error.message);
+  if (insertRes.error) console.error('[PayrollService] holdEmployee insert error:', insertRes.error.message);
+
+  // Diffed at the single employee's detail record rather than the whole request:
+  // the request object carries every employee in the run, so diffing it wholesale
+  // would bury the one person whose pay was withheld among dozens of unchanged
+  // entries.
+  void auditActions.payrollTransition(
+    'hr.salary.hold',
+    requestId,
+    { employee: emp },
+    { employee: updatedDetails[empIdx] },
+    { employeeId, employeeName: emp.employeeName, amount: emp.netSalary, reason, heldBy }
+  );
+
+  invalidateCache();
+  return updated;
 };
 
-// Resolve a held salary
-export const resolveHeldSalary = (requestId: string, employeeId: string, resolutionNotes: string, resolvedBy: string) => {
-  const requestIndex = salaryPaymentRequests.findIndex(req => req.id === requestId);
-  
-  if (requestIndex === -1) {
-    return null;
+export const resolveHeldSalary = async (requestId: string, employeeId: string, resolutionNotes: string, resolvedBy: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  const req = cache.find(r => r.id === requestId);
+  if (!req?.heldSalaries || !req.employeeDetails) return null;
+
+  const heldIdx = req.heldSalaries.findIndex(h => h.employeeId === employeeId && !h.resolved);
+  if (heldIdx === -1) return null;
+
+  const updatedHeld = [...req.heldSalaries];
+  updatedHeld[heldIdx] = {
+    ...updatedHeld[heldIdx],
+    resolved: true,
+    resolvedOn: new Date().toISOString(),
+    resolvedBy,
+    resolutionNotes,
+  };
+
+  const empIdx = req.employeeDetails.findIndex(e => e.employeeId === employeeId);
+  const updatedDetails = [...req.employeeDetails];
+  if (empIdx !== -1) {
+    updatedDetails[empIdx] = { ...updatedDetails[empIdx], status: 'READY_TO_PAY', holdReason: undefined };
   }
-  
-  const request = salaryPaymentRequests[requestIndex];
-  if (!request.heldSalaries || !request.employeeDetails) {
-    return null;
-  }
-  
-  // Find the held salary record
-  const heldIndex = request.heldSalaries.findIndex(held => held.employeeId === employeeId && !held.resolved);
-  if (heldIndex === -1) {
-    return null;
-  }
-  
-  // Update held salary record
-  request.heldSalaries[heldIndex].resolved = true;
-  request.heldSalaries[heldIndex].resolvedOn = new Date().toISOString();
-  request.heldSalaries[heldIndex].resolvedBy = resolvedBy;
-  request.heldSalaries[heldIndex].resolutionNotes = resolutionNotes;
-  
-  // Find the employee in the salary details and update status
-  const employeeIndex = request.employeeDetails.findIndex(emp => emp.employeeId === employeeId);
-  if (employeeIndex !== -1) {
-    request.employeeDetails[employeeIndex].status = 'READY_TO_PAY';
-    request.employeeDetails[employeeIndex].holdReason = undefined;
-  }
-  
-  // Update the request in the array
-  salaryPaymentRequests[requestIndex] = request;
-  
-  return request;
+
+  const updated: SalaryPaymentRequest = { ...req, heldSalaries: updatedHeld, employeeDetails: updatedDetails };
+
+  const { error } = await supabaseClient.from('payroll_requests').update({
+    employee_details: updatedDetails,
+  }).eq('id', requestId);
+
+  if (error) console.error('[PayrollService] resolveHeld DB error:', error.message);
+
+  void auditActions.payrollTransition(
+    'hr.salary.hold.release',
+    requestId,
+    { held: req.heldSalaries[heldIdx] },
+    { held: updatedHeld[heldIdx] },
+    {
+      employeeId,
+      employeeName: updatedHeld[heldIdx].employeeName,
+      amount: updatedHeld[heldIdx].amount,
+      resolutionNotes,
+      resolvedBy,
+    }
+  );
+
+  invalidateCache();
+  return updated;
 };
 
-// Calculate salary with attendance and deductions
+// ─── Calculation (pure, no DB) ────────────────────────────────────────────────
+
 export const calculateSalary = (
-  employeeId: string, 
-  baseSalary: number, 
-  attendedShifts: number, 
+  _employeeId: string,
+  baseSalary: number,
+  attendedShifts: number,
   totalShifts: number,
   deductions: SalaryDeduction[]
 ) => {
-  // Calculate attendance-based salary
-  const attendanceMultiplier = attendedShifts / totalShifts;
+  const attendanceMultiplier = totalShifts > 0 ? attendedShifts / totalShifts : 0;
   const salaryAfterAttendance = baseSalary * attendanceMultiplier;
-  
-  // Calculate total deductions
-  const totalDeductions = deductions.reduce((sum, deduction) => sum + deduction.amount, 0);
-  
-  // Calculate net salary
+  const totalDeductions = deductions.reduce((sum, d) => sum + d.amount, 0);
   const netSalary = Math.max(0, salaryAfterAttendance - totalDeductions);
-  
-  return {
-    baseSalary,
-    attendedShifts,
-    totalShifts,
-    attendanceMultiplier,
-    salaryAfterAttendance,
-    deductions,
-    totalDeductions,
-    netSalary
-  };
+  return { baseSalary, attendedShifts, totalShifts, attendanceMultiplier, salaryAfterAttendance, deductions, totalDeductions, netSalary };
 };
 
-// Get all salary payment requests
-export const getAllSalaryPaymentRequests = () => {
-  return salaryPaymentRequests;
+// ─── Read helpers ─────────────────────────────────────────────────────────────
+
+export const getAllSalaryPaymentRequests = async (): Promise<SalaryPaymentRequest[]> => {
+  return getCache();
 };
 
-// Get salary payment request by ID
-export const getSalaryPaymentRequestById = (id: string) => {
-  return salaryPaymentRequests.find(req => req.id === id) || null;
+export const getSalaryPaymentRequestById = async (id: string): Promise<SalaryPaymentRequest | null> => {
+  const cache = await getCache();
+  return cache.find(r => r.id === id) ?? null;
 };
 
-// Get salary payment requests by status
-export const getSalaryPaymentRequestsByStatus = (status: RequestStatus) => {
-  return salaryPaymentRequests.filter(req => req.status === status);
+export const getSalaryPaymentRequestsByStatus = async (status: RequestStatus): Promise<SalaryPaymentRequest[]> => {
+  const cache = await getCache();
+  return cache.filter(r => r.status === status);
 };
 
-// Get held salaries across all requests
-export const getAllHeldSalaries = () => {
-  const heldSalaries: HeldSalaryRecord[] = [];
-  
-  salaryPaymentRequests.forEach(request => {
-    if (request.heldSalaries && request.heldSalaries.length > 0) {
-      heldSalaries.push(...request.heldSalaries.filter(held => !held.resolved));
-    }
-  });
-  
-  return heldSalaries;
+export const getAllHeldSalaries = async (): Promise<HeldSalaryRecord[]> => {
+  const cache = await getCache();
+  return cache.flatMap(r => (r.heldSalaries ?? []).filter(h => !h.resolved));
 };

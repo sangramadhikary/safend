@@ -1,0 +1,291 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Activity & Audit Log — print stylesheet
+   ═══════════════════════════════════════════════════════════════════════════
+
+   Scoped entirely under `.audit-print-root` and inside `@media print`, so it
+   cannot affect the application's on-screen rendering or any other print view.
+
+   Design constraints this solves:
+
+     * The application shell (sidebar, header, toolbars, filter controls) must not
+       print. On screen those are the interface; on paper they are noise.
+     * Table headers must repeat on every page, or a multi-page report becomes
+       unreadable after page one.
+     * An entry and its field-change detail must not be split across a page break,
+       because a change table separated from the row it belongs to is misleading.
+     * Values must print in full. Every `text-overflow: ellipsis` and
+       `white-space: nowrap` inherited from the screen table is reset.
+     * Colour is used sparingly and never as the only signal, since these
+       documents are routinely printed in greyscale.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Hidden on screen: the print document is mounted into the live page, so it must
+   occupy no space until the print stylesheet takes over. `display: none` would
+   prevent the browser from laying it out for printing in some engines, so it is
+   moved out of view instead. */
+.audit-print-root {
+  position: absolute;
+  left: -200vw;
+  top: 0;
+  width: 190mm;
+}
+
+@media print {
+  /* ── Page setup ──────────────────────────────────────────────────────────
+     Landscape gives the eight-column table room to breathe; portrait forces
+     either truncation or an unreadable font size. */
+  @page {
+    size: A4 landscape;
+    margin: 12mm 10mm 14mm 10mm;
+  }
+
+  /* Suppress the entire application, then re-admit only the print document.
+     Targeting the app root rather than listing individual chrome components
+     means new UI cannot accidentally start appearing in printouts. */
+  body > *:not(.audit-print-portal) {
+    display: none !important;
+  }
+
+  .audit-print-portal {
+    display: block !important;
+  }
+
+  .audit-print-root {
+    position: static !important;
+    left: auto !important;
+    width: auto !important;
+    color: #000;
+    background: #fff;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 8pt;
+    line-height: 1.35;
+  }
+
+  /* Print backgrounds and colours as authored rather than dropping them, which
+     is the browser default and would erase the outcome colour coding. */
+  .audit-print-root * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* ── Cover block ─────────────────────────────────────────────────────── */
+  .audit-print-cover {
+    /* Keeps the provenance block on its own page so the first data page starts
+       with a full table rather than a few orphaned rows. */
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .audit-print-cover h1 {
+    margin: 0 0 2mm;
+    font-size: 20pt;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .audit-print-subtitle {
+    margin: 0 0 6mm;
+    font-size: 10pt;
+    color: #444;
+  }
+
+  .audit-print-meta {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 6mm;
+  }
+
+  .audit-print-meta th {
+    width: 45mm;
+    padding: 1.5mm 3mm 1.5mm 0;
+    text-align: left;
+    font-size: 8pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #555;
+    vertical-align: top;
+  }
+
+  .audit-print-meta td {
+    padding: 1.5mm 0;
+    font-size: 9pt;
+    vertical-align: top;
+  }
+
+  .audit-print-filters {
+    margin: 0;
+    padding-left: 4mm;
+  }
+
+  .audit-print-filters li {
+    margin-bottom: 0.8mm;
+  }
+
+  .audit-print-warning {
+    padding: 2.5mm 3mm;
+    border: 0.4mm solid #92400e;
+    background: #fef3c7;
+    font-size: 8.5pt;
+    color: #78350f;
+  }
+
+  .audit-print-note {
+    margin-top: 4mm;
+    font-size: 7.5pt;
+    color: #555;
+    font-style: italic;
+  }
+
+  /* ── Main table ──────────────────────────────────────────────────────── */
+  .audit-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  /* Repeat the header on every printed page. */
+  .audit-print-table thead {
+    display: table-header-group;
+  }
+
+  .audit-print-table tfoot {
+    display: table-footer-group;
+  }
+
+  .audit-print-table th {
+    padding: 1.6mm 1.5mm;
+    border-bottom: 0.5mm solid #000;
+    text-align: left;
+    font-size: 7.5pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    background: #f1f5f9;
+  }
+
+  .audit-print-table td {
+    padding: 1.4mm 1.5mm;
+    border-bottom: 0.15mm solid #cbd5e1;
+    vertical-align: top;
+    /* Reset every screen-side truncation: on paper there is no hover, so a
+       clipped value is simply lost. */
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    word-break: break-word;
+    max-width: none;
+  }
+
+  /* An entry row and its detail rows form one logical unit. */
+  .audit-print-row,
+  .audit-print-detail {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .audit-print-row {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  .audit-print-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: #64748b;
+  }
+
+  .audit-print-dim {
+    font-size: 7pt;
+    color: #64748b;
+  }
+
+  .audit-print-mono {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 7pt;
+  }
+
+  /* Outcome is bold and cased as well as coloured, so it survives greyscale. */
+  .audit-print-outcome-success {
+    color: #166534;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .audit-print-outcome-failure {
+    color: #991b1b;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .audit-print-outcome-denied {
+    color: #9a3412;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  /* ── Detail rows ─────────────────────────────────────────────────────── */
+  .audit-print-detail > td {
+    padding-top: 0;
+    padding-bottom: 2mm;
+    border-bottom: 0.15mm solid #cbd5e1;
+    background: #f8fafc;
+  }
+
+  .audit-print-detail-heading {
+    margin: 1mm 0 1mm;
+    font-size: 7pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #475569;
+  }
+
+  .audit-print-changes {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5mm;
+  }
+
+  .audit-print-changes th {
+    padding: 1mm 1.5mm;
+    border-bottom: 0.2mm solid #94a3b8;
+    background: #e2e8f0;
+    font-size: 6.5pt;
+  }
+
+  .audit-print-changes td {
+    padding: 0.9mm 1.5mm;
+    border-bottom: 0.1mm solid #e2e8f0;
+    font-size: 7pt;
+  }
+
+  .audit-print-context {
+    margin: 0 0 0.8mm;
+    font-size: 7pt;
+    color: #334155;
+  }
+
+  .audit-print-hash {
+    margin: 0;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 6pt;
+    color: #94a3b8;
+    word-break: break-all;
+  }
+
+  /* ── Footer ──────────────────────────────────────────────────────────── */
+  .audit-print-footer {
+    margin-top: 4mm;
+    padding-top: 2mm;
+    border-top: 0.3mm solid #000;
+    font-size: 7.5pt;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  /* Never print a link's href expansion; the URLs are signed and expire. */
+  .audit-print-root a::after {
+    content: none !important;
+  }
+}

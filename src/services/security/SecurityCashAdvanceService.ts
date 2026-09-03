@@ -1,3 +1,4 @@
+'use client';
 
 import { emitEvent, EVENT_TYPES } from '@/hooks/useEvent';
 import { v4 as uuidv4 } from 'uuid';

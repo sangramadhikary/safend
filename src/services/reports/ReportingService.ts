@@ -1,3 +1,4 @@
+'use client';
 
 import { ReportTemplate, ReportResult, Dashboard, ScheduledReport } from "@/types/reports";
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";

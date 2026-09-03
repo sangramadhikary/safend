@@ -1,3 +1,4 @@
+'use client';
 
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -23,7 +24,6 @@ export default function OnboardingForms({ open, onOpenChange, type }: Onboarding
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("Form submitted:", formData);
     onOpenChange(false);
   };
 

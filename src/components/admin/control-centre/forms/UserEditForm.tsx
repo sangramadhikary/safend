@@ -1,3 +1,4 @@
+'use client';
 
 import { useState, useEffect } from "react";
 import {
@@ -11,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -19,15 +21,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { User, Copy, RefreshCw } from 'lucide-react';
+import { Badge } from "@/components/ui/badge";
+import { User, Copy, RefreshCw, Crown, GitBranch } from 'lucide-react';
 import { generatePassword } from "@/utils/firebaseUserManagement";
-import { useToast } from "@/components/ui/use-toast";
+import { useToast } from "@/hooks/use-toast";
+import { useBranch } from "@/contexts/BranchContext";
 
-interface User {
+interface UserData {
   id: string;
   name: string;
   email: string;
-  role: string;
+  roles: string[];
   branch: string;
   branchId: string;
   status: "active" | "inactive";
@@ -38,17 +42,19 @@ interface User {
 interface UserEditFormProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (userData: Partial<User>) => void;
-  user: User | null;
+  onSave: (userData: Partial<UserData> & { password?: string }) => void;
+  user: UserData | null;
   isNew: boolean;
 }
 
 export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditFormProps) {
   const { toast } = useToast();
-  const [formData, setFormData] = useState<Partial<User>>({
+  const { allBranches, isMainBranchUser, currentBranch } = useBranch();
+
+  const [formData, setFormData] = useState<Partial<UserData>>({
     name: "",
     email: "",
-    role: "",
+    roles: [],
     branch: "",
     branchId: "",
     status: "active",
@@ -61,7 +67,7 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
       setFormData({
         name: user.name,
         email: user.email,
-        role: user.role,
+        roles: user.roles || [],
         branch: user.branch,
         branchId: user.branchId,
         status: user.status,
@@ -71,14 +77,22 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
       setFormData({
         name: "",
         email: "",
-        role: "",
+        roles: [],
         branch: "",
-        branchId: "",
+        branchId: isMainBranchUser ? "" : currentBranch?.id || "",
         status: "active",
       });
+      // Pre-fill branch for sub-branch users
+      if (!isMainBranchUser && currentBranch) {
+        setFormData(prev => ({
+          ...prev,
+          branch: currentBranch.name,
+          branchId: currentBranch.id,
+        }));
+      }
       setGeneratedPassword(generatePassword());
     }
-  }, [user, isOpen]);
+  }, [user, isOpen, isMainBranchUser, currentBranch]);
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => ({
@@ -87,27 +101,30 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
     }));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    onSave(formData);
+  const handleRoleToggle = (roleValue: string) => {
+    setFormData((prev) => {
+      const currentRoles = prev.roles || [];
+      const updated = currentRoles.includes(roleValue)
+        ? currentRoles.filter(r => r !== roleValue)
+        : [...currentRoles, roleValue];
+      return { ...prev, roles: updated };
+    });
   };
 
-  // Branch options - in a real app, these would come from an API
-  const branchOptions = [
-    { id: "b1", name: "Mumbai HQ" },
-    { id: "b2", name: "Delhi Branch" },
-    { id: "b3", name: "Bangalore Office" },
-    { id: "b4", name: "Chennai Office" },
-    { id: "b5", name: "Kolkata Branch" },
-  ];
+  // Branch options from real data
+  const branchOptions = isMainBranchUser
+    ? allBranches.filter(b => b.status === 'active')
+    : allBranches.filter(b => b.id === currentBranch?.id);
 
   // Role options - mapped to system roles
   const roleOptions = [
     { value: "admin", label: "Administrator" },
+    { value: "branch_admin", label: "Branch Admin" },
     { value: "sales", label: "Sales" },
     { value: "operations", label: "Operations" },
     { value: "hr", label: "HR" },
     { value: "accounts", label: "Accounts" },
+    { value: "office-admin", label: "Office Admin" },
     { value: "reports", label: "Reports" },
   ];
 
@@ -130,8 +147,17 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
 
   const handleSaveWithPassword = (e: React.FormEvent) => {
     e.preventDefault();
+    // Validation
+    if (!formData.name || !formData.email || !formData.roles || formData.roles.length === 0 || !formData.branchId) {
+      toast({
+        title: "Validation Error",
+        description: "Please fill in all required fields and select at least one role",
+        variant: "destructive",
+      });
+      return;
+    }
     // Pass password along with form data for new users
-    const dataToSave = isNew 
+    const dataToSave = isNew
       ? { ...formData, password: generatedPassword }
       : formData;
     onSave(dataToSave);
@@ -147,15 +173,15 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
           </DialogTitle>
           <DialogDescription>
             {isNew
-              ? "Create a new user account and set their role and permissions."
-              : "Update user details, change their role, or modify access permissions."}
+              ? "Create a new user account and assign them to a branch with roles."
+              : "Update user details, change their roles, or modify branch assignment."}
           </DialogDescription>
         </DialogHeader>
 
         <ScrollArea className="max-h-[60vh] pr-4">
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSaveWithPassword} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Full Name</Label>
+              <Label htmlFor="name">Full Name *</Label>
               <Input
                 id="name"
                 value={formData.name || ""}
@@ -166,7 +192,7 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="email">Email Address</Label>
+              <Label htmlFor="email">Email Address *</Label>
               <Input
                 id="email"
                 type="email"
@@ -174,30 +200,12 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
                 onChange={(e) => handleChange("email", e.target.value)}
                 placeholder="Enter email address"
                 required
+                disabled={!isNew && !!user}
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="role">Role</Label>
-              <Select
-                value={formData.role || ""}
-                onValueChange={(value) => handleChange("role", value)}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select role" />
-                </SelectTrigger>
-                <SelectContent>
-                  {roleOptions.map((role) => (
-                    <SelectItem key={role.value} value={role.value}>
-                      {role.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="branch">Branch</Label>
+              <Label htmlFor="branch">Branch *</Label>
               <Select
                 value={formData.branchId || ""}
                 onValueChange={(value) => {
@@ -205,6 +213,7 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
                   handleChange("branchId", value);
                   handleChange("branch", selectedBranch?.name || "");
                 }}
+                disabled={!isMainBranchUser}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select branch" />
@@ -212,20 +221,55 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
                 <SelectContent>
                   {branchOptions.map((branch) => (
                     <SelectItem key={branch.id} value={branch.id}>
-                      {branch.name}
+                      <div className="flex items-center gap-2">
+                        {branch.type === 'main' ? <Crown className="h-3 w-3" /> : <GitBranch className="h-3 w-3" />}
+                        <span>{branch.name}</span>
+                        {branch.type === 'main' && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 ml-1">HQ</Badge>
+                        )}
+                      </div>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {!isMainBranchUser && (
+                <p className="text-xs text-muted-foreground">
+                  Users can only be assigned to your branch
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label>Roles * <span className="text-xs text-muted-foreground font-normal">(select one or more)</span></Label>
+              <div className="grid grid-cols-2 gap-2 border rounded-lg p-3">
+                {roleOptions.map((role) => (
+                  <label
+                    key={role.value}
+                    className="flex items-center gap-2 cursor-pointer hover:bg-muted/50 rounded px-2 py-1.5 transition-colors"
+                  >
+                    <Checkbox
+                      checked={formData.roles?.includes(role.value) || false}
+                      onCheckedChange={() => handleRoleToggle(role.value)}
+                    />
+                    <span className="text-sm">{role.label}</span>
+                  </label>
+                ))}
+              </div>
+              {formData.roles && formData.roles.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {formData.roles.map(r => {
+                    const label = roleOptions.find(opt => opt.value === r)?.label || r;
+                    return <Badge key={r} variant="secondary" className="text-xs">{label}</Badge>;
+                  })}
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="status">Status</Label>
               <Select
                 value={formData.status || "active"}
-                onValueChange={(value: "active" | "inactive") =>
-                  handleChange("status", value)
-                }
+                onValueChange={(value: string) => handleChange("status", value)}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select status" />
@@ -269,7 +313,7 @@ export function UserEditForm({ isOpen, onClose, onSave, user, isNew }: UserEditF
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  You can type your own password or click regenerate for a random one
+                  Auto-generated password. Copy it before saving — it won't be shown again.
                 </p>
               </div>
             )}

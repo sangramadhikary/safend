@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-commit secret-scanning control (Requirement 4.8).
+#
+# Blocks any commit that introduces a hardcoded secret and reports the
+# offending file. Scans only the staged changes for speed. There is no waiver:
+# a detected secret aborts the commit with a non-zero exit code.
+#
+# Enabled by `npm run prepare` (sets core.hooksPath to .githooks).
+
+echo "Running pre-commit secret scan..."
+node scripts/ci/scan-secrets.mjs --staged
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo ""
+  echo "Commit blocked: a hardcoded secret was detected in the staged changes."
+  echo "Remove the secret (read it from an environment variable instead) and retry."
+  exit 1
+fi
+
+exit 0

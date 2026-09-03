@@ -1,3 +1,4 @@
+'use client';
 
 import { useState } from "react";
 import {
@@ -129,7 +130,6 @@ export function AdminSettings() {
     setIsLoading(true);
     // Simulate API call
     setTimeout(() => {
-      console.log("Security settings updated:", data);
       toast.success("Security settings updated successfully!");
       setIsLoading(false);
     }, 1000);
@@ -139,7 +139,6 @@ export function AdminSettings() {
     setIsLoading(true);
     // Simulate API call
     setTimeout(() => {
-      console.log("Notification settings updated:", data);
       toast.success("Notification settings updated successfully!");
       setIsLoading(false);
     }, 1000);
@@ -149,7 +148,6 @@ export function AdminSettings() {
     setIsLoading(true);
     // Simulate API call
     setTimeout(() => {
-      console.log("System settings updated:", data);
       toast.success("System settings updated successfully!");
       setIsLoading(false);
     }, 1000);
@@ -242,7 +240,7 @@ export function AdminSettings() {
                         control={securityForm.control}
                         name="passwordPolicy.requireUppercase"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Require Uppercase</FormLabel>
                               <FormDescription>
@@ -262,7 +260,7 @@ export function AdminSettings() {
                         control={securityForm.control}
                         name="passwordPolicy.requireLowercase"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Require Lowercase</FormLabel>
                               <FormDescription>
@@ -285,7 +283,7 @@ export function AdminSettings() {
                         control={securityForm.control}
                         name="passwordPolicy.requireNumbers"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Require Numbers</FormLabel>
                               <FormDescription>
@@ -305,7 +303,7 @@ export function AdminSettings() {
                         control={securityForm.control}
                         name="passwordPolicy.requireSpecialChars"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Require Special Characters</FormLabel>
                               <FormDescription>
@@ -373,7 +371,7 @@ export function AdminSettings() {
                           control={securityForm.control}
                           name="twoFactorAuth"
                           render={({ field }) => (
-                            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                               <div className="space-y-0.5">
                                 <FormLabel>Two-Factor Authentication</FormLabel>
                                 <FormDescription>
@@ -393,7 +391,7 @@ export function AdminSettings() {
                           control={securityForm.control}
                           name="ipRestriction"
                           render={({ field }) => (
-                            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                               <div className="space-y-0.5">
                                 <FormLabel>IP Restriction</FormLabel>
                                 <FormDescription>
@@ -445,7 +443,7 @@ export function AdminSettings() {
                         control={notificationForm.control}
                         name="emailNotifications"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Email Notifications</FormLabel>
                               <FormDescription>
@@ -465,7 +463,7 @@ export function AdminSettings() {
                         control={notificationForm.control}
                         name="loginAlerts"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Login Alerts</FormLabel>
                               <FormDescription>
@@ -488,7 +486,7 @@ export function AdminSettings() {
                         control={notificationForm.control}
                         name="systemUpdates"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>System Updates</FormLabel>
                               <FormDescription>
@@ -508,7 +506,7 @@ export function AdminSettings() {
                         control={notificationForm.control}
                         name="failedLoginAttempts"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Failed Login Attempts</FormLabel>
                               <FormDescription>
@@ -531,7 +529,7 @@ export function AdminSettings() {
                         control={notificationForm.control}
                         name="userCreationNotification"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>User Creation</FormLabel>
                               <FormDescription>
@@ -551,7 +549,7 @@ export function AdminSettings() {
                         control={notificationForm.control}
                         name="roleChanges"
                         render={({ field }) => (
-                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                          <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
                             <div className="space-y-0.5">
                               <FormLabel>Role Changes</FormLabel>
                               <FormDescription>

@@ -1,14 +1,15 @@
+'use client';
 
 import { useEffect, useState } from "react";
-import { SoundBus } from "@/services/SoundService";
-import { useToast } from "@/hooks/use-toast";
-import { AlertTriangle } from "lucide-react";
+import { getSoundBus } from "@/services/SoundService";
 
 export function SoundInitializer() {
   const [soundsReady, setSoundsReady] = useState(false);
-  const { toast } = useToast();
   
   useEffect(() => {
+    // Only run on client
+    if (typeof window === 'undefined') return;
+    
     // Create dummy audio elements to check if sound files exist
     const soundFiles = [
       '/sfx/ui_click.mp3',
@@ -38,23 +39,16 @@ export function SoundInitializer() {
       const allFilesExist = results.every(result => result === true);
       setSoundsReady(allFilesExist);
       
-      if (!allFilesExist) {
-        toast({
-          title: "Sound Effects",
-          description: "Some sound effects couldn't be loaded. Sound features may be limited.",
-          variant: "default",
-          action: <AlertTriangle className="h-4 w-4 text-amber-500" />,
-        });
-        
-        console.warn("Some sound files couldn't be loaded. Sound functionality may be limited.");
-      } else {
+      if (allFilesExist) {
         // Initialize with a welcome sound (but delayed so it doesn't play immediately on page load)
         setTimeout(() => {
-          SoundBus.play('welcome');
+          const bus = getSoundBus();
+          if (bus) bus.play('welcome');
         }, 1000);
       }
+      // If files don't exist, fallback tones are used automatically — no warning needed
     });
-  }, [toast]);
+  }, []);
   
   // This component doesn't render anything
   return null;

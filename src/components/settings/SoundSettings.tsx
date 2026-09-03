@@ -1,6 +1,7 @@
+'use client';
 
 import { useState, useEffect } from "react";
-import { SoundBus } from "@/services/SoundService";
+import { getSoundBus } from "@/services/SoundService";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -8,31 +9,35 @@ import { Button } from "@/components/ui/button";
 import { Volume2, Volume1, VolumeX } from "lucide-react";
 
 export function SoundSettings() {
-  const [enabled, setEnabled] = useState(SoundBus.isEnabled());
-  const [volume, setVolume] = useState(SoundBus.getVolume() * 100);
+  const [enabled, setEnabled] = useState(true);
+  const [volume, setVolume] = useState(70);
 
   useEffect(() => {
-    // Update component state if settings change elsewhere
-    setEnabled(SoundBus.isEnabled());
-    setVolume(SoundBus.getVolume() * 100);
+    // Only access SoundBus on client
+    if (typeof window !== 'undefined') {
+      setEnabled(getSoundBus().isEnabled());
+      setVolume(getSoundBus().getVolume() * 100);
+    }
   }, []);
 
   const handleToggleSound = (checked: boolean) => {
-    SoundBus.setEnabled(checked);
+    if (typeof window === 'undefined') return;
+    getSoundBus().setEnabled(checked);
     setEnabled(checked);
     if (checked) {
-      SoundBus.play('click');
+      getSoundBus().play('click');
     }
   };
 
   const handleVolumeChange = (value: number[]) => {
+    if (typeof window === 'undefined') return;
     const newVolume = value[0] / 100;
-    SoundBus.setVolume(newVolume);
+    getSoundBus().setVolume(newVolume);
     setVolume(value[0]);
     
     // Play a sample sound when adjusting volume (if enabled)
     if (enabled) {
-      SoundBus.play('click');
+      getSoundBus().play('click');
     }
   };
 
@@ -43,14 +48,14 @@ export function SoundSettings() {
   };
 
   const handleTestSounds = () => {
-    if (!enabled) return;
+    if (!enabled || typeof window === 'undefined') return;
     
     // Play a sequence of test sounds with a delay between each
     const sounds = ['click', 'add', 'success', 'delete', 'error', 'notification', 'download'];
     
     sounds.forEach((sound, index) => {
       setTimeout(() => {
-        SoundBus.play(sound as any);
+        getSoundBus().play(sound as any);
       }, index * 800); // 800ms delay between sounds
     });
   };

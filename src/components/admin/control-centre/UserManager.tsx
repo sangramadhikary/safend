@@ -1,3 +1,4 @@
+'use client';
 import { useState, useEffect } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -8,7 +9,7 @@ import { UserPlus, Upload, RefreshCw, Edit, UserMinus, CheckCircle2, ShieldAlert
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import { useBranch } from "@/contexts/BranchContext";
-import { useToast } from "@/components/ui/use-toast";
+import { useToast } from "@/hooks/use-toast";
 import { UserEditForm } from "./forms/UserEditForm";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { createFirebaseUser, getAllUsers, updateFirebaseUser, deleteFirebaseUser } from "@/utils/firebaseUserManagement";
@@ -17,7 +18,7 @@ interface User {
   id: string;
   name: string;
   email: string;
-  role: string;
+  roles: string[];
   branch: string;
   branchId: string;
   status: "active" | "inactive";
@@ -30,6 +31,7 @@ export function UserManager() {
   const [searchTerm, setSearchTerm] = useState("");
   const {
     isMainBranch,
+    isMainBranchUser,
     currentBranch
   } = useBranch();
   const {
@@ -56,7 +58,7 @@ export function UserManager() {
         id: fu.uid,
         name: fu.name,
         email: fu.email,
-        role: fu.roles[0] || 'sales',
+        roles: fu.roles || [],
         branch: fu.branch,
         branchId: fu.branchId,
         status: fu.status,
@@ -79,7 +81,7 @@ export function UserManager() {
   const statusFilteredUsers = selectedFilter === "all" ? filteredUsers : filteredUsers.filter(user => user.status === selectedFilter);
 
   // Search filter
-  const searchFilteredUsers = searchTerm ? statusFilteredUsers.filter(user => user.name.toLowerCase().includes(searchTerm.toLowerCase()) || user.email.toLowerCase().includes(searchTerm.toLowerCase()) || user.role.toLowerCase().includes(searchTerm.toLowerCase())) : statusFilteredUsers;
+  const searchFilteredUsers = searchTerm ? statusFilteredUsers.filter(user => user.name.toLowerCase().includes(searchTerm.toLowerCase()) || user.email.toLowerCase().includes(searchTerm.toLowerCase()) || user.roles.some(r => r.toLowerCase().includes(searchTerm.toLowerCase()))) : statusFilteredUsers;
   const handleEditUser = (user: User) => {
     setSelectedUser(user);
     setIsEditDialogOpen(true);
@@ -90,6 +92,10 @@ export function UserManager() {
     const result = await updateFirebaseUser(user.id, { status: newStatus });
     if (result.success) {
       await loadUsers();
+      // Deactivating an account revokes system access. This path was previously
+      // unaudited entirely, so an account could be disabled or re-enabled with no
+      // record of who did it.
+      void auditActions.userStatusChanged(user.name, newStatus, user.status);
       toast({
         title: `User ${newStatus === "active" ? "Activated" : "Deactivated"}`,
         description: `${user.name} has been ${newStatus === "active" ? "activated" : "deactivated"}`
@@ -111,9 +117,10 @@ export function UserManager() {
     const result = await deleteFirebaseUser(userToDelete);
     if (result.success) {
       await loadUsers();
-      // Log user deletion
+      // Pass the whole record: once the account is gone this entry is the only
+      // remaining evidence of the roles and branch it held.
       if (userToDeleteData) {
-        await auditActions.userDeleted(userToDeleteData.name);
+        await auditActions.userDeleted(userToDeleteData.name, userToDeleteData);
       }
       toast({
         title: "User Deleted",
@@ -151,7 +158,7 @@ export function UserManager() {
         {
           name: userData.name || '',
           email: userData.email || '',
-          roles: [userData.role || 'sales'],
+          roles: userData.roles && userData.roles.length > 0 ? userData.roles : ['sales'],
           branch: userData.branch || '',
           branchId: userData.branchId || '',
           status: userData.status || 'active'
@@ -159,8 +166,15 @@ export function UserManager() {
       );
       if (result.success) {
         await loadUsers();
-        // Log user creation
-        await auditActions.userCreated(userData.name || '', userData.email || '');
+        // The granted roles and branch are recorded; the password deliberately is
+        // not, and would be masked by the redaction rules if it were passed.
+        await auditActions.userCreated(userData.name || '', userData.email || '', {
+          name: userData.name,
+          email: userData.email,
+          roles: userData.roles && userData.roles.length > 0 ? userData.roles : ['sales'],
+          branch: userData.branch,
+          status: userData.status || 'active',
+        });
         toast({
           title: "User Created",
           description: `${userData.name} created. Password: ${userData.password}`
@@ -175,19 +189,44 @@ export function UserManager() {
     } else if (selectedUser) {
       const result = await updateFirebaseUser(selectedUser.id, {
         name: userData.name,
-        roles: [userData.role || 'sales'],
+        roles: userData.roles && userData.roles.length > 0 ? userData.roles : selectedUser.roles,
         branch: userData.branch,
         branchId: userData.branchId,
         status: userData.status
       });
       if (result.success) {
         await loadUsers();
-        // Log user update
-        await auditActions.userUpdated(userData.name || selectedUser.name, {
-          role: userData.role,
-          branch: userData.branch,
-          status: userData.status
-        });
+
+        const nextRoles = userData.roles && userData.roles.length > 0 ? userData.roles : selectedUser.roles;
+
+        // `selectedUser` is the record as loaded before the dialog opened, which
+        // makes it the before-state — no extra read required.
+        const before = {
+          name: selectedUser.name,
+          roles: selectedUser.roles,
+          branch: selectedUser.branch,
+          status: selectedUser.status,
+        };
+        const after = {
+          name: userData.name ?? selectedUser.name,
+          roles: nextRoles,
+          branch: userData.branch ?? selectedUser.branch,
+          status: userData.status ?? selectedUser.status,
+        };
+
+        // A privilege change is recorded under its own critical action as well as
+        // in the general update, because "who granted this person admin" must be
+        // answerable without reading through unrelated profile edits.
+        const rolesChanged =
+          [...selectedUser.roles].sort().join(',') !== [...nextRoles].sort().join(',');
+        if (rolesChanged) {
+          await auditActions.roleChanged(after.name, selectedUser.roles, nextRoles);
+        }
+        if (after.status !== before.status) {
+          await auditActions.userStatusChanged(after.name, after.status, before.status);
+        }
+
+        await auditActions.userUpdated(after.name, undefined, before, after);
         toast({
           title: "User Updated",
           description: `${userData.name} updated successfully`
@@ -205,14 +244,8 @@ export function UserManager() {
     setSelectedUser(null);
   };
   return <div className="space-y-6">
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="w-full grid grid-cols-3">
-          <TabsTrigger value="users">Users</TabsTrigger>
-          <TabsTrigger value="import">Bulk Import</TabsTrigger>
-          <TabsTrigger value="activity">User Activity</TabsTrigger>
-        </TabsList>
-        
-        <TabsContent value="users" className="space-y-6 mt-6">
+      <Tabs value="users">
+        <TabsContent value="users" className="space-y-6">
           <Card className="control-centre-card">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <div>
@@ -222,9 +255,9 @@ export function UserManager() {
                 </CardDescription>
               </div>
               <div className="flex gap-2">
-                <Button onClick={() => setSelectedFilter("all")} variant={selectedFilter === "all" ? "default" : "outline"}>All</Button>
-                <Button onClick={() => setSelectedFilter("active")} variant={selectedFilter === "active" ? "default" : "outline"}>Active</Button>
-                <Button onClick={() => setSelectedFilter("inactive")} variant={selectedFilter === "inactive" ? "default" : "outline"}>Inactive</Button>
+                <Button onClick={() => setSelectedFilter("all")} variant={selectedFilter === "all" ? "default" : "outline-solid"}>All</Button>
+                <Button onClick={() => setSelectedFilter("active")} variant={selectedFilter === "active" ? "default" : "outline-solid"}>Active</Button>
+                <Button onClick={() => setSelectedFilter("inactive")} variant={selectedFilter === "inactive" ? "default" : "outline-solid"}>Inactive</Button>
                 <Button variant="destructive" className="gap-2" onClick={handleAddUser}>
                   <UserPlus className="h-4 w-4" />
                   Add User
@@ -277,7 +310,7 @@ export function UserManager() {
                           {user.name}
                         </TableCell>
                         <TableCell>{user.email}</TableCell>
-                        <TableCell>{user.role}</TableCell>
+                        <TableCell>{user.roles.join(', ')}</TableCell>
                         <TableCell>{user.branch}</TableCell>
                         <TableCell>
                           <Badge variant={user.status === "active" ? "default" : "secondary"}>
@@ -301,70 +334,6 @@ export function UserManager() {
               </Table>
                 </>
               )}
-            </CardContent>
-          </Card>
-          
-          
-        </TabsContent>
-        
-        <TabsContent value="import" className="mt-6">
-          <Card className="control-centre-card">
-            <CardHeader>
-              <CardTitle className="text-xl font-bold">Bulk User Import</CardTitle>
-              <CardDescription>
-                Import multiple users using CSV or connect to LDAP
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-6">
-                <div className="border border-dashed border-gray-300 dark:border-gray-700 rounded-lg p-10 text-center">
-                  <Upload className="mx-auto h-10 w-10 text-gray-400 mb-4" />
-                  <h3 className="text-lg font-medium mb-2">Upload CSV File</h3>
-                  <p className="text-sm text-muted-foreground mb-4">
-                    Drag and drop a CSV file or click to browse
-                  </p>
-                  <Button variant="default">Select File</Button>
-                </div>
-                
-                <div className="border-t pt-6">
-                  <h3 className="text-lg font-medium mb-4">LDAP Synchronization</h3>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Status: <span className="text-red-600">Not Connected</span></p>
-                      <p className="text-sm text-muted-foreground">Connect to your LDAP server to sync users</p>
-                    </div>
-                    <Button variant="outline" className="gap-2">
-                      <RefreshCw className="h-4 w-4" />
-                      Configure LDAP
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-        
-        <TabsContent value="activity" className="mt-6">
-          <Card className="control-centre-card">
-            <CardHeader>
-              <CardTitle className="text-xl font-bold">User Activity Log</CardTitle>
-              <CardDescription>
-                Track user actions and system events
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {[1, 2, 3, 4, 5].map(i => <div key={i} className="flex gap-4 p-3 border-b last:border-0">
-                    <div className="bg-gray-100 dark:bg-gray-800 p-2 rounded-full">
-                      <Activity className="h-5 w-5 text-red-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-medium">Rahul Sharma {i === 1 ? 'logged in' : i === 2 ? 'updated user settings' : i === 3 ? 'added new branch' : i === 4 ? 'assigned role' : 'exported data'}</p>
-                      <p className="text-sm text-muted-foreground">{i} hour{i !== 1 && 's'} ago • IP: 192.168.1.{i}0</p>
-                    </div>
-                    <Badge variant="outline">{i === 1 ? 'Authentication' : i === 2 ? 'Settings' : i === 3 ? 'Branch' : i === 4 ? 'Role' : 'Export'}</Badge>
-                  </div>)}
-              </div>
             </CardContent>
           </Card>
         </TabsContent>

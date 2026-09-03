@@ -1,5 +1,6 @@
 
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 export default {
 	darkMode: ["class"],
@@ -15,10 +16,51 @@ export default {
 			center: true,
 			padding: '2rem',
 			screens: {
-				'2xl': '1400px'
+				'2xl': '1440px'
 			}
 		},
+		screens: {
+			'xs': '480px',
+			'sm': '640px',
+			'md': '768px',
+			'lg': '1024px',
+			'xl': '1280px',
+			'2xl': '1536px',
+		},
 		extend: {
+			fontFamily: {
+				'montserrat': ['Montserrat', 'sans-serif'],
+				'lato': ['Lato', 'sans-serif'],
+				'heading': ['Montserrat', 'sans-serif'],
+				'body': ['Lato', 'sans-serif'],
+				'display': ['Montserrat', 'sans-serif'],
+			},
+			fontSize: {
+				// Editorial scale — adapted from design tokens
+				'caption': ['0.6875rem', { lineHeight: '1.4', letterSpacing: '0.01em' }],
+				'body-sm': ['0.875rem', { lineHeight: '1.4', letterSpacing: '-0.02em' }],
+				'body': ['1rem', { lineHeight: '1.4', letterSpacing: '-0.02em' }],
+				'subheading': ['1.125rem', { lineHeight: '1.4', letterSpacing: '-0.02em' }],
+				'heading-sm': ['3.75rem', { lineHeight: '0.9', letterSpacing: '-0.02em' }],
+				'heading': ['4.5rem', { lineHeight: '1.1' }],
+				'heading-lg': ['6rem', { lineHeight: '1.0', letterSpacing: '-0.02em' }],
+				'display': ['clamp(4rem, 10vw, 8.75rem)', { lineHeight: '0.9', letterSpacing: '-0.01em' }],
+				'display-lg': ['clamp(6rem, 15vw, 15rem)', { lineHeight: '0.9', letterSpacing: '-0.02em' }],
+				// Legacy sizes for compatibility
+				'h1': ['3rem', { lineHeight: '1.2', fontWeight: '700' }],
+				'h2': ['2.25rem', { lineHeight: '1.3', fontWeight: '600' }],
+				'h3': ['1.75rem', { lineHeight: '1.3', fontWeight: '500' }],
+			},
+			// Editorial spacing scale from design tokens
+			spacing: {
+				'section': '120px',
+				'section-sm': '80px',
+				'element': '20px',
+				'card-pad': '20px',
+			},
+			maxWidth: {
+				'editorial': '1440px',
+			},
 			colors: {
 				border: 'hsl(var(--border))',
 				input: 'hsl(var(--input))',
@@ -63,14 +105,32 @@ export default {
 					border: 'hsl(var(--sidebar-border))',
 					ring: 'hsl(var(--sidebar-ring))'
 				},
-				// Safend HRM specific color
+				// Safend editorial color system (adapted from design tokens)
 				safend: {
-					red: '#FF2121',
+					// Canvas — near-white with a very faint warm tint
+					canvas: '#FFFAF9',
+					// Primary text — near-black
+					ink: '#111111',
+					// Primary Colors
+					red: '#D71920',
 					black: '#000000',
 					white: '#FFFFFF',
+					// Secondary Colors
+					'slate-grey': '#4A4A4A',
+					'light-grey': '#F5F5F5',
+					// Muted text  
+					muted: '#6B6B6B',
+					// Hairline dividers
+					mist: '#E5E0DD',
+					// Functional Colors
+					success: '#2BA745',
+					warning: '#FFC107',
+					error: '#DC3545',
+					info: '#17A2B8',
+					neutral: '#6C757D',
 				},
 				// Brand colors for compatibility
-				'brand-red': '#FF2121',
+				'brand-red': '#D71920',
 			},
 			borderRadius: {
 				lg: 'var(--radius)',
@@ -78,6 +138,12 @@ export default {
 				sm: 'calc(var(--radius) - 4px)'
 			},
 			keyframes: {
+				'wiggle': {
+					'0%, 100%': { transform: 'rotate(-4deg) translateY(0px)' },
+					'25%': { transform: 'rotate(5deg) translateY(-2px)' },
+					'50%': { transform: 'rotate(-3deg) translateY(1px)' },
+					'75%': { transform: 'rotate(4deg) translateY(-1px)' },
+				},
 				'accordion-down': {
 					from: { height: '0' },
 					to: { height: 'var(--radix-accordion-content-height)' }
@@ -133,9 +199,16 @@ export default {
 				'fade-in-up': {
 					'0%': { opacity: '0', transform: 'translateY(10px)' },
 					'100%': { opacity: '1', transform: 'translateY(0)' }
+				},
+				'scanLine': {
+					'0%': { top: '16.67%', opacity: '0' },
+					'10%': { opacity: '1' },
+					'90%': { opacity: '1' },
+					'100%': { top: '83.33%', opacity: '0' }
 				}
 			},
 			animation: {
+				'wiggle': 'wiggle 1.4s ease-in-out infinite',
 				'accordion-down': 'accordion-down 0.2s ease-out',
 				'accordion-up': 'accordion-up 0.2s ease-out',
 				'slide-in-right': 'slide-in-right 0.3s ease-out',
@@ -159,8 +232,11 @@ export default {
 				'glass': '0 4px 24px 0 rgba(0, 0, 0, 0.05)',
 				'glass-dark': '0 4px 24px 0 rgba(255, 255, 255, 0.05)',
 				'red-glow': '0 0 15px rgba(255, 33, 33, 0.5)'
+			},
+			backgroundImage: {
+				'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
 			}
 		}
 	},
-	plugins: [require("tailwindcss-animate")],
+	plugins: [tailwindcssAnimate],
 } satisfies Config;

@@ -1,3 +1,4 @@
+'use client';
 
 import { MaintenanceTicket, MaintenanceSchedule } from "@/types/maintenance";
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";

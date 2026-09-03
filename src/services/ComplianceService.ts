@@ -1,5 +1,6 @@
+'use client';
 
-import { StatutoryCompliance, ComplianceDocument, SalaryData, Employee } from "@/pages/hr/components";
+import { StatutoryCompliance, ComplianceDocument, SalaryData, Employee } from "@/modules/hr/components";
 import { HR_CONFIG } from "@/config";
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";
 

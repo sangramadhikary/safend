@@ -6,12 +6,13 @@
 const express = require('express');
 const cors = require('cors');
 const https = require('https');
+const quotationPdfRouter = require('./routes/quotation-pdf');
 const app = express();
 const PORT = 3001;
 
 // Enable CORS for frontend
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Increase limit for quotation data
 
 // Helper function to make HTTPS requests
 function httpsGet(url) {
@@ -98,8 +99,12 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'DigiPIN API server is running' });
 });
 
+// Quotation PDF routes
+app.use('/api/quotation', quotationPdfRouter);
+
 app.listen(PORT, () => {
   console.log(`🚀 DigiPIN API server running on http://localhost:${PORT}`);
   console.log(`📍 Endpoint: http://localhost:${PORT}/api/digipin/decode?digipin=4P3-JK8-52C9`);
+  console.log(`📄 PDF Endpoint: http://localhost:${PORT}/api/quotation/download`);
   console.log(`💚 Health check: http://localhost:${PORT}/health`);
 });

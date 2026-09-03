@@ -1,3 +1,5 @@
+'use client';
+
 import { emitEvent, EVENT_TYPES } from '@/services/EventService';
 
 export interface LicenseDocument {

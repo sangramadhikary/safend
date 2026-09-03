@@ -1,6 +1,7 @@
+'use client';
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { SoundBus, SoundEvent } from '@/services/SoundService';
+import { getSoundBus, SoundEvent } from '@/services/SoundService';
 import { useSoundEffect } from '@/hooks/useSoundEffect';
 
 interface SoundContextType {
@@ -19,12 +20,18 @@ export function SoundEffectsProvider({ children }: { children: React.ReactNode }
   
   // Initialize sound settings from SoundBus
   useEffect(() => {
-    setIsSoundEnabled(SoundBus.isEnabled());
+    const soundBus = getSoundBus();
+    if (soundBus) {
+      setIsSoundEnabled(soundBus.isEnabled());
+    }
   }, []);
 
   const toggleSound = () => {
+    const soundBus = getSoundBus();
+    if (!soundBus) return;
+    
     const newState = !isSoundEnabled;
-    SoundBus.setEnabled(newState);
+    soundBus.setEnabled(newState);
     setIsSoundEnabled(newState);
     
     // Play a sound when enabling sounds
@@ -34,11 +41,15 @@ export function SoundEffectsProvider({ children }: { children: React.ReactNode }
   };
 
   const setVolume = (volume: number) => {
-    SoundBus.setVolume(volume);
+    const soundBus = getSoundBus();
+    if (soundBus) {
+      soundBus.setVolume(volume);
+    }
   };
 
   const getVolume = () => {
-    return SoundBus.getVolume();
+    const soundBus = getSoundBus();
+    return soundBus ? soundBus.getVolume() : 0.4;
   };
 
   return (

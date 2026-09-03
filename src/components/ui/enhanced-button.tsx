@@ -1,18 +1,19 @@
+'use client';
 
 import * as React from "react";
 import { Button as BaseButton, ButtonProps } from "@/components/ui/button";
-import { SoundBus } from "@/services/SoundService";
+import { getSoundBus } from "@/services/SoundService";
 
 export interface EnhancedButtonProps extends ButtonProps {
-  soundEffect?: 'click' | 'add' | 'success' | 'delete' | 'error' | 'download' | 'notification' | null;
+  soundEffect?: 'click' | 'add' | 'success' | 'delete' | 'error' | 'download' | 'notification' | 'create' | 'edit' | 'approve' | 'reject' | null;
 }
 
 const EnhancedButton = React.forwardRef<HTMLButtonElement, EnhancedButtonProps>(
   ({ soundEffect = 'click', onClick, ...props }, ref) => {
     const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-      // Play sound if specified
-      if (soundEffect) {
-        SoundBus.play(soundEffect);
+      // Play sound if specified (only on client)
+      if (soundEffect && typeof window !== 'undefined') {
+        getSoundBus().play(soundEffect);
       }
       
       // Call original onClick if provided

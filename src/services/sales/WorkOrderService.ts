@@ -1,5 +1,6 @@
+'use client';
 
-import { toast } from "@/components/ui/use-toast";
+import { toast } from "@/hooks/use-toast";
 import { emitEvent, EVENT_TYPES } from "@/services/EventService";
 
 /**

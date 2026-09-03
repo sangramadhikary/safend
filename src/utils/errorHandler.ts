@@ -132,8 +132,6 @@ export const handleMockDataRequests = <T>(
   filter?: string,
   searchParam?: string
 ): T[] => {
-  console.log(`Retrieving mock ${entityType} data with filter:`, filter);
-  
   if (!mockData || !Array.isArray(mockData)) {
     console.warn(`No mock ${entityType} data available`);
     return [];

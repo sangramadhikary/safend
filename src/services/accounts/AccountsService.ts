@@ -1,22 +1,6 @@
+'use client';
+
 import { apiRequest } from '../api';
-
-// Add these new type definitions at the top of the file
-
-export interface FixedAsset {
-  id: string;
-  name: string;
-  category: string;
-  purchaseDate: string;
-  purchasePrice: number;
-  location: string;
-  assignedTo?: string;
-  status: string;
-  depreciation: number;
-  netBookValue: number;
-  branchId: string;
-  createdAt: string;
-  updatedAt: string;
-}
 
 export interface Invoice {
   id: string;
@@ -248,6 +232,12 @@ export interface Asset {
   currentValue: number;
   depreciationRate: number;
   depreciationMethod: string;
+  /** Residual value below which the asset is not depreciated (SLM/WDV floor) */
+  salvageValue: number;
+  /** Total depreciation charged to date (cumulative) */
+  accumulatedDepreciation: number;
+  /** ISO date of the last depreciation run, if any */
+  lastDepreciationDate: string | null;
 }
 
 export interface Liability {
@@ -262,20 +252,16 @@ export interface Liability {
   creditorName?: string;
   startDate: string;
   remainingAmount: number;
+  /** Annual interest rate (%) — drives amortization & interest accrual */
+  interestRate: number;
+  emiAmount: number | null;
+  emiDay: number | null;
+  totalInstallments: number | null;
+  paidInstallments: number;
+  nextPaymentDate: string | null;
 }
 
 export class AccountsService {
-  // Fixed assets methods
-  public static async getFixedAssets(params: Record<string, string> = {}): Promise<FixedAsset[]> {
-    try {
-      const response = await apiRequest('GET', '/assets', params);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching fixed assets:', error);
-      throw error;
-    }
-  }
-
   // Invoice methods
   public static async getInvoices(params: Record<string, string> = {}): Promise<Invoice[]> {
     try {

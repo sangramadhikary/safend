@@ -1,3 +1,4 @@
+'use client';
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, RotateCcw } from 'lucide-react';
@@ -191,7 +192,7 @@ export function SpeedometerGauge({
           <div className="flex space-x-2">
             <Button
               size="sm"
-              variant={isRunning ? "outline" : "default"}
+              variant={isRunning ? "outline-solid" : "default"}
               onClick={isRunning ? handlePause : handleStart}
               className="flex items-center gap-1"
             >

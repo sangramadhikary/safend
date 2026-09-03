@@ -1,11 +1,10 @@
+'use client';
 
 import { useState, useEffect } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, Server, Database, Cpu, Wifi } from "lucide-react";
-import { useFirebase } from "@/contexts/FirebaseContext";
-import firebaseService from "@/services/firebase/FirebaseIntegrationService";
 
 // Health status component
 const StatusIndicator = ({ status }: { status: 'healthy' | 'warning' | 'critical' | 'unknown' }) => {
@@ -36,49 +35,32 @@ export function HealthMetrics() {
     lastUpdated: new Date().toISOString()
   });
   
-  const { isInitialized } = useFirebase();
-  
-  // Fetch health data from Firebase (simulated)
+  // Simulate health data updates
   useEffect(() => {
-    if (!isInitialized) return;
-    
-    const fetchHealthData = async () => {
-      try {
-        const data = await firebaseService.getRealtimeData('/system/health');
-        setSystemHealth(prevState => ({
-          ...prevState,
-          cpuUsage: Math.round(data.metrics?.systemLoad * 100) || prevState.cpuUsage,
-          networkLatency: data.metrics?.responseTime || prevState.networkLatency,
-          lastUpdated: data.lastUpdated || new Date().toISOString()
-        }));
-      } catch (error) {
-        console.error("Error fetching health metrics:", error);
-      }
+    const fetchHealthData = () => {
+      setSystemHealth(prevState => ({
+        ...prevState,
+        cpuUsage: Math.round(Math.random() * 50) + 10,
+        networkLatency: Math.floor(Math.random() * 50) + 100,
+        lastUpdated: new Date().toISOString()
+      }));
     };
     
     fetchHealthData();
-    
-    // In a real app, we would set up a real-time listener here
     const intervalId = setInterval(fetchHealthData, 30000);
     return () => clearInterval(intervalId);
-  }, [isInitialized]);
+  }, []);
   
   // Handle refresh button click
   const handleRefresh = async () => {
     setRefreshing(true);
-    try {
-      const data = await firebaseService.getRealtimeData('/system/health');
-      setSystemHealth(prevState => ({
-        ...prevState,
-        cpuUsage: Math.round(data.metrics?.systemLoad * 100) || prevState.cpuUsage,
-        networkLatency: data.metrics?.responseTime || prevState.networkLatency,
-        lastUpdated: new Date().toISOString()
-      }));
-    } catch (error) {
-      console.error("Error refreshing health metrics:", error);
-    } finally {
-      setTimeout(() => setRefreshing(false), 500);
-    }
+    setSystemHealth(prevState => ({
+      ...prevState,
+      cpuUsage: Math.round(Math.random() * 50) + 10,
+      networkLatency: Math.floor(Math.random() * 50) + 100,
+      lastUpdated: new Date().toISOString()
+    }));
+    setTimeout(() => setRefreshing(false), 500);
   };
   
   // Determine overall system status
@@ -120,7 +102,7 @@ export function HealthMetrics() {
               <Server className="h-5 w-5 text-red-600" /> 
               System Overview
             </div>
-            <Badge variant={getOverallStatus() === 'healthy' ? 'default' : getOverallStatus() === 'warning' ? 'outline' : 'destructive'}>
+            <Badge variant={getOverallStatus() === 'healthy' ? 'default' : getOverallStatus() === 'warning' ? 'outline-solid' : 'destructive'}>
               {getOverallStatus()}
             </Badge>
           </CardTitle>

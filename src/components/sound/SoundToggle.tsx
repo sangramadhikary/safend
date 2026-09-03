@@ -1,3 +1,4 @@
+'use client';
 
 import { Button } from "@/components/ui/button";
 import { Volume2, VolumeX } from "lucide-react";
@@ -14,7 +15,7 @@ export function SoundToggle() {
           <Button
             variant="outline"
             size="icon"
-            className="rounded-full w-10 h-10 fixed bottom-4 right-4 z-50 bg-background/80 backdrop-blur-sm border shadow-md"
+            className="rounded-full w-10 h-10 fixed bottom-4 right-4 z-50 bg-background/80 backdrop-blur-xs border shadow-md"
             onClick={toggleSound}
             aria-label={isSoundEnabled ? "Disable sound effects" : "Enable sound effects"}
           >

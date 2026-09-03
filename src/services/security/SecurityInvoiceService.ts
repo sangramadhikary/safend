@@ -1,3 +1,4 @@
+'use client';
 
 import { emitEvent, EVENT_TYPES } from '@/hooks/useEvent';
 

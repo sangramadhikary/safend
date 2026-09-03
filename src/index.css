@@ -1,7 +1,135 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800;900&family=Lato:wght@300;400;700&display=swap')
+layer(base);
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@config '../tailwind.config.ts';
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility glass-card {
+  @apply bg-white/70 dark:bg-white/5 backdrop-blur-md border border-white/30 dark:border-white/10 shadow-glass dark:shadow-glass-dark rounded-xl;
+}
+
+@utility hover-scale {
+  @apply transition-transform hover:scale-105;
+}
+
+@utility menu-icon {
+  @apply flex items-center justify-center w-10 h-10 rounded-lg 
+           transition-all duration-300;
+}
+
+@utility active-menu-icon {
+  @apply bg-red-600 text-white;
+}
+
+@utility filter-button {
+  @apply px-4 py-2 rounded-lg text-sm font-medium 
+           border border-transparent hover:border-red-600/50 hover:bg-red-600/10
+           focus:outline-hidden focus:ring-2 focus:ring-red-600/30;
+}
+
+@utility filter-button-active {
+  @apply bg-red-600 text-white;
+}
+
+@utility permission-matrix {
+  /* Control Centre Matrix UI */
+  @apply w-full border-collapse;
+}
+
+@utility matrix-header {
+  @apply bg-black dark:bg-[#0B0F19] text-white dark:text-[#E0E0E0] font-medium p-2;
+}
+
+@utility matrix-row-header {
+  @apply bg-black dark:bg-[#0B0F19] text-white dark:text-[#E0E0E0] font-medium p-2 text-left;
+}
+
+@utility liquid-glass {
+  /* Frosted glass surface with specular highlight + soft depth */
+  position: relative;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0.25) 100%
+  );
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow:
+    0 8px 32px rgba(15, 23, 42, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.15);
+}
+
+@utility liquid-glass-red {
+  /* Brand-tinted glass — picks up the red mesh behind it */
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(215, 25, 32, 0.06) 100%
+  );
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow:
+    0 10px 36px rgba(215, 25, 32, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+@utility liquid-glass-dark {
+  /* Dark glass for use over the red CTA / dark mesh */
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+@utility glass-sheen {
+  /* Moving specular sheen that runs across a glass surface on hover */
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      115deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.55) 50%,
+      transparent 70%
+    );
+    background-size: 250% 250%;
+    background-position: 150% 0;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+  }
+  &:hover::after {
+    opacity: 1;
+    animation: glass-sheen-sweep 0.9s ease forwards;
+  }
+}
 
 @layer base {
   :root {
@@ -23,10 +151,19 @@
     --muted: 0 0% 90%;
     --muted-foreground: 0 0% 45%;
 
-    --accent: 0 100% 56%;
-    --accent-foreground: 0 0% 100%;
+    /* `accent` is the design system's SUBTLE hover/highlight token, not a brand
+       colour. It is consumed by button (ghost/outline), select, dropdown-menu,
+       context-menu, menubar, command, navigation-menu, calendar, toggle and the
+       dialog close button — all for "row/control is hovered" states. Several of
+       those pair it with `text-muted-foreground`, which only stays legible over
+       a light neutral. It previously held the brand red (356 79% 47%, identical
+       to --destructive), which turned every hover into a solid red block and
+       hid any secondary text sitting on it. Brand red lives in --destructive,
+       --sidebar-accent and the `safend.red` palette entry. */
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 9%;
 
-    --destructive: 0 100% 56%;
+    --destructive: 356 79% 47%;
     --destructive-foreground: 0 0% 100%;
 
     --success: 120 100% 35%;
@@ -45,10 +182,10 @@
     --sidebar-foreground: 0 0% 10%;
     --sidebar-primary: 0 0% 0%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 0 100% 56%;
+    --sidebar-accent: 356 79% 47%;
     --sidebar-accent-foreground: 0 0% 100%;
     --sidebar-border: 0 0% 90%;
-    --sidebar-ring: 0 100% 56%;
+    --sidebar-ring: 356 79% 47%;
   }
 
   .dark {
@@ -70,10 +207,12 @@
     --muted: 215 28% 6%;
     --muted-foreground: 0 0% 65%;
 
-    --accent: 0 100% 45%;
-    --accent-foreground: 0 0% 100%;
+    /* Lifted off --background (215 28% 6%) so hover is actually visible in dark
+       mode without resorting to the brand red. */
+    --accent: 215 28% 15%;
+    --accent-foreground: 0 0% 95%;
 
-    --destructive: 0 100% 45%;
+    --destructive: 356 79% 47%;
     --destructive-foreground: 0 0% 100%;
 
     --success: 120 100% 40%;
@@ -90,10 +229,10 @@
     --sidebar-foreground: 0 0% 88%;
     --sidebar-primary: 0 0% 88%;
     --sidebar-primary-foreground: 215 28% 6%;
-    --sidebar-accent: 0 100% 45%;
+    --sidebar-accent: 356 79% 47%;
     --sidebar-accent-foreground: 0 0% 100%;
     --sidebar-border: 0 0% 20%;
-    --sidebar-ring: 0 100% 45%;
+    --sidebar-ring: 356 79% 47%;
   }
 }
 
@@ -101,251 +240,851 @@
   * {
     @apply border-border;
   }
+
+  /* Number inputs: drop the native spinner arrows everywhere. They sit on top
+     of the field, are easy to hit by accident, and the scroll-wheel binding
+     silently changes values while the user is scrolling the page. Wheel
+     interaction is blocked in components/ui/input.tsx. */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  html {
+    font-family: 'Lato', sans-serif;
+    overflow-x: hidden;
+  }
+  
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-body;
     font-feature-settings: "rlig" 1, "calt" 1;
-  }
-}
-
-@layer components {
-  .glass-card {
-    @apply bg-white dark:bg-[#0B0F19] border border-gray-200 dark:border-gray-800 shadow-xl rounded-xl;
-  }
-
-  .hover-scale {
-    @apply transition-transform hover:scale-105;
-  }
-
-  .menu-icon {
-    @apply flex items-center justify-center w-10 h-10 rounded-lg 
-           transition-all duration-300;
-  }
-
-  .active-menu-icon {
-    @apply bg-red-600 text-white;
+    color: #4A4A4A;
+    overflow-x: hidden;
+    width: 100%;
   }
   
-  .filter-button {
-    @apply px-4 py-2 rounded-lg text-sm font-medium 
-           border border-transparent hover:border-red-600/50 hover:bg-red-600/10
-           focus:outline-none focus:ring-2 focus:ring-red-600/30;
+  /* Typography Hierarchy - Montserrat for headings */
+  h1, .h1 {
+    @apply font-montserrat font-bold;
+    font-size: 3rem;
+    line-height: 1.2;
+    color: #D71920;
   }
   
-  .filter-button-active {
-    @apply bg-red-600 text-white;
-  }
-
-  /* Control Centre Matrix UI */
-  .permission-matrix {
-    @apply w-full border-collapse;
+  h2, .h2 {
+    @apply font-montserrat font-semibold;
+    font-size: 2.25rem;
+    line-height: 1.3;
+    color: #000000;
   }
   
-  .matrix-header {
-    @apply bg-black dark:bg-[#0B0F19] text-white dark:text-[#E0E0E0] font-medium p-2;
+  h3, .h3 {
+    @apply font-montserrat font-medium;
+    font-size: 1.75rem;
+    line-height: 1.3;
+    color: #000000;
   }
   
-  .matrix-row-header {
-    @apply bg-black dark:bg-[#0B0F19] text-white dark:text-[#E0E0E0] font-medium p-2 text-left;
+  h4, .h4 {
+    @apply font-montserrat font-medium;
+    font-size: 1.25rem;
+    line-height: 1.4;
+    color: #000000;
+  }
+  
+  h5, .h5 {
+    @apply font-montserrat font-medium;
+    font-size: 1rem;
+    line-height: 1.4;
+    color: #000000;
+  }
+  
+  h6, .h6 {
+    @apply font-montserrat font-medium;
+    font-size: 0.875rem;
+    line-height: 1.4;
+    color: #000000;
+  }
+  
+  /* Body text - Lato */
+  p, .body-text {
+    @apply font-lato font-normal;
+    font-size: 1rem;
+    line-height: 1.6;
+    color: #4A4A4A;
+  }
+  
+  /* Caption text */
+  .caption, small {
+    @apply font-lato font-normal;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: #4A4A4A;
+  }
+  
+  /* Dark mode typography adjustments */
+  .dark h1, .dark .h1 {
+    color: #D71920;
+  }
+  
+  .dark h2, .dark .h2,
+  .dark h3, .dark .h3,
+  .dark h4, .dark .h4,
+  .dark h5, .dark .h5,
+  .dark h6, .dark .h6 {
+    color: #E0E0E0;
+  }
+  
+  .dark p, .dark .body-text,
+  .dark .caption, .dark small {
+    color: #B0B0B0;
+  }
+  
+  .dark body {
+    color: #B0B0B0;
   }
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+@layer utilities {
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.5);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.8);
+  }
+
+  /* Button press effect */
+  .btn-press-effect {
+    transition: transform 0.1s ease;
+  }
+
+  .btn-press-effect:active {
+    transform: scale(0.95);
+  }
+
+  /* Page transition - no animation */
+  .page-transition {
+    opacity: 1;
+  }
+
+  /* ─── View Transitions API — theme switch ripple ─────────────────────────── */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.4s;
+    animation-timing-function: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  }
+
+  ::view-transition-old(root) {
+    animation-name: theme-fade-out;
+  }
+
+  ::view-transition-new(root) {
+    animation-name: theme-fade-in;
+  }
+
+  @keyframes theme-fade-out {
+    from {
+      opacity: 1;
+      filter: blur(0px);
+    }
+    to {
+      opacity: 0;
+      filter: blur(4px);
+    }
+  }
+
+  @keyframes theme-fade-in {
+    from {
+      opacity: 0;
+      filter: blur(4px);
+    }
+    to {
+      opacity: 1;
+      filter: blur(0px);
+    }
+  }
+
+  @keyframes marquee {
+    0% {
+      transform: translateX(0);
+    }
+    100% {
+      transform: translateX(-50%);
+    }
+  }
+
+  /* ─── Override browser autofill background ────────────────────────────────── */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0 30px white inset !important;
+    -webkit-text-fill-color: #111111 !important;
+    transition: background-color 5000s ease-in-out 0s;
+  }
+
+  /* ─── Smooth theme color transitions on all elements ─────────────────────── */
+  html.transitioning-theme *,
+  html.transitioning-theme *::before,
+  html.transitioning-theme *::after {
+    transition:
+      background-color 0.25s ease,
+      border-color 0.25s ease,
+      color 0.15s ease,
+      box-shadow 0.25s ease !important;
+  }
+
+  /* Exclude elements where transition would cause flicker */
+  input,
+  textarea,
+  select,
+  button,
+  a,
+  [role='button'] {
+    transition:
+      transform 0.15s ease,
+      opacity 0.15s ease;
+  }
+
+  /* Custom background patterns */
+  .light-pattern {
+    background-image: radial-gradient(
+      circle at 1px 1px,
+      rgba(0, 0, 0, 0.15) 1px,
+      transparent 0
+    );
+    background-size: 20px 20px;
+  }
+
+  .services-bg-pattern {
+    background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23111111' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  }
+
+  .dark-vignette {
+    background: radial-gradient(
+      ellipse at center,
+      rgba(0, 0, 0, 0) 0%,
+      rgba(0, 0, 0, 0.3) 70%,
+      rgba(0, 0, 0, 0.7) 100%
+    );
+  }
+
+  /* Animation classes */
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.1),
+      transparent
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2s ease-in-out infinite;
+  }
+
+  /* React Big Calendar Customizations */
+  .rbc-calendar {
+    @apply bg-background text-foreground;
+  }
+
+  .rbc-header {
+    @apply bg-muted text-muted-foreground font-medium border-b border-border;
+    padding: 12px 8px;
+  }
+
+  .rbc-month-view {
+    border: 1px solid hsl(var(--border));
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .rbc-date-cell {
+    @apply text-foreground;
+    padding: 8px;
+  }
+
+  .rbc-day-bg {
+    @apply bg-background border-r border-b border-border;
+  }
+
+  .rbc-day-bg.rbc-off-range-bg {
+    @apply bg-muted/30;
+  }
+
+  /* Pinned to the brand red rather than `accent`: these two genuinely want red,
+   and `accent` is now the neutral hover token. */
+  .rbc-today {
+    background-color: rgba(215, 25, 32, 0.08);
+  }
+
+  .rbc-event {
+    border: none !important;
+    border-radius: 4px;
+    padding: 2px 4px;
+    font-size: 12px;
+    line-height: 1.2;
+    margin: 1px 0;
+  }
+
+  .rbc-event-content {
+    @apply truncate;
+  }
+
+  .rbc-show-more {
+    @apply text-primary text-xs font-medium;
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    cursor: pointer;
+  }
+
+  .rbc-month-row {
+    border-bottom: 1px solid hsl(var(--border));
+  }
+
+  .rbc-month-row:last-child {
+    border-bottom: none;
+  }
+
+  .rbc-date-cell a {
+    @apply text-foreground;
+  }
+
+  .rbc-date-cell.rbc-off-range {
+    @apply text-muted-foreground;
+  }
+
+  .rbc-toolbar {
+    @apply mb-4 flex flex-col sm:flex-row justify-between items-center gap-4;
+  }
+
+  .rbc-toolbar-label {
+    @apply text-xl font-semibold text-foreground;
+  }
+
+  .rbc-btn-group {
+    @apply flex gap-1;
+  }
+
+  .rbc-btn-group button {
+    @apply px-3 py-1 text-sm bg-secondary text-secondary-foreground border border-border rounded hover:bg-secondary/80 transition-colors;
+  }
+
+  .rbc-btn-group button.rbc-active {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  .rbc-month-header {
+    @apply bg-card border-b border-border;
+  }
+
+  /* Week and Day view styles */
+  .rbc-time-view {
+    border: 1px solid hsl(var(--border));
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .rbc-time-header {
+    @apply border-b border-border;
+  }
+
+  .rbc-time-content {
+    @apply bg-background;
+  }
+
+  .rbc-allday-cell {
+    @apply bg-muted/30;
+  }
+
+  .rbc-time-slot {
+    @apply border-b border-border/50;
+  }
+
+  .rbc-timeslot-group {
+    @apply border-b border-border;
+  }
+
+  .rbc-current-time-indicator {
+    background-color: #d71920;
+  }
+
+  /* Agenda view styles */
+  .rbc-agenda-view {
+    border: 1px solid hsl(var(--border));
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .rbc-agenda-view table {
+    @apply w-full;
+  }
+
+  .rbc-agenda-view .rbc-agenda-date-cell {
+    @apply bg-muted text-muted-foreground font-medium;
+    padding: 12px;
+  }
+
+  .rbc-agenda-view .rbc-agenda-time-cell {
+    @apply text-muted-foreground;
+    padding: 8px 12px;
+  }
+
+  .rbc-agenda-view .rbc-agenda-event-cell {
+    @apply text-foreground;
+    padding: 8px 12px;
+  }
+
+  /* ─── Safend Brand Loader ─────────────────────────────────────────────────── */
+  .safend-loader {
+    width: 40px;
+    height: 20px;
+    --c: no-repeat radial-gradient(farthest-side, #d71920 93%, #0000);
+    background:
+      var(--c) 0 0,
+      var(--c) 50% 0;
+    background-size: 8px 8px;
+    position: relative;
+    clip-path: inset(-200% -100% 0 0);
+    animation: sl6-0 1.5s linear infinite;
+  }
+  .safend-loader:before {
+    content: '';
+    position: absolute;
+    width: 8px;
+    height: 12px;
+    background: #d71920;
+    left: -16px;
+    top: 0;
+    animation:
+      sl6-1 1.5s linear infinite,
+      sl6-2 0.5s cubic-bezier(0, 200, 0.8, 200) infinite;
+  }
+  .safend-loader:after {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 0 0 1px #d71920;
+    animation: sl6-3 1.5s linear infinite;
+  }
+  @keyframes sl6-0 {
+    0%,
+    30% {
+      background-position:
+        0 0,
+        50% 0;
+    }
+    33% {
+      background-position:
+        0 100%,
+        50% 0;
+    }
+    41%,
+    63% {
+      background-position:
+        0 0,
+        50% 0;
+    }
+    66% {
+      background-position:
+        0 0,
+        50% 100%;
+    }
+    74%,
+    100% {
+      background-position:
+        0 0,
+        50% 0;
+    }
+  }
+  @keyframes sl6-1 {
+    90% {
+      transform: translateY(0);
+    }
+    95% {
+      transform: translateY(15px);
+    }
+    100% {
+      transform: translateY(15px);
+      left: calc(100% - 8px);
+    }
+  }
+  @keyframes sl6-2 {
+    100% {
+      top: -0.1px;
+    }
+  }
+  @keyframes sl6-3 {
+    0%,
+    80%,
+    100% {
+      transform: translate(0);
+    }
+    90% {
+      transform: translate(26px);
+    }
+  }
+
+  /* ─── Animated SVG Checkbox (Uiverse.io / mrhyddenn) ───────────────────── */
+
+  .checkbox-svg {
+    position: relative;
+    z-index: 1;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke: #c8ccd4;
+    stroke-width: 2;
+    transform: translate3d(0, 0, 0);
+    transition: all 0.2s ease;
+  }
+
+  .checkbox-svg .checkbox-box {
+    stroke-dasharray: 60;
+    stroke-dashoffset: 0;
+    transition: all 0.3s linear;
+  }
+
+  .checkbox-svg .checkbox-check {
+    stroke-dasharray: 22;
+    stroke-dashoffset: 66;
+    transition: all 0.2s linear;
+  }
+
+  /* Hover state */
+  [data-state='unchecked']:hover .checkbox-svg {
+    stroke: #dc2626;
+  }
+
+  /* Checked state */
+  [data-state='checked'] .checkbox-svg {
+    stroke: #dc2626;
+  }
+
+  [data-state='checked'] .checkbox-svg .checkbox-box {
+    stroke-dashoffset: 60;
+  }
+
+  [data-state='checked'] .checkbox-svg .checkbox-check {
+    stroke-dashoffset: 42;
+    transition-delay: 0.15s;
+  }
+
+  /* ─── Invoice Print Styles (A4) ──────────────────────────────────────────── */
+  @media print {
+    @page {
+      size: A4;
+      margin: 10mm 12mm;
+    }
+
+    body {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+
+    /* Hide everything except the invoice */
+    body > *:not([data-radix-portal]) {
+      display: none !important;
+    }
+
+    /* Inside portal, hide the overlay and only show content */
+    [data-radix-portal] [role='dialog'] {
+      position: static !important;
+      transform: none !important;
+      max-width: 100% !important;
+      max-height: none !important;
+      overflow: visible !important;
+      border: none !important;
+      box-shadow: none !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      background: white !important;
+    }
+
+    /* Hide dialog overlay */
+    [data-radix-portal] > [data-state] {
+      display: none !important;
+    }
+
+    [data-radix-portal] > [role='dialog'],
+    [data-radix-portal] > div:has([role='dialog']) {
+      display: block !important;
+    }
+
+    /* The invoice container itself */
+    [data-invoice-print] {
+      max-width: 100% !important;
+      width: 100% !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      box-shadow: none !important;
+      background: white !important;
+    }
+
+    /* Hide the outer wrapper background */
+    [data-invoice-print] {
+      min-height: auto !important;
+    }
+
+    /* Hide dialog close button */
+    [role='dialog'] > button[class*='absolute'] {
+      display: none !important;
+    }
+
+    /* Ensure tables don't break across pages */
+    table {
+      page-break-inside: avoid;
+    }
+
+    tr {
+      page-break-inside: avoid;
+    }
+
+    /* Footer section stays together */
+    .mt-12 {
+      page-break-inside: avoid;
+    }
+  }
+
+  /* ─── Liquid Glass / Glassmorphism utilities (marketing) ─────────────────── */
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+@keyframes glass-sheen-sweep {
+  from { background-position: 150% 0; }
+  to   { background-position: -50% 0; }
 }
 
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.5);
-  border-radius: 3px;
+/* Animated aurora/mesh gradient blob used behind glass panels */
+@keyframes mesh-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%      { transform: translate(4%, -3%) scale(1.08); }
+  66%      { transform: translate(-3%, 4%) scale(0.96); }
+}
+.animate-mesh-drift {
+  animation: mesh-drift 18s ease-in-out infinite;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.8);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EDITORIAL DESIGN SYSTEM — motion helpers (adapted from Design/ tokens)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Scroll cue — red fill sweeps down inside a hairline track */
+@keyframes scrollcue {
+  0%   { transform: translateY(-100%); }
+  50%  { transform: translateY(0%); }
+  100% { transform: translateY(100%); }
 }
 
-/* Button press effect */
-.btn-press-effect {
-  transition: transform 0.1s ease;
-}
-
-.btn-press-effect:active {
-  transform: scale(0.95);
-}
-
-/* Page transition - no animation */
-.page-transition {
-  opacity: 1;
-}
-
-/* Custom background patterns */
-.light-pattern {
-  background-image: radial-gradient(circle at 1px 1px, rgba(0,0,0,0.15) 1px, transparent 0);
-  background-size: 20px 20px;
-}
-
-.dark-vignette {
-  background: radial-gradient(ellipse at center, rgba(0,0,0,0) 0%, rgba(0,0,0,0.3) 70%, rgba(0,0,0,0.7) 100%);
-}
-
-/* Animation classes */
-.animate-shimmer {
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
-  background-size: 200% 100%;
-  animation: shimmer 2s ease-in-out infinite;
-}
-
-/* React Big Calendar Customizations */
-.rbc-calendar {
-  @apply bg-background text-foreground;
-}
-
-.rbc-header {
-  @apply bg-muted text-muted-foreground font-medium border-b border-border;
-  padding: 12px 8px;
-}
-
-.rbc-month-view {
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
+/* GSAP ScrollSmoother requires the wrapper/content structure to be positioned */
+#smooth-wrapper {
   overflow: hidden;
+  width: 100%;
+  max-width: 100vw;
+}
+#smooth-content {
+  /* will-change improves smoothness of the transform GSAP applies */
+  will-change: transform;
+  width: 100%;
+  overflow-x: hidden;
 }
 
-.rbc-date-cell {
-  @apply text-foreground;
-  padding: 8px;
+/* Editorial display type — tighten rendering for the massive headlines */
+.font-display {
+  font-feature-settings: "kern" 1, "liga" 1;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
-.rbc-day-bg {
-  @apply bg-background border-r border-b border-border;
+/* Magnetic / hover lift used on interactive editorial elements */
+.editorial-lift {
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.editorial-lift:hover {
+  transform: translateY(-4px);
 }
 
-.rbc-day-bg.rbc-off-range-bg {
-  @apply bg-muted/30;
+/* Image reveal mask — used where an image wipes in */
+.img-reveal {
+  clip-path: inset(0 0 0 0);
 }
 
-.rbc-today {
-  @apply bg-accent/10;
+/* Marquee track — pause on hover for accessibility/legibility */
+.marquee-track:hover {
+  animation-play-state: paused;
 }
 
-.rbc-event {
-  border: none !important;
-  border-radius: 4px;
-  padding: 2px 4px;
-  font-size: 12px;
-  line-height: 1.2;
-  margin: 1px 0;
+/* Canvas selection color matches the brand */
+::selection {
+  background: #D71920;
+  color: #FFFAF9;
 }
 
-.rbc-event-content {
-  @apply truncate;
+/* ─── Highlighted rows: keep secondary text legible ──────────────────────────
+   Menu/option rows flip their own colour on highlight (e.g. SelectItem's
+   `focus:text-accent-foreground`), but a nested element carrying its own colour
+   class does not inherit that — it keeps its original value and can end up
+   unreadable against the row background. This is how "Passport · 2 sides" lost
+   its secondary label: the `text-muted-foreground` span stayed mid-grey while
+   the row went dark.
+
+   Forcing secondary text to follow the row's own colour fixes it for every
+   primitive at once, and still applies where a strong background is deliberate
+   (sidebar active item, which keeps the brand red). Opacity preserves the
+   visual hierarchy so the label still reads as secondary. */
+[data-highlighted] .text-muted-foreground,
+[data-selected="true"] .text-muted-foreground,
+[data-active="true"] .text-muted-foreground,
+[aria-selected="true"] .text-muted-foreground {
+  color: inherit;
+  opacity: 0.72;
 }
 
-.rbc-show-more {
-  @apply text-primary text-xs font-medium;
-  background: none;
-  border: none;
-  padding: 2px 4px;
-  cursor: pointer;
+/* ─── Safe area insets for mobile devices with notches / home indicators ─── */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
 }
 
-.rbc-month-row {
-  border-bottom: 1px solid hsl(var(--border));
+/* ═══════════════════════════════════════════════════════════════════════════
+   MODULE STYLES — moved here from module-styles.css so @apply has Tailwind
+   context. In Tailwind v4, @apply only works in the file that imports Tailwind.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.module-container {
+  @apply space-y-6;
 }
 
-.rbc-month-row:last-child {
-  border-bottom: none;
+.module-header {
+  @apply text-black dark:text-white font-bold;
 }
 
-.rbc-date-cell a {
-  @apply text-foreground;
+.module-action-button {
+  @apply bg-red-600 hover:bg-red-700 text-white shadow-lg;
 }
 
-.rbc-date-cell.rbc-off-range {
-  @apply text-muted-foreground;
+.module-info-banner {
+  @apply bg-white dark:bg-black p-6 rounded-xl border border-red-600 dark:border-red-600 shadow-sm;
 }
 
-.rbc-toolbar {
-  @apply mb-4 flex flex-col sm:flex-row justify-between items-center gap-4;
+.stat-border-red   { @apply border-red-600; }
+.stat-border-black { @apply border-black dark:border-white; }
+.stat-border-gray  { @apply border-gray-400 dark:border-gray-500; }
+.stat-border-yellow { @apply border-yellow-500; }
+.stat-border-blue  { @apply border-blue-500; }
+.stat-border-green { @apply border-green-500; }
+
+.stat-text-red    { @apply text-red-600; }
+.stat-text-black  { @apply text-black dark:text-white; }
+.stat-text-gray   { @apply text-gray-600 dark:text-gray-400; }
+.stat-text-yellow { @apply text-yellow-600 dark:text-yellow-400; }
+.stat-text-blue   { @apply text-blue-600 dark:text-blue-400; }
+.stat-text-green  { @apply text-green-600 dark:text-green-400; }
+
+.glass-panel {
+  @apply bg-white dark:bg-black border border-red-600 dark:border-red-600 shadow-xl rounded-xl;
 }
 
-.rbc-toolbar-label {
-  @apply text-xl font-semibold text-foreground;
+.premium-card {
+  @apply bg-white dark:bg-black rounded-xl border border-white dark:border-white shadow-lg hover:shadow-xl transition-all duration-100;
 }
 
-.rbc-btn-group {
-  @apply flex gap-1;
+.premium-input {
+  @apply bg-white dark:bg-black border border-white dark:border-white rounded-lg px-4 py-2 focus:ring-2 focus:ring-red-600 focus:border-red-600 transition-all duration-200;
 }
 
-.rbc-btn-group button {
-  @apply px-3 py-1 text-sm bg-secondary text-secondary-foreground border border-border rounded hover:bg-secondary/80 transition-colors;
+.premium-button {
+  @apply bg-red-600 hover:bg-red-700 text-white rounded-lg px-4 py-2 shadow-lg hover:shadow-xl transition-all duration-100;
 }
 
-.rbc-btn-group button.rbc-active {
-  @apply bg-primary text-primary-foreground;
+.control-centre-container { @apply space-y-6; }
+
+.control-centre-card {
+  @apply bg-white dark:bg-black border border-white dark:border-white rounded-xl shadow-lg p-6;
 }
 
-.rbc-month-header {
-  @apply bg-card border-b border-border;
+.matrix-cell {
+  @apply border border-white dark:border-white p-2 text-center;
 }
 
-/* Week and Day view styles */
-.rbc-time-view {
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  overflow: hidden;
+.matrix-cell-granted { @apply bg-red-600 text-white; }
+
+.api-token-card {
+  @apply border border-white dark:border-white p-4 rounded-lg mb-4;
 }
 
-.rbc-time-header {
-  @apply border-b border-border;
+.webhook-editor {
+  @apply bg-black dark:bg-black text-white p-4 rounded-lg font-mono text-sm;
 }
 
-.rbc-time-content {
-  @apply bg-background;
+/* Posts Map tooltip styling */
+.posts-map-tooltip {
+  background: white !important;
+  border: 1px solid #e5e7eb !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  padding: 10px 12px !important;
+  font-size: 12px !important;
+}
+.posts-map-tooltip::before {
+  border-top-color: #e5e7eb !important;
+}
+.dark .posts-map-tooltip {
+  background: #1f2937 !important;
+  border-color: #374151 !important;
+  color: #e5e7eb !important;
 }
 
-.rbc-allday-cell {
-  @apply bg-muted/30;
+/* Supervisor Portal — safe area for mobile notch/home indicator */
+.safe-area-top    { padding-top: env(safe-area-inset-top, 0px); }
+
+/* Print protection — hide all content for non-admin users */
+@media print {
+  body.print-protected * {
+    display: none !important;
+    visibility: hidden !important;
+  }
+  body.print-protected::after {
+    content: 'Printing is not allowed.';
+    display: block !important;
+    visibility: visible !important;
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-weight: bold;
+    color: #D71920;
+    background: white;
+    z-index: 99999;
+  }
 }
 
-.rbc-time-slot {
-  @apply border-b border-border/50;
-}
-
-.rbc-timeslot-group {
-  @apply border-b border-border;
-}
-
-.rbc-current-time-indicator {
-  @apply bg-accent;
-}
-
-/* Agenda view styles */
-.rbc-agenda-view {
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.rbc-agenda-view table {
-  @apply w-full;
-}
-
-.rbc-agenda-view .rbc-agenda-date-cell {
-  @apply bg-muted text-muted-foreground font-medium;
-  padding: 12px;
-}
-
-.rbc-agenda-view .rbc-agenda-time-cell {
-  @apply text-muted-foreground;
-  padding: 8px 12px;
-}
-
-.rbc-agenda-view .rbc-agenda-event-cell {
-  @apply text-foreground;
-  padding: 8px 12px;
+/* Primary tab bar inside modules is hidden when ModuleHeaderBar is active. */
+[data-module-primary-tabs] {
+  display: none !important;
 }

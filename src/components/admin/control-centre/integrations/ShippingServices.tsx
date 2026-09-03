@@ -1,3 +1,4 @@
+'use client';
 
 import { useState } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
@@ -6,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { useToast } from "@/components/ui/use-toast";
+import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
   DialogContent,
@@ -152,7 +153,7 @@ export function ShippingServices() {
                     </CardDescription>
                   </div>
                   <Button 
-                    variant={service.status === "connected" ? "outline" : "destructive"}
+                    variant={service.status === "connected" ? "outline-solid" : "destructive"}
                     onClick={() => handleConnectService(service)}
                   >
                     {service.status === "connected" ? "Update Configuration" : "Connect"}

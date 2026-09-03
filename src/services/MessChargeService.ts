@@ -1,76 +1,23 @@
+'use client';
 
-interface MessCharge {
-  id: string;
-  branchId: string;
-  month: string;
-  year: number;
-  totalAmount: number;
-  employeeCount: number;
-  generatedAt: string;
-}
+/**
+ * @deprecated The MessChargeService is no longer used.
+ * Mess charges are now calculated automatically via the weekly mess management system.
+ * See: src/modules/operations/hooks/useMessMealRecords.ts → calculateCharges
+ */
 
-interface MessChargeService {
-  generateMonthlyBill(options: {
-    branchId: string;
-    month: string;
-    year: number;
-  }): {
-    success: boolean;
-    data?: any;
-    requestId?: string;
-    error?: string;
-  };
-}
+// Kept as stubs for backward compatibility if any old code still imports these
+export const getAllMealCostConfigurations = () => [];
+export const calculateMealCostFromDistribution = (_data: any) => ({ success: true, cost: 0 });
+export const updatePostMealCost = (_postId: string, _cost: number) => ({ success: true });
+export const getMealCost = (_postId: string) => ({ cost: 0 });
+export const sendMessBillToAccounts = (_billData: any) => ({ success: true, billId: '' });
 
-// Mock implementation for frontend-only project
-class MessChargeService {
-  generateMonthlyBill(options: {
-    branchId: string;
-    month: string;
-    year: number;
-  }): {
-    success: boolean;
-    data?: any;
-    requestId?: string;
-    error?: string;
-  } {
-    const mockBill = {
-      branchId: options.branchId,
-      month: options.month,
-      year: options.year,
-      totalAmount: 15000,
-      employeeCount: 25,
-      generatedAt: new Date().toISOString()
-    };
-
-    return {
-      success: true,
-      data: mockBill,
-      requestId: `req_${Date.now()}`
-    };
+class MessChargeServiceClass {
+  generateMonthlyBill(_options: any) {
+    return { success: false, error: 'Deprecated. Use weekly mess management system.' };
   }
 }
 
-// Frontend-only mock functions
-export const getAllMealCostConfigurations = () => {
-  return [];
-};
-
-export const calculateMealCostFromDistribution = (data: any) => {
-  return { success: true, cost: 150 };
-};
-
-export const updatePostMealCost = (postId: string, cost: number) => {
-  return { success: true };
-};
-
-export const getMealCost = (postId: string) => {
-  return { cost: 150 };
-};
-
-export const sendMessBillToAccounts = (billData: any) => {
-  return { success: true, billId: `bill_${Date.now()}` };
-};
-
-export const messChargeService = new MessChargeService();
+export const messChargeService = new MessChargeServiceClass();
 export default messChargeService;

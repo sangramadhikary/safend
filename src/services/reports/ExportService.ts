@@ -1,3 +1,4 @@
+'use client';
 
 import { ReportTemplate, ReportResult } from "@/types/reports";
 import { executeReport } from "./ReportingService";

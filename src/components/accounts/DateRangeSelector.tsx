@@ -1,3 +1,4 @@
+'use client';
 import { useState, useEffect } from 'react';
 import { format, subMonths, startOfMonth, endOfMonth, subDays, startOfQuarter, endOfQuarter, startOfYear, endOfYear } from 'date-fns';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";

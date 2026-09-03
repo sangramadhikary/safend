@@ -1,184 +1,302 @@
+'use client';
 
-import { UninformedLeave, AbscondCase, LeaveApplication } from "@/pages/hr/components";
+import { UninformedLeave, AbscondCase } from "@/modules/hr/components";
 import { HR_CONFIG } from "@/config";
-import { mockUninformedLeaves } from "@/data/mockUninformedLeaves";
-import { mockAbscondCases } from "@/data/mockAbscondCases";
 import { emitEvent, EVENT_TYPES } from "./EventService";
+import { supabaseClient } from "@/integrations/supabase/client";
 
-// Store uninformed leaves and abscond cases in memory
-let uninformedLeaves = [...mockUninformedLeaves];
-let abscondCases = [...mockAbscondCases];
+// ─── Interfaces ───────────────────────────────────────────────────────────────
 
-// Detect uninformed leave based on attendance event
-export const detectUninformedLeave = (attendanceEvent: { 
+export interface LeaveRequest {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  leaveType: "Planned Leave" | "Urgent Leave" | "Abscond";
+  subType: "Paid" | "Unpaid";
+  fromDate: string;
+  toDate: string;
+  days: number;
+  reason: string;
+  status: "Pending" | "Approved" | "Rejected";
+  requestedBy: string;
+  requestDate: string;
+  approvedBy?: string;
+  approvedOn?: string;
+  rejectionReason?: string;
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  leaveBalance: number;
+  showCauseIssued?: boolean;
+  showCauseDate?: string;
+  terminationIssued?: boolean;
+  terminationDate?: string;
+}
+
+// ─── In-memory caches (backed by Supabase `leave_requests` table) ─────────────
+// UninformedLeave and AbscondCase are operational workflow objects
+// that need to survive server restarts.
+let _uninformedLeaves: UninformedLeave[] | null = null;
+let _abscondCases: AbscondCase[] | null = null;
+
+async function getUninformedLeavesFromDB(): Promise<UninformedLeave[]> {
+  if (_uninformedLeaves !== null) return _uninformedLeaves;
+  const { data, error } = await supabaseClient
+    .from('leave_requests')
+    .select('*')
+    .eq('leave_type', 'uninformed')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[LeaveService] Failed to load uninformed leaves:', error.message);
+    _uninformedLeaves = [];
+    return _uninformedLeaves;
+  }
+
+  _uninformedLeaves = (data ?? []).map((row: any) => ({
+    id: row.id,
+    employeeId: row.employee_id,
+    employeeName: row.employee_name,
+    date: row.from_date,
+    detectedBy: row.requested_by ?? 'system',
+    timestamp: row.created_at,
+    postId: row.post_id ?? undefined,
+    branchId: row.branch_id ?? undefined,
+    resolution: row.resolution ?? undefined,
+    resolvedBy: row.approved_by ?? undefined,
+  }));
+  return _uninformedLeaves;
+}
+
+async function getAbscondCasesFromDB(): Promise<AbscondCase[]> {
+  if (_abscondCases !== null) return _abscondCases;
+  const { data, error } = await supabaseClient
+    .from('leave_requests')
+    .select('*')
+    .eq('leave_type', 'Abscond')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[LeaveService] Failed to load abscond cases:', error.message);
+    _abscondCases = [];
+    return _abscondCases;
+  }
+
+  _abscondCases = (data ?? []).map((row: any) => ({
+    id: row.id,
+    employeeId: row.employee_id,
+    employeeName: row.employee_name,
+    startDate: row.from_date,
+    lastContact: row.last_contact_date ?? row.from_date,
+    status: row.status === 'Rejected' ? 'CLOSED' : 'PENDING',
+    remarks: row.reason ?? '',
+    createdAt: row.created_at,
+    closedAt: row.approved_on ?? undefined,
+    closedBy: row.approved_by ?? undefined,
+    salaryCut: row.salary_cut ?? true,
+  }));
+  return _abscondCases;
+}
+
+function invalidateUninformedCache() { _uninformedLeaves = null; }
+function invalidateAbscondCache() { _abscondCases = null; }
+
+// ─── Validation helpers ────────────────────────────────────────────────────────
+
+export const validatePlannedLeave = (fromDate: string): { valid: boolean; message: string } => {
+  const from = new Date(fromDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const minDate = new Date(today);
+  minDate.setDate(minDate.getDate() + HR_CONFIG.LEAVE.PLANNED_LEAVE_MIN_ADVANCE_DAYS);
+
+  if (from < minDate) {
+    return {
+      valid: false,
+      message: `Planned leave must be applied at least ${HR_CONFIG.LEAVE.PLANNED_LEAVE_MIN_ADVANCE_DAYS} days in advance.`
+    };
+  }
+  return { valid: true, message: '' };
+};
+
+export const getPlannedLeaveSubType = (leaveBalance: number): 'Paid' | 'Unpaid' =>
+  leaveBalance > 0 ? 'Paid' : 'Unpaid';
+
+// ─── Uninformed leave detection ────────────────────────────────────────────────
+
+export const detectUninformedLeave = async (attendanceEvent: {
   employeeId: string;
   employeeName: string;
   date: string;
   status: string;
   postId?: string;
   branchId?: string;
-}) => {
-  if (attendanceEvent.status !== 'Absent') {
-    return null;
-  }
-  
-  // Check if approved leave exists for this date and employee
-  // In a real app, this would query the leave records
-  const hasApprovedLeave = false; // Mock data - would check leave records
-  
-  if (hasApprovedLeave) {
-    return null;
-  }
-  
-  // Create new uninformed leave record
-  const newUninformedLeave: UninformedLeave = {
+}): Promise<UninformedLeave | null> => {
+  if (attendanceEvent.status !== 'Absent') return null;
+
+  // Check if an approved leave already exists for this date
+  const { data: approvedLeave } = await supabaseClient
+    .from('leave_requests')
+    .select('id')
+    .eq('employee_id', attendanceEvent.employeeId)
+    .eq('status', 'Approved')
+    .lte('from_date', attendanceEvent.date)
+    .gte('to_date', attendanceEvent.date)
+    .limit(1);
+
+  if (approvedLeave && approvedLeave.length > 0) return null;
+
+  const newLeave: UninformedLeave = {
     id: `UL${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`,
     employeeId: attendanceEvent.employeeId,
     employeeName: attendanceEvent.employeeName,
     date: attendanceEvent.date,
-    detectedBy: "system",
+    detectedBy: 'system',
     timestamp: new Date().toISOString(),
     postId: attendanceEvent.postId,
-    branchId: attendanceEvent.branchId
+    branchId: attendanceEvent.branchId,
   };
-  
-  uninformedLeaves.push(newUninformedLeave);
-  
-  // Check for consecutive uninformed leaves
-  checkConsecutiveUninformedLeaves(attendanceEvent.employeeId);
-  
-  return newUninformedLeave;
+
+  // Persist to leave_requests table so it survives restarts
+  const { error } = await supabaseClient.from('leave_requests').insert({
+    id: newLeave.id,
+    employee_id: newLeave.employeeId,
+    employee_name: newLeave.employeeName,
+    leave_type: 'uninformed',
+    sub_type: 'Unpaid',
+    from_date: newLeave.date,
+    to_date: newLeave.date,
+    days: 1,
+    reason: 'Uninformed absence — auto-detected',
+    status: 'Pending',
+    requested_by: 'system',
+    post_id: newLeave.postId ?? null,
+    branch_id: newLeave.branchId ?? null,
+    leave_balance: 0,
+  });
+
+  if (error) console.error('[LeaveService] detectUninformedLeave insert error:', error.message);
+
+  invalidateUninformedCache();
+
+  // Check if this employee should be escalated to abscond
+  await checkForAbscond(attendanceEvent.employeeId);
+
+  return newLeave;
 };
 
-// Check for consecutive uninformed leaves and escalate if needed
-export const checkConsecutiveUninformedLeaves = (employeeId: string) => {
-  // Get uninformed leaves for this employee sorted by date
-  const employeeLeaves = uninformedLeaves
-    .filter(leave => 
-      leave.employeeId === employeeId && 
-      !leave.resolution // Only count unresolved leaves
-    )
-    .sort((a, b) => 
-      new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
-  
-  if (employeeLeaves.length < HR_CONFIG.LEAVE.UNINFORMED_THRESHOLD) {
-    return false;
+export const checkForAbscond = async (employeeId: string): Promise<boolean> => {
+  const leaves = await getUninformedLeavesFromDB();
+  const employeeLeaves = leaves
+    .filter(l => l.employeeId === employeeId && !l.resolution)
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  if (employeeLeaves.length < HR_CONFIG.LEAVE.ABSCOND_THRESHOLD) return false;
+
+  const latest = new Date(employeeLeaves[employeeLeaves.length - 1].date);
+  const hoursDiff = (Date.now() - latest.getTime()) / (1000 * 3600);
+
+  if (hoursDiff >= 24) {
+    await escalateAbscond(employeeId, employeeLeaves);
+    return true;
   }
-  
-  // Check if leaves are consecutive
-  let consecutiveCount = 1;
-  let previousDate = new Date(employeeLeaves[0].date);
-  
-  for (let i = 1; i < employeeLeaves.length; i++) {
-    const currentDate = new Date(employeeLeaves[i].date);
-    const timeDiff = currentDate.getTime() - previousDate.getTime();
-    const daysDiff = timeDiff / (1000 * 3600 * 24);
-    
-    if (daysDiff === 1) {
-      consecutiveCount++;
-      if (consecutiveCount >= HR_CONFIG.LEAVE.UNINFORMED_THRESHOLD) {
-        // Threshold met, escalate to abscond case
-        return escalateAbscond(employeeId, employeeLeaves);
-      }
-    } else {
-      consecutiveCount = 1;
-    }
-    
-    previousDate = currentDate;
-  }
-  
   return false;
 };
 
-// Escalate to abscond case
-export const escalateAbscond = (employeeId: string, leaves: UninformedLeave[]) => {
-  // Check if abscond case already exists for this employee
-  const existingCase = abscondCases.find(
-    c => c.employeeId === employeeId && c.status === "PENDING"
-  );
-  
-  if (existingCase) {
-    return existingCase;
-  }
-  
-  // Get employee name from leaves
-  const employeeName = leaves.length > 0 ? leaves[0].employeeName : "Unknown Employee";
-  
-  // Create new abscond case
-  const startDate = leaves.length > 0 ? leaves[0].date : new Date().toISOString().split('T')[0];
-  const lastContactDate = new Date(new Date(startDate).getTime() - 86400000).toISOString().split('T')[0];
-  
-  const newAbscondCase: AbscondCase = {
-    id: `ABS${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
+export const escalateAbscond = async (employeeId: string, leaves: UninformedLeave[]): Promise<AbscondCase | null> => {
+  const cases = await getAbscondCasesFromDB();
+  const existing = cases.find(c => c.employeeId === employeeId && c.status === 'PENDING');
+  if (existing) return existing;
+
+  const employeeName = leaves[0]?.employeeName ?? 'Unknown Employee';
+  const startDate = leaves[0]?.date ?? new Date().toISOString().split('T')[0];
+  const lastContact = new Date(new Date(startDate).getTime() - 86400000).toISOString().split('T')[0];
+  const id = `ABS${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+
+  const newCase: AbscondCase = {
+    id,
     employeeId,
     employeeName,
     startDate,
-    lastContact: lastContactDate,
-    status: "PENDING",
-    remarks: "Auto-escalated after 3 consecutive uninformed absences",
+    lastContact,
+    status: 'PENDING',
+    remarks: 'Auto-escalated: Employee absent 24+ hours without intimation. Show-cause notice required.',
     createdAt: new Date().toISOString(),
-    salaryCut: true
+    salaryCut: true,
   };
-  
-  abscondCases.push(newAbscondCase);
-  
-  // Emit event for abscond case created
-  emitEvent(EVENT_TYPES.ABSCOND_CASE_CREATED, newAbscondCase);
-  
-  return newAbscondCase;
+
+  const { error } = await supabaseClient.from('leave_requests').insert({
+    id,
+    employee_id: employeeId,
+    employee_name: employeeName,
+    leave_type: 'Abscond',
+    sub_type: 'Unpaid',
+    from_date: startDate,
+    to_date: startDate,
+    days: leaves.length,
+    reason: newCase.remarks,
+    status: 'Pending',
+    requested_by: 'system',
+    leave_balance: 0,
+    salary_cut: true,
+  });
+
+  if (error) console.error('[LeaveService] escalateAbscond insert error:', error.message);
+
+  invalidateAbscondCache();
+  emitEvent(EVENT_TYPES.ABSCOND_CASE_CREATED, newCase);
+  return newCase;
 };
 
-// Resolve uninformed leave
-export const resolveUninformedLeave = (leaveId: string, resolution: 'Regularized' | 'Converted' | 'Marked Abscond', resolvedBy: string) => {
-  // Find and update the leave
-  const leaveIndex = uninformedLeaves.findIndex(leave => leave.id === leaveId);
-  
-  if (leaveIndex === -1) {
-    return null;
-  }
-  
-  uninformedLeaves[leaveIndex] = {
-    ...uninformedLeaves[leaveIndex],
+export const resolveUninformedLeave = async (
+  leaveId: string,
+  resolution: 'Regularized' | 'Converted' | 'Marked Abscond',
+  resolvedBy: string
+): Promise<UninformedLeave | null> => {
+  const leaves = await getUninformedLeavesFromDB();
+  const leaf = leaves.find(l => l.id === leaveId);
+  if (!leaf) return null;
+
+  const { error } = await supabaseClient.from('leave_requests').update({
     resolution,
-    resolvedBy
-  };
-  
-  if (resolution === 'Converted') {
-    // Create leave application (in a real app)
-    // createLeaveApplication(...)
-  }
-  
+    approved_by: resolvedBy,
+    approved_on: new Date().toISOString(),
+    status: resolution === 'Regularized' ? 'Approved' : 'Rejected',
+  }).eq('id', leaveId);
+
+  if (error) console.error('[LeaveService] resolveUninformedLeave update error:', error.message);
+
   if (resolution === 'Marked Abscond') {
-    // Create abscond case
-    const leave = uninformedLeaves[leaveIndex];
-    escalateAbscond(leave.employeeId, [leave]);
+    await escalateAbscond(leaf.employeeId, [leaf]);
   }
-  
-  return uninformedLeaves[leaveIndex];
+
+  invalidateUninformedCache();
+  return { ...leaf, resolution, resolvedBy };
 };
 
-// Close abscond case
-export const closeAbscondCase = (caseId: string, remarks: string, closedBy: string) => {
-  const caseIndex = abscondCases.findIndex(c => c.id === caseId);
-  
-  if (caseIndex === -1) {
-    return null;
-  }
-  
-  abscondCases[caseIndex] = {
-    ...abscondCases[caseIndex],
-    status: "CLOSED",
-    closedAt: new Date().toISOString(),
-    closedBy,
-    remarks: abscondCases[caseIndex].remarks + `\n${new Date().toLocaleDateString()}: ${remarks}`
-  };
-  
-  return abscondCases[caseIndex];
+export const closeAbscondCase = async (caseId: string, remarks: string, closedBy: string): Promise<AbscondCase | null> => {
+  const cases = await getAbscondCasesFromDB();
+  const c = cases.find(x => x.id === caseId);
+  if (!c) return null;
+
+  const updatedRemarks = `${c.remarks}\n${new Date().toLocaleDateString()}: ${remarks}`;
+
+  const { error } = await supabaseClient.from('leave_requests').update({
+    status: 'Rejected',
+    approved_by: closedBy,
+    approved_on: new Date().toISOString(),
+    reason: updatedRemarks,
+  }).eq('id', caseId);
+
+  if (error) console.error('[LeaveService] closeAbscondCase update error:', error.message);
+
+  invalidateAbscondCache();
+  return { ...c, status: 'CLOSED', closedAt: new Date().toISOString(), closedBy, remarks: updatedRemarks };
 };
 
-// Get uninformed leaves
-export const getUninformedLeaves = () => uninformedLeaves;
+// ─── Read helpers ──────────────────────────────────────────────────────────────
 
-// Get abscond cases
-export const getAbscondCases = () => abscondCases;
+export const getUninformedLeaves = async (): Promise<UninformedLeave[]> =>
+  getUninformedLeavesFromDB();
+
+export const getAbscondCases = async (): Promise<AbscondCase[]> =>
+  getAbscondCasesFromDB();

@@ -1,3 +1,4 @@
+'use client';
 import * as React from "react"
 
 import type {
@@ -5,8 +6,8 @@ import type {
   ToastProps,
 } from "@/components/ui/toast"
 
-const TOAST_LIMIT = 5
-const TOAST_REMOVE_DELAY = 1000000
+const TOAST_LIMIT = 3
+const TOAST_REMOVE_DELAY = 300
 
 type ToasterToast = ToastProps & {
   id: string
@@ -175,6 +176,12 @@ function toast(props: Toast | string) {
       },
     } as ToasterToast,
   })
+
+  // Auto-dismiss after duration (default 1.5s)
+  const autoDismissDelay = (toastProps as any).duration || 1500;
+  setTimeout(() => {
+    dismiss();
+  }, autoDismissDelay);
 
   return {
     id: id,

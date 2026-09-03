@@ -1,0 +1,75 @@
+# Security controls CI (security-hardening, Requirements 4.8, 14.3).
+#
+# Two gates run on every pull request and push to the default branch:
+#   1. dependency-audit  — runs `npm audit` and fails on any new High/Critical
+#                          advisory that is not present in the base-branch
+#                          baseline (no waiver).
+#   2. secret-scan       — blocks any change that introduces a hardcoded secret
+#                          and reports the offending file.
+name: Security Controls
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    name: Dependency audit (no new High/Critical)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Capture base-branch advisory baseline
+        id: baseline
+        # On pull_request, compare against the base branch. On push, the
+        # baseline is empty so any High/Critical advisory fails the build.
+        run: |
+          set -e
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            git worktree add ../base-branch "origin/${{ github.base_ref }}"
+            (cd ../base-branch && npm ci --ignore-scripts >/dev/null 2>&1 || true)
+            node ../base-branch/scripts/ci/audit-baseline.mjs --emit-baseline > baseline.json \
+              || echo "[]" > baseline.json
+          else
+            echo "[]" > baseline.json
+          fi
+          echo "Baseline advisories: $(cat baseline.json)"
+
+      - name: Audit current branch against baseline
+        env:
+          BASELINE_FILE: baseline.json
+        run: node scripts/ci/audit-baseline.mjs
+
+  secret-scan:
+    name: Secret scan (no hardcoded secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Scan tracked files for hardcoded secrets
+        run: node scripts/ci/scan-secrets.mjs

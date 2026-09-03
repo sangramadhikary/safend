@@ -1,133 +1,102 @@
+'use client';
 
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
 import { NotificationPanel } from "./NotificationPanel";
 import { DigitalClock } from "./DigitalClock";
-import { ThemeToggle } from "../ThemeToggle";
-import { Bell, User, LogOut, Settings, HelpCircle } from "lucide-react";
-import { useToastWithSound } from "@/hooks/use-toast-with-sound";
+import { useBranch } from "@/contexts/BranchContext";
+import { Building2, ChevronDown } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 export function Topbar() {
-  const [userName, setUserName] = useState("User");
-  const [userRole, setUserRole] = useState("user");
-  const [userEmail, setUserEmail] = useState("");
-  const navigate = useNavigate();
-  const { toast } = useToastWithSound();
+  const { allBranches, currentBranch, setCurrentBranchById, isMainBranchUser } = useBranch();
 
-  useEffect(() => {
-    const syncFromStorage = () => {
-      const name = localStorage.getItem("userName") || "User";
-      const role = localStorage.getItem("userRole") || "user";
-      const email = localStorage.getItem("userEmail") || "";
-      setUserName(name);
-      setUserRole(role);
-      setUserEmail(email);
-    };
-    syncFromStorage();
-    window.addEventListener('storage', syncFromStorage);
-    return () => window.removeEventListener('storage', syncFromStorage);
-  }, []);
-
-  const handleLogout = async () => {
-    try {
-      const { cleanupAuthState } = await import("@/utils/authCleanup");
-      cleanupAuthState();
-      try { await (await import("@/integrations/supabase/client")).supabase.auth.signOut({ scope: 'global' }); } catch (_) {}
-    } finally {
-      // Clear local data regardless
-      localStorage.removeItem("isAuthenticated");
-      localStorage.removeItem("userRole");
-      localStorage.removeItem("userName");
-      localStorage.removeItem("userEmail");
-      toast.success({ title: "Logged Out", description: "You have been successfully logged out" });
-      window.location.href = "/";
-    }
-  };
-
-  const getUserInitials = (name: string) => {
-    return name
-      .split(" ")
-      .map(word => word.charAt(0))
-      .join("")
-      .toUpperCase()
-      .slice(0, 2);
-  };
-
-  const getRoleColor = (role: string) => {
-    const colors = {
-      admin: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
-      manager: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
-      sales: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
-      operations: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
-      accounts: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
-      hr: "bg-pink-100 text-pink-800 dark:bg-pink-900 dark:text-pink-200",
-      branch: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
-    };
-    return colors[role as keyof typeof colors] || "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200";
-  };
+  const activeBranches = allBranches.filter(b => b.status === 'active');
 
   return (
-    <header className="h-16 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-[#0B0F19] sticky top-0 z-40 flex items-center justify-between px-4 md:px-6">
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <img 
-            src="https://static.wixstatic.com/media/5b3fdf_0d52b265a0004375a797c038ad88f65e~mv2.png/v1/fill/w_278,h_172,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Logo_edited_edited.png" 
-            alt="Safend Logo" 
-            className="w-8 h-8 object-contain"
-          />
-          <span className="font-semibold text-lg hidden sm:inline">Safend</span>
-        </div>
+    <header className="h-14 sm:h-16 border-b border-white/30 dark:border-white/10 bg-white/80 dark:bg-[#0B0F19]/80 backdrop-blur-lg sticky top-0 z-40 flex items-center px-3 sm:px-4 md:px-6 gap-2 sm:gap-4">
+      {/* Left — Logo */}
+      <div className="flex items-center gap-2 shrink-0">
+        <img
+          src="https://static.wixstatic.com/media/5b3fdf_0d52b265a0004375a797c038ad88f65e~mv2.png/v1/fill/w_278,h_172,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Logo_edited_edited.png"
+          alt="Safend Logo"
+          className="w-7 h-7 sm:w-8 sm:h-8 object-contain"
+        />
+        <span className="font-semibold text-base sm:text-lg hidden sm:inline">Safend</span>
       </div>
 
-      <div className="flex items-center gap-2 md:gap-4">
-        <DigitalClock />
-        
-        <ThemeToggle />
-        
-        <NotificationPanel />
+      {/* Spacer */}
+      <div className="flex-1 min-w-0" />
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="relative h-8 w-8 rounded-full">
-              <Avatar className="h-8 w-8">
-                <AvatarFallback className="bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-200 text-xs font-medium">
-                  {getUserInitials(userName)}
-                </AvatarFallback>
-              </Avatar>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent className="w-56" align="end" forceMount>
-            <div className="flex flex-col space-y-1 p-2">
-              <p className="text-sm font-medium leading-none">{userName}</p>
-              <p className="text-xs leading-none text-muted-foreground">{userEmail}</p>
-              <Badge variant="secondary" className={`w-fit mt-1 text-xs ${getRoleColor(userRole)}`}>
-                {userRole.charAt(0).toUpperCase() + userRole.slice(1)}
-              </Badge>
-            </div>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => navigate('/profile')}>
-              <User className="mr-2 h-4 w-4" />
-              <span>Profile</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => navigate('/profile')}>
-              <Settings className="mr-2 h-4 w-4" />
-              <span>Settings</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem>
-              <HelpCircle className="mr-2 h-4 w-4" />
-              <span>Help</span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={handleLogout} className="text-red-600 dark:text-red-400">
-              <LogOut className="mr-2 h-4 w-4" />
-              <span>Log out</span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+      {/* Branch selector — compact on mobile */}
+      {currentBranch && (
+        isMainBranchUser ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className={cn(
+                "flex items-center gap-1.5 sm:gap-2 h-8 sm:h-9 pl-2.5 sm:pl-3 pr-2 sm:pr-2.5 rounded-lg text-xs sm:text-sm font-medium",
+                "bg-muted/60 hover:bg-muted border border-border/50",
+                "transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              )}>
+                <Building2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <span className="max-w-[80px] sm:max-w-[140px] truncate">{currentBranch.name}</span>
+                {currentBranch.type === 'main' && (
+                  <Badge className="text-[9px] px-1.5 py-0 h-4 bg-red-600 text-white hover:bg-red-600 rounded-full font-semibold hidden sm:inline-flex">
+                    HQ
+                  </Badge>
+                )}
+                <ChevronDown className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-muted-foreground shrink-0" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="center" className="w-52">
+              <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
+                Switch Branch
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {activeBranches.map((branch) => (
+                <DropdownMenuItem
+                  key={branch.id}
+                  onClick={() => setCurrentBranchById(branch.id)}
+                  className={cn(
+                    "flex items-center justify-between gap-2 cursor-pointer",
+                    currentBranch.id === branch.id && "bg-red-600 text-white font-medium focus:bg-red-600 focus:text-white"
+                  )}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Building2 className={cn("h-3.5 w-3.5 shrink-0", currentBranch.id === branch.id ? "text-white" : "text-muted-foreground")} />
+                    <span className="truncate">{branch.name}</span>
+                  </div>
+                  {branch.type === 'main' && (
+                    <Badge className={cn(
+                      "text-[9px] px-1.5 py-0 h-4 rounded-full font-semibold shrink-0",
+                      currentBranch.id === branch.id ? "bg-white text-red-600 hover:bg-white" : "bg-red-600 text-white hover:bg-red-600"
+                    )}>
+                      HQ
+                    </Badge>
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <div className="flex items-center gap-1.5 sm:gap-2 h-8 sm:h-9 pl-2.5 sm:pl-3 pr-2.5 sm:pr-3 rounded-lg text-xs sm:text-sm font-medium bg-muted/60 border border-border/50">
+            <Building2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <span className="max-w-[80px] sm:max-w-[140px] truncate">{currentBranch.name}</span>
+          </div>
+        )
+      )}
+
+      {/* Right — Controls */}
+      <div className="flex items-center gap-1 sm:gap-1.5 md:gap-2 shrink-0">
+        <NotificationPanel />
+        <DigitalClock />
       </div>
     </header>
   );

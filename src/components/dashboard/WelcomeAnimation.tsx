@@ -1,7 +1,8 @@
+'use client';
 
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { SoundBus } from "@/services/SoundService";
+import { getSoundBus } from "@/services/SoundService";
 import { useTheme } from "@/components/ThemeProvider";
 
 export function WelcomeAnimation() {
@@ -10,8 +11,10 @@ export function WelcomeAnimation() {
   const isDark = theme === "dark";
 
   useEffect(() => {
-    // Play welcome sound when component mounts
-    SoundBus.play('welcome');
+    // Play welcome sound when component mounts (only on client)
+    if (typeof window !== 'undefined') {
+      getSoundBus().play('welcome');
+    }
     
     // Hide animation after 3 seconds
     const timer = setTimeout(() => {
@@ -40,7 +43,7 @@ export function WelcomeAnimation() {
             transition={{ duration: 0.5, delay: 0.2 }}
           >
             <motion.div
-              className="w-24 h-24 bg-gradient-to-r from-red-600 to-black dark:to-white rounded-xl flex items-center justify-center shadow-lg mb-4"
+              className="w-24 h-24 bg-linear-to-r from-red-600 to-black dark:to-white rounded-xl flex items-center justify-center shadow-lg mb-4"
               animate={{ 
                 rotate: [0, 10, -10, 0],
                 scale: [1, 1.1, 1]
@@ -55,7 +58,7 @@ export function WelcomeAnimation() {
             </motion.div>
             
             <motion.h1
-              className="text-3xl font-bold bg-gradient-to-r from-red-600 to-gray-800 dark:to-white bg-clip-text text-transparent"
+              className="text-3xl font-bold bg-linear-to-r from-red-600 to-gray-800 dark:to-white bg-clip-text text-transparent"
               initial={{ y: 20, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               transition={{ delay: 0.5, duration: 0.5 }}

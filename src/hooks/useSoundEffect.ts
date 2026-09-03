@@ -1,5 +1,6 @@
+'use client';
 
-import { SoundBus, SoundEvent } from "@/services/SoundService";
+import { getSoundBus, SoundEvent } from "@/services/SoundService";
 import { useEffect, useCallback, useState } from "react";
 
 /**
@@ -11,6 +12,9 @@ export function useSoundEffect() {
   
   // Initialize sounds on first use
   useEffect(() => {
+    // Check if we're in browser
+    if (typeof window === 'undefined') return;
+    
     // Check if sound files are properly loaded
     const checkSounds = async () => {
       try {
@@ -29,12 +33,8 @@ export function useSoundEffect() {
         });
         
         setSoundsReady(Boolean(canPlay));
-        
-        if (!canPlay) {
-          console.warn("Sound system may not be working properly. Fallback will be used.");
-        }
-      } catch (error) {
-        console.warn("Error initializing sound system:", error);
+        // Fallback tones will be used automatically if files aren't available
+      } catch {
         setSoundsReady(false);
       }
     };
@@ -44,55 +44,90 @@ export function useSoundEffect() {
   
   // Method to play welcome sound
   const playWelcome = useCallback(() => {
-    SoundBus.play('welcome');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('welcome');
   }, []);
 
   // Method to play UI click sound
   const playClick = useCallback(() => {
-    SoundBus.play('click');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('click');
   }, []);
 
   // Method to play success sound
   const playSuccess = useCallback(() => {
-    SoundBus.play('success');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('success');
   }, []);
 
   // Method to play "add" sound
   const playAdd = useCallback(() => {
-    SoundBus.play('add');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('add');
   }, []);
 
   // Method to play delete sound
   const playDelete = useCallback(() => {
-    SoundBus.play('delete');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('delete');
   }, []);
 
   // Method to play error sound
   const playError = useCallback(() => {
-    SoundBus.play('error');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('error');
   }, []);
 
   // Method to play download complete sound
   const playDownload = useCallback(() => {
-    SoundBus.play('download');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('download');
   }, []);
 
   // Method to play notification sound
   const playNotification = useCallback(() => {
-    SoundBus.play('notification');
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('notification');
+  }, []);
+
+  // Method to play create sound (when something is created)
+  const playCreate = useCallback(() => {
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('create');
+  }, []);
+
+  // Method to play edit sound (when something is edited/updated)
+  const playEdit = useCallback(() => {
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('edit');
+  }, []);
+
+  // Method to play approve sound (when something is approved)
+  const playApprove = useCallback(() => {
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('approve');
+  }, []);
+
+  // Method to play reject sound (when something is rejected)
+  const playReject = useCallback(() => {
+    const soundBus = getSoundBus();
+    if (soundBus) soundBus.play('reject');
   }, []);
 
   // Generic method to play any sound with volume control
   const playSound = useCallback((sound: SoundEvent, volume?: number) => {
+    const soundBus = getSoundBus();
+    if (!soundBus) return;
+    
     if (volume !== undefined) {
       // Temporarily adjust volume for this sound
-      const currentVolume = SoundBus.getVolume();
-      SoundBus.setVolume(volume);
-      SoundBus.play(sound);
+      const currentVolume = soundBus.getVolume();
+      soundBus.setVolume(volume);
+      soundBus.play(sound);
       // Reset to previous volume
-      setTimeout(() => SoundBus.setVolume(currentVolume), 100);
+      setTimeout(() => soundBus.setVolume(currentVolume), 100);
     } else {
-      SoundBus.play(sound);
+      soundBus.play(sound);
     }
   }, []);
 
@@ -101,6 +136,10 @@ export function useSoundEffect() {
     playClick,
     playSuccess,
     playAdd,
+    playCreate,
+    playEdit,
+    playApprove,
+    playReject,
     playDelete,
     playError,
     playDownload,

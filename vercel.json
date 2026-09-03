@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/attendance/maintenance/expire",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/attendance/maintenance/retention",
+      "schedule": "0 4 * * *"
+    }
+  ]
+}

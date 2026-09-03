@@ -1,3 +1,4 @@
+'use client';
 
 // Define event types as constants
 export const EVENT_TYPES = {
@@ -154,8 +155,6 @@ export const emitEvent = (
   eventType: string,
   payload: EventPayload = {}
 ): void => {
-  console.log(`EVENT: ${eventType}`, payload);
-  
   // In a real implementation, you might:
   // 1. Send to analytics service
   // 2. Log in application monitoring
@@ -169,10 +168,7 @@ export const subscribeToEvent = (
   eventType: string,
   handler: (payload: EventPayload) => void
 ): () => void => {
-  console.log(`Subscribed to event: ${eventType}`);
-  
   // Return an unsubscribe function
   return () => {
-    console.log(`Unsubscribed from event: ${eventType}`);
   };
 };

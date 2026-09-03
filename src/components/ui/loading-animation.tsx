@@ -1,39 +1,35 @@
-
-import { motion } from "framer-motion";
-import { UnifiedLoader } from "./unified-loader";
+'use client';
+import { BrandLoader, FullscreenBrandLoader } from "./brand-loader";
 
 interface LoadingAnimationProps {
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xs" | "xl";
   color?: "primary" | "red" | "white";
   showPercentage?: boolean;
   percentageValue?: number;
   className?: string;
+  message?: string;
 }
 
+/**
+ * Loading Animation - Uses Brand Loader (SE logo with red spinning arc)
+ */
 export function LoadingAnimation({ 
   size = "md", 
-  color = "primary",
-  showPercentage = false,
-  percentageValue,
-  className
+  className,
+  message
 }: LoadingAnimationProps) {
   return (
-    <UnifiedLoader
+    <BrandLoader
       size={size}
-      variant="gauge"
-      progress={showPercentage ? percentageValue : undefined}
-      showProgress={showPercentage}
       className={className}
+      message={message}
     />
   );
 }
 
-export function FullPageLoading({ percentageValue }: { percentageValue?: number }) {
-  return (
-    <UnifiedLoader
-      variant="fullscreen"
-      progress={percentageValue}
-      message="Loading..."
-    />
-  );
+/**
+ * Full Page Loading - Fullscreen brand loader
+ */
+export function FullPageLoading({ message }: { message?: string }) {
+  return <FullscreenBrandLoader message={message || "Loading..."} />;
 }
