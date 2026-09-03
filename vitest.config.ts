@@ -9,7 +9,9 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      // Vitest 5 / Vite native config loader: prefer import.meta.dirname over
+      // the CJS __dirname, which is unsupported by configLoader: 'native'.
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
 });
