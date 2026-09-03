@@ -550,10 +550,15 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       const amount = parseFloat(payment.amountReceived) || 0;
       const tds = parseFloat(payment.tdsDeducted) || 0;
       
+      // Match openReceiveAmount: DB column is the source of truth, notes are a fallback.
       let previousDue = 0;
-      const prevDueMatch = (entry.notes || '').match(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/);
-      if (prevDueMatch) {
-        previousDue = parseFloat(prevDueMatch[1].replace(/,/g, ''));
+      if (entry.previous_balance && entry.previous_balance > 0) {
+        previousDue = entry.previous_balance;
+      } else {
+        const prevDueMatch = (entry.notes || '').match(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/);
+        if (prevDueMatch) {
+          previousDue = parseFloat(prevDueMatch[1].replace(/,/g, ''));
+        }
       }
       const totalPayable = entry.total_amount + previousDue;
       
@@ -831,9 +836,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         previousDue = parseFloat(prevDueMatch[1].replace(/,/g, ''));
       }
     }
-    const totalPayable = entry.total_amount + previousDue;
-    currentDue = Math.max(0, totalPayable - alreadyPaid);
-
     // Extract TDS rate from invoice notes (e.g. "TDS: 2%"), or from snapshot
     const tdsRateMatch = (entry.notes || '').match(/TDS:\s*([\d.]+)%/);
     let tdsRate = tdsRateMatch ? parseFloat(tdsRateMatch[1]) : 0;
@@ -844,7 +846,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     // TDS is deducted on the taxable value (pre-GST base amount), not the total
     const taxableBase = entry.amount && entry.amount > 0 ? entry.amount : entry.total_amount;
     const tdsAmount = tdsRate > 0 ? Math.round(taxableBase * tdsRate / 100 * 100) / 100 : 0;
-    const receivableAfterTds = Math.max(0, currentDue - tdsAmount);
+
+    // Net receivable (the actual cash to collect) = invoice total − TDS + previous
+    // outstanding − amounts already paid. This mirrors the invoice Payment Advice
+    // (buildPaymentAdvice) so "Total Due" here matches "Total Payable Now" there.
+    const totalPayable = Math.max(0, entry.total_amount - tdsAmount + previousDue);
+    currentDue = Math.max(0, totalPayable - alreadyPaid);
 
     setAmountDue(currentDue);
     setPaymentForm({
@@ -856,8 +863,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       bankAccountId: '',
       transactionNumber: '',
       transactionDateTime: new Date().toISOString().slice(0, 16),
-      paymentType: currentDue >= entry.total_amount ? 'full' : 'partial',
-      amountReceived: String(receivableAfterTds),
+      paymentType: currentDue >= Math.max(0, entry.total_amount - tdsAmount) ? 'full' : 'partial',
+      amountReceived: String(currentDue),
       tdsDeducted: tdsAmount > 0 ? String(tdsAmount) : '',
       balanceHandling: 'due_date',
       balanceDueDate: '',
@@ -1729,7 +1736,15 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         .order('created_at', { ascending: true });
       if (payments && payments.length > 0) {
         result.payments = payments as any;
-        result.taxConfig!.received = payments.reduce((sum: number, p: any) => sum + (p.amount || 0), 0);
+        // receivable_payments.amount is stored as (cash + TDS) — see the record
+        // mutation. The Payment Advice already shows TDS on its own line, so the
+        // "Payments received" line must be pure cash; otherwise TDS is subtracted
+        // twice. Strip the invoice-level TDS back out of the summed payments.
+        const paidWithTds = payments.reduce((sum: number, p: any) => sum + (p.amount || 0), 0);
+        const invoiceTds = (effectiveTdsRate ?? 0) > 0
+          ? Math.round(base * (effectiveTdsRate ?? 0) / 100 * 100) / 100
+          : 0;
+        result.taxConfig!.received = Math.max(0, paidWithTds - invoiceTds);
       }
     } catch {}
 
@@ -2542,10 +2557,13 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                               type="button"
                               onClick={() => {
                                 const tds = parseFloat(paymentForm.tdsDeducted) || 0;
+                                // amountDue is already net of TDS, so "Full Amount" is
+                                // exactly amountDue. "Invoice Only" is this invoice's own
+                                // net (total − TDS), excluding previous outstanding.
                                 setPaymentForm({ 
                                   ...paymentForm, 
                                   paymentType: opt.v, 
-                                  amountReceived: opt.v === 'full' ? String(Math.max(0, amountDue - tds)) 
+                                  amountReceived: opt.v === 'full' ? String(amountDue) 
                                                 : opt.v === 'invoice_only' ? String(Math.max(0, (selectedInvoiceEntry?.total_amount || 0) - tds))
                                                 : '' 
                                 });
@@ -2598,12 +2616,19 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                         onChange={(e) => {
                           const newTds = e.target.value;
                           const tds = parseFloat(newTds) || 0;
-                          setPaymentForm(prev => ({ 
-                            ...prev, 
-                            tdsDeducted: newTds,
-                            ...(prev.paymentType === 'full' ? { amountReceived: String(Math.max(0, amountDue - tds)) } : 
-                                prev.paymentType === 'invoice_only' ? { amountReceived: String(Math.max(0, (selectedInvoiceEntry?.total_amount || 0) - tds)) } : {})
-                          }));
+                          setPaymentForm(prev => {
+                            // amountDue was computed net of the TDS currently in the form.
+                            // Re-apply the delta so "Full Amount" stays net of the new TDS
+                            // without double-counting. "Invoice Only" is total − new TDS.
+                            const prevTds = parseFloat(prev.tdsDeducted) || 0;
+                            const fullNet = Math.max(0, amountDue + prevTds - tds);
+                            return {
+                              ...prev,
+                              tdsDeducted: newTds,
+                              ...(prev.paymentType === 'full' ? { amountReceived: String(fullNet) } :
+                                  prev.paymentType === 'invoice_only' ? { amountReceived: String(Math.max(0, (selectedInvoiceEntry?.total_amount || 0) - tds)) } : {})
+                            };
+                          });
                         }}
                         placeholder="0"
                       />
@@ -2616,7 +2641,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-amber-700 dark:text-amber-300">Balance Remaining</span>
                         <span className="text-lg font-bold text-amber-800 dark:text-amber-200">
-                          ₹{Math.max(0, amountDue - ((parseFloat(paymentForm.amountReceived) || 0) + (parseFloat(paymentForm.tdsDeducted) || 0))).toLocaleString('en-IN')}
+                          ₹{Math.max(0, amountDue - (parseFloat(paymentForm.amountReceived) || 0)).toLocaleString('en-IN')}
                         </span>
                       </div>
                       <div>

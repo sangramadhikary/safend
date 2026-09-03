@@ -395,7 +395,13 @@ export async function POST(req: NextRequest) {
     const companyInfo = withCurrentSupplierLetterhead(rawCompanyInfo);
 
     /* ── Shared calculation engine (identical to the screen view) ─────────── */
-    const totals = computeInvoiceTotals(items as InvoiceLineItem[], taxConfig);
+    // receivable_payments.amount is stored as (cash + TDS). The Payment Advice
+    // shows TDS on its own line, so "Payments received" must be pure cash or the
+    // TDS is subtracted twice. Compute the invoice TDS first, then strip it out
+    // of the summed payments before feeding `received` into the totals engine.
+    const tdsProbe = computeInvoiceTotals(items as InvoiceLineItem[], { ...taxConfig, received: 0 });
+    const cashReceived = Math.max(0, (Number(taxConfig.received) || 0) - (tdsProbe.tds || 0));
+    const totals = computeInvoiceTotals(items as InvoiceLineItem[], { ...taxConfig, received: cashReceived });
     const { lines, subTotal, sgst, cgst, tds, roundOff, invoiceTotal, received, previousBalance, currentBalance } = totals;
     const sgstRate = taxConfig.sgstRate ?? 9;
     const cgstRate = taxConfig.cgstRate ?? 9;
