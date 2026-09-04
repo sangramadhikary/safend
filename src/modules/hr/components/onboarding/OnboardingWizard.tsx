@@ -349,6 +349,20 @@ export function OnboardingWizard({ candidate, branchId, branchUuid, stepOverride
     if (!record) return;
     setSaving(true);
     try {
+      // Reserve the employee number now, at the first point it is actually
+      // printed. Previously it was minted only at finalize, so the signed
+      // agreement carried a blank Employee ID that never matched the number the
+      // employee ended up with in the directory. Persisting it here means the
+      // contract and the directory show the same value.
+      let reservedEmployeeId = record.employeeId;
+      if (!reservedEmployeeId) {
+        reservedEmployeeId = await generateEmployeeId();
+        if (record.id) {
+          const r = await updateOnboardingCandidate(record.id, { employeeId: reservedEmployeeId });
+          if (r.success && r.data) setRecord(r.data);
+        }
+      }
+
       const response = await fetch('/api/employee-agreement-pdf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -366,7 +380,7 @@ export function OnboardingWizard({ candidate, branchId, branchUuid, stepOverride
           aadharNumber: record.aadharNumber || '',
           panNumber: record.panNumber || '',
           address: '',
-          employeeId: record.employeeId || '',
+          employeeId: reservedEmployeeId || '',
           employmentType: 'Permanent (Full-Time)',
         }),
       });
@@ -460,7 +474,21 @@ export function OnboardingWizard({ candidate, branchId, branchUuid, stepOverride
         stage: 'onboarded', employeeId: savedEmployeeId, onboardedEmployeeUuid: result.id,
         onboardedAt: new Date().toISOString(), reviewedBy: 'HR', notes: reviewNotes,
       });
-      toast({ title: "🎉 Employee Onboarded!", description: `${record.name} is now in the directory as ${savedEmployeeId}.` });
+
+      // The number was reserved at the agreement step and printed on the signed
+      // contract. If a concurrent onboarding claimed it in the meantime,
+      // addHREmployee re-mints a different one — in that case the contract no
+      // longer matches the directory, so flag it loudly instead of silently
+      // onboarding under a number the signed paper does not show.
+      if (empId && savedEmployeeId !== empId) {
+        toast({
+          title: "⚠️ Employee ID changed",
+          description: `The signed agreement shows ${empId}, but that number was already taken so ${record.name} was saved as ${savedEmployeeId}. Regenerate and re-sign the agreement with the correct ID.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "🎉 Employee Onboarded!", description: `${record.name} is now in the directory as ${savedEmployeeId}.` });
+      }
       onClose(true);
     } catch (err: any) { toast({ title: "Error", description: err.message, variant: "destructive" }); }
     finally { setSaving(false); }
@@ -1003,7 +1031,7 @@ export function OnboardingWizard({ candidate, branchId, branchUuid, stepOverride
                         <p className="text-sm text-muted-foreground truncate">{record.designation || 'Designation not assigned'}</p>
                         <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                           <span>{record.department || 'Department not assigned'}</span>
-                          {record.employeeId && <span>Provisional ID: {record.employeeId}</span>}
+                          {record.employeeId && <span>Employee ID: {record.employeeId}</span>}
                           {record.branchId && <span>Branch: {record.branchId}</span>}
                         </div>
                       </div>

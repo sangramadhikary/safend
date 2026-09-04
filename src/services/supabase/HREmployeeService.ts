@@ -121,7 +121,15 @@ const mapRowToEmployee = (row: any): HREmployee => ({
 const mapEmployeeToRow = (employee: Partial<HREmployee> & Record<string, any>): any => {
   const row: any = {};
   
-  if (employee.employeeId !== undefined) row.employee_id = employee.employeeId;
+  // Normalize to trimmed uppercase. generateEmployeeId checks uniqueness
+  // case-insensitively (it uppercases every existing ID), so storing the raw
+  // string would let "emp0007" and "EMP0007" both persist while the generator
+  // treats them as one — the DB and the generator must agree on identity.
+  if (employee.employeeId !== undefined) {
+    row.employee_id = typeof employee.employeeId === 'string'
+      ? employee.employeeId.trim().toUpperCase()
+      : employee.employeeId;
+  }
   if (employee.name !== undefined) row.name = employee.name;
   if (employee.email !== undefined) row.email = employee.email;
   if (employee.phone !== undefined) row.phone = employee.phone;
@@ -180,26 +188,57 @@ export const parseEmployeeIdSequence = (employeeId: unknown): number | null => {
 /**
  * Mint the next free employee ID.
  *
- * Derived from the HIGHEST existing ID, not from `COUNT(*)`. Counting rows is
- * only correct while the sequence has no gaps: delete one employee and the count
- * falls permanently behind the maximum, so the "next" ID is one that already
- * exists and every insert fails on `employees_employee_id_key`. That is not a
- * race — with N deleted rows it is reproducible on the first attempt.
+ * Prefers the atomic, server-side allocator `next_employee_number()`, which
+ * increments a counter row under a Postgres row lock — so two concurrent
+ * onboardings (or a directory add racing an onboarding finalize) can never be
+ * handed the same number. This is the durable fix for the "number on the signed
+ * agreement differs from the directory" mismatch: with atomic allocation the
+ * reserved number no longer gets re-minted out from under the contract.
  *
- * Reads only the id column, computes the maximum numerically (string ordering
- * would break once the sequence passes EMP9999), then skips forward over any
- * value already taken.
+ * See supabase/migrations/20260904100000_employee_number_atomic_allocation.sql.
+ *
+ * Falls back to the legacy client-side max+1 only if the RPC is unavailable
+ * (e.g. the migration has not been applied yet). The fallback is still racy;
+ * `addHREmployee`'s duplicate-retry loop remains the safety net for it.
  */
 export const generateEmployeeId = async (): Promise<string> => {
+  const { data, error } = await supabaseClient.rpc('next_employee_number');
+
+  if (!error && typeof data === 'string' && parseEmployeeIdSequence(data) !== null) {
+    return data;
+  }
+
+  // RPC missing or returned something unexpected — fall back to the client-side
+  // allocator. A genuine "function does not exist" (42883/PGRST202) is expected
+  // pre-migration; log anything else so a real failure is visible.
+  if (error && error.code !== '42883' && error.code !== 'PGRST202') {
+    console.warn('[HREmployeeService] next_employee_number RPC failed, falling back to client allocation:', describeDbError(error));
+  }
+
+  return generateEmployeeIdFallback();
+};
+
+/**
+ * Legacy client-side allocator: derive the next ID from the HIGHEST existing ID
+ * (not `COUNT(*)`, which falls permanently behind the maximum once a row is
+ * deleted). Reads only the id column, computes the maximum numerically (string
+ * ordering breaks past EMP9999), then skips forward over any value already
+ * taken. Racy by nature — retained only as a fallback for `generateEmployeeId`.
+ */
+const generateEmployeeIdFallback = async (): Promise<string> => {
   const { data, error } = await supabaseClient
     .from('employees')
     .select('employee_id');
 
   if (error) {
-    // Without the existing set we cannot guarantee uniqueness. A timestamp
-    // suffix is collision-resistant, unlike the previous 4-digit slice.
+    // Without the existing set we cannot compute the next sequential ID. The old
+    // fallback minted `EMP<base36-timestamp>` (e.g. EMPLZ4K9), which does NOT
+    // match ^EMP\d+$ — so parseEmployeeIdSequence returns null for it forever,
+    // every later generation ignores it when computing the max, and the padded
+    // sequence permanently diverges from these timestamp IDs. Fail loudly instead
+    // of poisoning the sequence; the caller already surfaces this as an error.
     console.error('[HREmployeeService] Could not read employee IDs to generate the next one:', describeDbError(error));
-    return `${EMPLOYEE_ID_PREFIX}${Date.now().toString(36).toUpperCase()}`;
+    throw new Error('Could not generate an employee ID: failed to read existing IDs. Please try again.');
   }
 
   const taken = new Set<string>();
