@@ -75,12 +75,22 @@ function parseBalanceFromNotes(notes: string | null): number | null {
 function collectRolledForwardRefs(rows: any[]): Set<string> {
   const refs = new Set<string>();
   for (const r of rows) {
+    // (a) Structured breakdown (newer invoices).
     const breakdown = r.previous_balance_breakdown;
     if (Array.isArray(breakdown)) {
       for (const entry of breakdown) {
         const ref = entry?.referenceNumber ?? entry?.reference_number;
         if (ref) refs.add(String(ref));
       }
+    }
+    // (b) Legacy free-text roll-forward: notes contain
+    //     "Outstanding: <ref> (₹amount), <ref> (₹amount)". Historical invoices
+    //     recorded the carried-forward invoices here rather than as JSONB, so
+    //     we must parse them too or those older invoices get double-counted.
+    const outstandingNote = (r.notes || '').match(/Outstanding:\s*([^|]+)/);
+    if (outstandingNote) {
+      const refMatches = outstandingNote[1].match(/\d{5,}/g);
+      if (refMatches) for (const ref of refMatches) refs.add(ref);
     }
   }
   return refs;

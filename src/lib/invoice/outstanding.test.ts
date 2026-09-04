@@ -48,6 +48,26 @@ describe('fetchClientOutstandingInvoices', () => {
     expect(sumOutstanding(result)).toBe(87000);
   });
 
+  it('drops an older invoice referenced via a legacy "Outstanding:" note (no double count)', async () => {
+    const { client } = mockClient([
+      // Older invoice 26270001, still unpaid on its own row.
+      { reference_number: '26270001', total_amount: 37760, previous_balance: 0, due_date: '2026-10-03', status: 'pending', notes: null },
+      // Newer invoice cites it only in free-text notes (no JSONB breakdown).
+      {
+        reference_number: '26270015', total_amount: 20060, previous_balance: 6766,
+        previous_balance_breakdown: null,
+        due_date: '2026-09-10', status: 'pending',
+        notes: 'GST: 18% | Previous Due: ₹6,766 | Outstanding: 26270001 (₹37,760)',
+      },
+    ]);
+
+    const result = await fetchClientOutstandingInvoices(client, 'SPD CONSTRUCTIONS LIMITED');
+
+    // 26270001 excluded (already carried forward in notes); only the newer row remains.
+    expect(result.map((r) => r.ref)).toEqual(['26270015']);
+    expect(sumOutstanding(result)).toBe(26826); // 20060 + 6766
+  });
+
   it('drops an older invoice already rolled into a newer one (no double count)', async () => {
     const { client } = mockClient([
       // Older invoice A, still unpaid on its own row.
