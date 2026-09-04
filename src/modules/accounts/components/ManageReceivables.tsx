@@ -2038,7 +2038,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         </div>
       </div>
 
-      {/* Table */}
+      {/* Table — only the rows scroll; the column header stays pinned. Everything
+          above (title, summary cards, filters, search) scrolls with the page. */}
       <Card>
         <CardContent className="p-0">
           {isLoading ? (
@@ -2054,8 +2055,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               )}
             </div>
           ) : (
-            <Table>
-              <TableHeader>
+            <Table containerClassName="max-h-[calc(100vh-360px)]">
+              <TableHeader className="sticky top-0 z-20 bg-background [&_tr]:border-b [&_th]:bg-background">
                 <TableRow>
                   <TableHead className="w-10">
                     <Checkbox checked={allOnPageSelected} onCheckedChange={toggleSelectAll} aria-label="Select all" />
