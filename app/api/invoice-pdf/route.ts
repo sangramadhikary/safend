@@ -256,6 +256,23 @@ async function loadInvoicePayload(receivableId: string, actor: Actor): Promise<P
     return { status: 403, error: 'You are not permitted to view this invoice.' };
   }
 
+  // Lifecycle: downloading the PDF marks an invoice as "Issued". Only promote
+  // invoices that are still in their initial state (created / legacy pending)
+  // and have not already been issued, paid or cancelled. Best-effort: a failure
+  // here must never block the PDF from being generated.
+  const issuableStatuses = ['created', 'pending'];
+  if (row.category === 'Invoices' && !row.issued_at && issuableStatuses.includes(String(row.status ?? ''))) {
+    const issuedAt = new Date().toISOString();
+    const { error: issueErr } = await admin
+      .from('receivables')
+      .update({ status: 'issued', issued_at: issuedAt })
+      .eq('id', receivableId);
+    if (!issueErr) {
+      row.status = 'issued';
+      row.issued_at = issuedAt;
+    }
+  }
+
   const { data: paymentRows } = await admin
     .from('receivable_payments')
     .select('*')

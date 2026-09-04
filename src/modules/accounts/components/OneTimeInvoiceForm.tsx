@@ -517,7 +517,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         .from('receivables')
         .select('reference_number, total_amount, due_date, status, notes')
         .eq('category', 'Invoices')
-        .in('status', ['pending', 'overdue'])
+        // All unpaid lifecycle states carry an outstanding balance forward.
+        .in('status', ['created', 'issued', 'open', 'pending', 'overdue'])
         .or(`work_order_id.eq.${woId},and(work_order_id.is.null,client_name.eq.${wo.clientName})`)
         .order('due_date', { ascending: true });
 
@@ -528,16 +529,28 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           const effectiveAmount = balanceMatch
             ? parseFloat(balanceMatch[1].replace(/,/g, ''))
             : r.total_amount;
+          // Derive a display status: past the due date reads as "overdue",
+          // otherwise "open" (stored lifecycle values like created/issued are
+          // internal and not meaningful in this outstanding-balance panel).
+          const isPastDue = r.due_date && new Date(r.due_date) < new Date();
           return {
             ref: r.reference_number || '—',
             amount: effectiveAmount,
             due_date: r.due_date,
-            status: r.status,
+            status: isPastDue ? 'overdue' : 'open',
           };
         }).filter(r => r.amount > 0);
 
         if (unpaid.length > 0) {
           setOutstandingInvoices(unpaid);
+          // Auto-carry the outstanding balance into the new invoice so an
+          // overdue client's dues are added by default. The user can still
+          // override the amount in the Previous Due field. We only auto-fill
+          // when raising a fresh invoice (not editing) and the field is empty.
+          if (!editEntry) {
+            const outstandingTotal = Math.round(unpaid.reduce((s, r) => s + r.amount, 0));
+            if (outstandingTotal > 0) setPreviousDue(String(outstandingTotal));
+          }
         }
       }
     } catch { /* non-critical — user can enter manually */ }
@@ -610,7 +623,9 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         setInvoiceNumber(finalInvoiceNumber);
       }
 
-      const status = paymentStatus === 'paid' ? 'received' : 'pending';
+      // Lifecycle starts at 'created' (downloading the PDF promotes to 'issued').
+      // A paid-on-creation invoice is terminal 'received'.
+      const status = paymentStatus === 'paid' ? 'received' : 'created';
 
       const lineItems = lines.filter(l => l.serviceType).map(l => {
         const baseService = l.serviceType === 'Other' ? l.customService : l.serviceType;
@@ -663,6 +678,16 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         service_period_end: resolvedPeriodEnd,
         work_order_id: selectedWorkOrderId || null,
         previous_balance: prevDue > 0 ? prevDue : null,
+        // Structured breakdown so the PDF/payment advice can itemise the
+        // carried-forward dues (each prior unpaid invoice), not just a lump sum.
+        previous_balance_breakdown:
+          prevDue > 0 && outstandingInvoices.length > 0
+            ? outstandingInvoices.map(i => ({
+                referenceNumber: i.ref,
+                date: i.due_date || null,
+                amount: i.amount,
+              }))
+            : null,
         notes: [
           `GST: ${gstPercent}%`,
           tdsEnabled ? `TDS: ${tdsRate}%` : '',

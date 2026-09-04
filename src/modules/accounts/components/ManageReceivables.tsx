@@ -20,7 +20,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, Search, IndianRupee, Loader2, Info, Eye, Download, Pencil, MoreVertical, Printer, XCircle, Mail, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, FileDown, ChevronLeft, ChevronRight, Copy, Trash2, ShieldAlert, Upload, Undo2 } from 'lucide-react';
+import { Plus, Search, IndianRupee, Loader2, Info, Eye, Download, Pencil, MoreVertical, Printer, XCircle, Mail, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, FileDown, ChevronLeft, ChevronRight, Copy, Trash2, ShieldAlert, Upload, Undo2, FileText, Send, Clock } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { applyBranchScope, getBranchScopeFilter } from '@/utils/branchScope';
@@ -53,10 +53,16 @@ interface ReceivableEntry {
   gst_amount: number | null;
   total_amount: number;
   due_date: string | null;
-  status: 'pending' | 'received' | 'overdue' | 'cancelled';
+  // Lifecycle: 'created' (just made) -> 'issued' (PDF downloaded) -> 'open'
+  // (derived, one day on) -> 'overdue' (derived, past due date). 'received' and
+  // 'cancelled' are terminal. 'pending' is kept for legacy rows and treated as
+  // an unpaid/open state. 'open' and 'overdue' are runtime-derived only.
+  status: 'created' | 'issued' | 'open' | 'pending' | 'received' | 'overdue' | 'cancelled';
   reference_number: string | null;
   notes: string | null;
   created_at: string;
+  /** Timestamp the invoice PDF was first downloaded (marks it "Issued"). */
+  issued_at?: string | null;
   line_items?: InvoiceLineItem[] | null;
   adjustment_type?: 'credit' | 'debit' | null;
   gst_treatment?: 'forward' | 'rcm' | 'exempt' | null;
@@ -147,13 +153,13 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   const [deleteReason, setDeleteReason] = useState('');
 
   // New: Status filter, sorting, pagination, bulk selection
-  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'overdue' | 'received' | 'cancelled'>('all');
-  const [periodFilter, setPeriodFilter] = useState<'all' | 'this_month' | 'this_quarter' | 'this_year' | 'this_fy'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'created' | 'issued' | 'open' | 'overdue' | 'received' | 'cancelled'>('all');
+  const [periodFilter, setPeriodFilter] = useState<'all' | 'this_month' | 'last_month' | 'this_quarter' | 'this_year' | 'this_fy'>('all');
   const [sortField, setSortField] = useState<'due_date' | 'total_amount' | 'status' | 'created_at'>('created_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const PAGE_SIZE = 15;
+  const PAGE_SIZE = 100;
   const [paymentForm, setPaymentForm] = useState({
     mode: 'Bank Transfer',          // Cash | Cheque | Bank Transfer
     receivedBy: '',                 // for Cash/Cheque
@@ -249,7 +255,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     mutationFn: async (entry: Omit<ReceivableEntry, 'id' | 'created_at' | 'status'>) => {
       const { data, error } = await supabaseClient
         .from('receivables')
-        .insert({ ...entry, status: 'pending' })
+        .insert({ ...entry, status: 'created' })
         .select()
         .single();
       if (error) throw new Error(error.message);
@@ -382,16 +388,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           
         const totalPaidNow = remainingPayments?.reduce((sum, p) => sum + (p.amount || 0), 0) || 0;
         
-        let newStatus = 'pending';
-        if (totalPaidNow > 0) {
-           newStatus = 'pending'; // Still partially pending
-        } else {
-           if (entry.due_date && new Date(entry.due_date) < new Date()) {
-             newStatus = 'overdue';
-           } else {
-             newStatus = 'pending';
-           }
-        }
+        // Revert to an unpaid stored state; Open/Overdue are derived at display
+        // time from the due date and age, so we just restore 'issued'.
+        const newStatus = 'issued';
         
         // Update notes: strip the payment metadata portion but preserve original invoice metadata
         let updatedNotes = entry.notes || '';
@@ -417,8 +416,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         // Preserve original invoice metadata notes, only strip payment sections
         let restoredNotes = (entry.notes || '').replace(/\s*\|\|\s*PAYMENT:.*$/s, '').trim();
         if (/^Mode:/.test(restoredNotes)) restoredNotes = '';
-        let newStatus = 'pending';
-        if (entry.due_date && new Date(entry.due_date) < new Date()) newStatus = 'overdue';
+        // Open/Overdue are derived at display time; restore an unpaid stored state.
+        const newStatus = 'issued';
         const { error } = await supabaseClient
           .from('receivables')
           .update({ status: newStatus, notes: restoredNotes })
@@ -1358,16 +1357,39 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
 
   const showAddButton = !NO_ADD_CATEGORIES.includes(filter);
 
-  // Determine effective status (mark overdue if past due date and still pending)
+  // Statuses that represent an unpaid invoice still moving through its lifecycle.
+  // 'pending' is a legacy value kept for older rows; it behaves like 'created'.
+  const UNPAID_STATUSES = ['created', 'issued', 'open', 'pending'] as const;
+
+  // Determine effective status for display. Terminal states ('received',
+  // 'cancelled') pass through unchanged. For unpaid invoices we derive the
+  // lifecycle stage: Created -> Issued (PDF downloaded) -> Open (a day later)
+  // -> Overdue (past the due date).
   const getEffectiveStatus = (entry: ReceivableEntry): ReceivableEntry['status'] => {
-    if (entry.status === 'pending' && entry.due_date) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+    if (entry.status === 'received' || entry.status === 'cancelled') return entry.status;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Past the due date and still unpaid -> Overdue.
+    if (entry.due_date) {
       const due = new Date(entry.due_date);
       due.setHours(0, 0, 0, 0);
       if (due < today) return 'overdue';
     }
-    return entry.status;
+
+    // Age the invoice one day past its issue/creation point -> Open.
+    const startRef = entry.issued_at || entry.created_at;
+    if (startRef) {
+      const start = new Date(startRef);
+      start.setHours(0, 0, 0, 0);
+      const ageDays = Math.floor((today.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+      if (ageDays >= 1) return 'open';
+    }
+
+    // Within the first day: Issued if the PDF was downloaded, otherwise Created.
+    if (entry.status === 'issued' || entry.issued_at) return 'issued';
+    return 'created';
   };
 
   // Check if due today
@@ -1398,6 +1420,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     if (periodFilter === 'this_month') {
       periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
       periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    } else if (periodFilter === 'last_month') {
+      periodStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      periodEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
     } else if (periodFilter === 'this_quarter') {
       const qMonth = Math.floor(now.getMonth() / 3) * 3;
       periodStart = new Date(now.getFullYear(), qMonth, 1);
@@ -1421,11 +1446,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           (r.reference_number || '').toLowerCase().includes(s);
         if (!matches) return false;
       }
-      // Status filter
+      // Status filter — compares against the derived lifecycle status.
       if (statusFilter !== 'all') {
-        const effective = getEffectiveStatus(r);
-        if (statusFilter === 'overdue') { if (effective !== 'overdue') return false; }
-        else if (statusFilter !== effective) return false;
+        if (getEffectiveStatus(r) !== statusFilter) return false;
       }
       // Period filter
       if (periodStart && periodEnd) {
@@ -1457,7 +1480,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     });
 
     return result;
-  }, [receivables, searchTerm, statusFilter, sortField, sortDir]);
+  }, [receivables, searchTerm, statusFilter, periodFilter, sortField, sortDir]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredReceivables.length / PAGE_SIZE));
@@ -1818,6 +1841,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       URL.revokeObjectURL(url);
 
       toast({ title: 'PDF Downloaded', description: `Invoice_${entry.reference_number || entry.id.slice(0, 8)}.pdf` });
+      // Downloading marks the invoice "Issued" server-side; refresh so the
+      // status badge reflects the new lifecycle stage.
+      queryClient.invalidateQueries({ queryKey: ['receivables'] });
     } catch (err: any) {
       toast({ title: 'Error', description: err.message || 'Failed to generate PDF', variant: 'destructive' });
     }
@@ -1829,27 +1855,53 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     const dueToday = isDueToday(entry);
 
     // Detect partial payment from notes (contains "Mode:" when payment was recorded)
-    const hasPartialPayment = effective === 'pending' && entry.notes && /Mode:/.test(entry.notes) && /Balance:/.test(entry.notes);
+    const isUnpaid = (UNPAID_STATUSES as readonly string[]).includes(effective);
+    const hasPartialPayment = isUnpaid && entry.notes && /Mode:/.test(entry.notes) && /Balance:/.test(entry.notes);
+
+    // Shared badge styling: pill-shaped, no text wrap, consistent padding and
+    // icon spacing so every status reads clean and roomy (no cramped two-line wrap).
+    const base = 'inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium border';
+
+    // Partial payment overrides the lifecycle label for any unpaid invoice.
+    if (hasPartialPayment) {
+      return <Badge className={`${base} bg-blue-500 hover:bg-blue-500 text-white border-transparent`}>Partial</Badge>;
+    }
 
     switch (effective) {
-      case 'received': return <Badge className="bg-green-500 text-white"><CheckCircle2 className="h-3 w-3 mr-1" />Received</Badge>;
-      case 'overdue': return (
-        <Badge className="bg-red-600 text-white border border-red-700">
-          <AlertTriangle className="h-3 w-3 mr-1" />Overdue{daysOver > 0 ? ` (${daysOver}d)` : ''}
+      case 'received': return (
+        <Badge className={`${base} bg-green-500 hover:bg-green-500 text-white border-transparent`}>
+          <CheckCircle2 className="h-3 w-3 shrink-0" />Received
         </Badge>
       );
-      case 'pending':
-        if (hasPartialPayment) {
-          return <Badge className="bg-blue-500 text-white">Partial</Badge>;
-        }
+      case 'overdue': return (
+        <Badge className={`${base} bg-red-600 hover:bg-red-600 text-white border-red-700`}>
+          <AlertTriangle className="h-3 w-3 shrink-0" />Overdue{daysOver > 0 ? ` · ${daysOver}d` : ''}
+        </Badge>
+      );
+      case 'open':
         return (
-          <Badge className={`text-white ${dueToday ? 'bg-orange-500 border border-orange-600' : 'bg-amber-500'}`}>
-            {dueToday && <AlertTriangle className="h-3 w-3 mr-1" />}
-            {dueToday ? 'Due Today' : 'Pending'}
+          <Badge className={`${base} text-white ${dueToday ? 'bg-orange-500 hover:bg-orange-500 border-orange-600' : 'bg-amber-500 hover:bg-amber-500 border-transparent'}`}>
+            {dueToday ? <AlertTriangle className="h-3 w-3 shrink-0" /> : <Clock className="h-3 w-3 shrink-0" />}
+            {dueToday ? 'Due Today' : 'Open'}
           </Badge>
         );
-      case 'cancelled': return <Badge className="bg-gray-500 text-white"><XCircle className="h-3 w-3 mr-1" />Cancelled</Badge>;
-      default: return <Badge variant="secondary">{effective}</Badge>;
+      case 'issued': return (
+        <Badge className={`${base} bg-sky-500 hover:bg-sky-500 text-white border-transparent`}>
+          <Send className="h-3 w-3 shrink-0" />Issued
+        </Badge>
+      );
+      case 'created':
+      case 'pending': return (
+        <Badge className={`${base} bg-slate-500 hover:bg-slate-500 text-white border-transparent`}>
+          <FileText className="h-3 w-3 shrink-0" />Created
+        </Badge>
+      );
+      case 'cancelled': return (
+        <Badge className={`${base} bg-gray-500 hover:bg-gray-500 text-white border-transparent`}>
+          <XCircle className="h-3 w-3 shrink-0" />Cancelled
+        </Badge>
+      );
+      default: return <Badge variant="secondary" className={base}>{effective}</Badge>;
     }
   };
 
@@ -1895,9 +1947,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       {filter !== 'Payroll Receivables' && (<>
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('pending')}>
+        <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('all')}>
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total Pending</p>
+            <p className="text-xs text-muted-foreground">Total Outstanding</p>
             <p className="text-xl font-bold text-amber-600">₹{totalPending.toLocaleString('en-IN')}</p>
             {totalOverdue > 0 && <p className="text-xs text-red-600 mt-1">₹{totalOverdue.toLocaleString('en-IN')} overdue</p>}
           </CardContent>
@@ -1931,6 +1983,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           {([
             { key: 'all', label: 'All Invoices' },
             { key: 'this_month', label: 'This Month' },
+            { key: 'last_month', label: 'Last Month' },
             { key: 'this_quarter', label: 'This Quarter' },
             { key: 'this_year', label: 'This Year' },
             { key: 'this_fy', label: 'This Financial Year' },
@@ -1954,7 +2007,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <Input placeholder="Search by name, invoice no..." className="pl-8" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           </div>
           <div className="flex items-center gap-1.5">
-            {(['all', 'pending', 'overdue', 'received', 'cancelled'] as const).map((s) => (
+            {(['all', 'created', 'issued', 'open', 'overdue', 'received', 'cancelled'] as const).map((s) => (
               <Button
                 key={s}
                 size="sm"
@@ -2010,7 +2063,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                   <TableHead>Invoice No.</TableHead>
                   <TableHead>Invoice Date</TableHead>
                   <TableHead className="min-w-[120px]">Client Name</TableHead>
-                  <TableHead>Services</TableHead>
+                  <TableHead>Post Name</TableHead>
                   {filter === 'All Receivables' && <TableHead>Category</TableHead>}
                   <TableHead className="text-right cursor-pointer select-none whitespace-nowrap" onClick={() => handleSort('total_amount')}>
                     <span className="inline-flex items-center">Invoice Amount{getSortIcon('total_amount')}</span>
@@ -2019,7 +2072,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                   <TableHead className="text-right cursor-pointer select-none whitespace-nowrap" onClick={() => handleSort('due_date')}>
                     <span className="inline-flex items-center">Due Date{getSortIcon('due_date')}</span>
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none whitespace-nowrap" onClick={() => handleSort('status')}>
+                  <TableHead className="cursor-pointer select-none whitespace-nowrap min-w-[120px]" onClick={() => handleSort('status')}>
                     <span className="inline-flex items-center">Status{getSortIcon('status')}</span>
                   </TableHead>
                   <TableHead className="text-right w-[100px]">Actions</TableHead>
@@ -2028,34 +2081,30 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               <TableBody>
                 {paginatedReceivables.map((entry) => {
                   const effective = getEffectiveStatus(entry);
-                  // Extract service type from description (format: "ServiceType | Inv#: XXX")
-                  const descParts = entry.description.split(' | ');
                   const invoiceNum = getInvoiceLabel(entry);
-                  // Derive service names from line_items for a richer, accurate label.
-                  // Strip accumulated shift-type duplicates (e.g. "(8-Hour) (8-Hour)") from stored labels.
-                  const cleanShift = (s: string) =>
-                    s.replace(/(\s*\(12-Hour\))+/g, ' (12-Hour)')
-                     .replace(/(\s*\(8-Hour\))+/g, ' (8-Hour)')
-                     .trim();
-                  const serviceName = (() => {
+                  // Derive the post name (deployment post) for the row.
+                  // Prefer explicit `post` values on line items; fall back to the
+                  // description with the "| Inv#: XXX" suffix stripped. Ignore the
+                  // auto-generated "N services" label since it is not a post name.
+                  const postName = (() => {
                     if (entry.line_items && entry.line_items.length > 0) {
-                      const names = entry.line_items
-                        .map((li: any) => {
-                          const svc = cleanShift(li.service || '');
-                          // Shorten: strip " (8-Hour)" / " (12-Hour)" for the compact list label
-                          return svc.replace(/\s*\((?:8|12)-Hour\)/g, '').trim();
-                        })
-                        .filter(Boolean);
-                      if (names.length === 1) return names[0];
-                      if (names.length > 1) {
-                        // Show first two unique service types; append count if more
-                        const unique = [...new Set(names.map(n => n.split(' \u2014 ')[0].trim()))];
-                        return unique.length <= 2
-                          ? unique.join(', ')
-                          : `${unique[0]}, ${unique[1]} +${unique.length - 2} more`;
+                      const posts = [...new Set(
+                        entry.line_items
+                          .map((li: any) => (li.post || '').trim())
+                          .filter(Boolean)
+                      )];
+                      if (posts.length === 1) return posts[0];
+                      if (posts.length > 1) {
+                        return posts.length <= 2
+                          ? posts.join(', ')
+                          : `${posts[0]}, ${posts[1]} +${posts.length - 2} more`;
                       }
                     }
-                    return descParts[0] || '—';
+                    const rawPostName = (entry.description || '')
+                      .replace(/\s*\|\s*Inv#:.*$/i, '')
+                      .trim();
+                    if (/^\d+\s+services?$/i.test(rawPostName)) return '—';
+                    return rawPostName || '—';
                   })();
                   return (
                     <TableRow
@@ -2074,7 +2123,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                       <TableCell className="font-medium whitespace-nowrap">{invoiceNum}</TableCell>
                       <TableCell className="tabular-nums whitespace-nowrap">{new Date(entry.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</TableCell>
                       <TableCell>{entry.client_name || '—'}</TableCell>
-                      <TableCell>{serviceName}</TableCell>
+                      <TableCell>{postName}</TableCell>
                       {filter === 'All Receivables' && <TableCell><Badge variant="outline" className="text-xs">{entry.category}</Badge></TableCell>}
                       <TableCell className="text-right font-medium tabular-nums">₹{entry.total_amount.toLocaleString('en-IN')}</TableCell>
                       <TableCell className="text-right tabular-nums text-xs">
@@ -2106,7 +2155,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                           </span>
                         ) : '—'}
                       </TableCell>
-                      <TableCell>{getStatusBadge(entry)}</TableCell>
+                      <TableCell className="whitespace-nowrap">{getStatusBadge(entry)}</TableCell>
                       <TableCell className="text-right">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>

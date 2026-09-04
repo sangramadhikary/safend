@@ -30,9 +30,41 @@ interface Invoice {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  /** Timestamp the invoice PDF was first downloaded (marks it "Issued"). */
+  issued_at?: string | null;
   /** Proper DB column — 'cgst_sgst' | 'igst' | 'exempt'. Replaces notes string-sniffing. */
   gst_type?: 'cgst_sgst' | 'igst' | 'exempt' | null;
   place_of_supply?: string | null;
+}
+
+/**
+ * Derive the display lifecycle status for an invoice:
+ * Created -> Issued (PDF downloaded) -> Open (a day later) -> Overdue (past due).
+ * 'received' and 'cancelled' are terminal; legacy 'pending' is treated as unpaid.
+ */
+type DisplayStatus = 'created' | 'issued' | 'open' | 'overdue' | 'received' | 'cancelled';
+function deriveDisplayStatus(inv: Pick<Invoice, 'status' | 'due_date' | 'created_at' | 'issued_at'>): DisplayStatus {
+  if (inv.status === 'received' || inv.status === 'cancelled') return inv.status;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (inv.due_date) {
+    const due = new Date(inv.due_date);
+    due.setHours(0, 0, 0, 0);
+    if (due < today) return 'overdue';
+  }
+
+  const startRef = inv.issued_at || inv.created_at;
+  if (startRef) {
+    const start = new Date(startRef);
+    start.setHours(0, 0, 0, 0);
+    const ageDays = Math.floor((today.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+    if (ageDays >= 1) return 'open';
+  }
+
+  if (inv.status === 'issued' || inv.issued_at) return 'issued';
+  return 'created';
 }
 
 export default function ClientInvoices() {
@@ -52,7 +84,7 @@ export default function ClientInvoices() {
       !search ||
       inv.reference_number?.toLowerCase().includes(search.toLowerCase()) ||
       inv.description?.toLowerCase().includes(search.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || inv.status === statusFilter;
+    const matchesStatus = statusFilter === 'all' || deriveDisplayStatus(inv) === statusFilter;
     return matchesSearch && matchesStatus;
   });
 
@@ -159,7 +191,7 @@ export default function ClientInvoices() {
           />
         </div>
         <div className="flex gap-2 flex-wrap">
-          {['all', 'pending', 'overdue', 'received', 'cancelled'].map((s) => (
+          {['all', 'created', 'issued', 'open', 'overdue', 'received', 'cancelled'].map((s) => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
@@ -205,8 +237,8 @@ export default function ClientInvoices() {
             getKey={(inv: Invoice) => inv.id}
             renderItem={(inv: Invoice) => {
               const gstInfo = getGstInfo(inv);
-              const isOverdue = inv.status === 'overdue' ||
-                (inv.status === 'pending' && inv.due_date && new Date(inv.due_date) < new Date());
+              const displayStatus = deriveDisplayStatus(inv);
+              const isOverdue = displayStatus === 'overdue';
 
               return (
                 <div
@@ -263,13 +295,15 @@ export default function ClientInvoices() {
 
                   {/* Status */}
                   <div>
-                    <Badge className={`text-[10px] ${
-                      inv.status === 'received' ? 'bg-green-100 text-green-700 border-green-200' :
-                      isOverdue ? 'bg-red-100 text-red-700 border-red-200' :
-                      inv.status === 'cancelled' ? 'bg-gray-100 text-gray-500 border-gray-200' :
+                    <Badge className={`text-[10px] capitalize ${
+                      displayStatus === 'received' ? 'bg-green-100 text-green-700 border-green-200' :
+                      displayStatus === 'overdue' ? 'bg-red-100 text-red-700 border-red-200' :
+                      displayStatus === 'cancelled' ? 'bg-gray-100 text-gray-500 border-gray-200' :
+                      displayStatus === 'issued' ? 'bg-sky-100 text-sky-700 border-sky-200' :
+                      displayStatus === 'created' ? 'bg-slate-100 text-slate-600 border-slate-200' :
                       'bg-amber-100 text-amber-700 border-amber-200'
                     }`}>
-                      {isOverdue && inv.status === 'pending' ? 'overdue' : inv.status}
+                      {displayStatus}
                     </Badge>
                   </div>
 
@@ -312,7 +346,7 @@ export default function ClientInvoices() {
           <div className="text-sm font-semibold text-gray-900 dark:text-white">
             Total Outstanding: ₹
             {filtered
-              .filter((i: Invoice) => i.status === 'pending' || i.status === 'overdue')
+              .filter((i: Invoice) => { const d = deriveDisplayStatus(i); return d !== 'received' && d !== 'cancelled'; })
               .reduce((s: number, i: Invoice) => s + (i.total_amount || 0), 0)
               .toLocaleString('en-IN')}
           </div>
@@ -463,28 +497,33 @@ function InvoiceDetailContent({
   const gstFromNotes = notesParsed['GST'] || null;
   const servicesFromNotes = notesParsed['Services'] || null;
 
-  const isOverdue = invoice.status === 'overdue' ||
-    (invoice.status === 'pending' && invoice.due_date && new Date(invoice.due_date) < new Date());
+  const displayStatus = deriveDisplayStatus(invoice);
+  const isOverdue = displayStatus === 'overdue';
+  const isUnpaid = displayStatus !== 'received' && displayStatus !== 'cancelled';
 
   return (
     <div className="space-y-5 pt-2">
       {/* Status Banner */}
       <div className={`flex items-center justify-between p-3 rounded-lg border ${
-        invoice.status === 'received' ? 'bg-green-50 border-green-200' :
-        isOverdue ? 'bg-red-50 border-red-200' :
-        invoice.status === 'cancelled' ? 'bg-gray-50 border-gray-200' :
+        displayStatus === 'received' ? 'bg-green-50 border-green-200' :
+        displayStatus === 'overdue' ? 'bg-red-50 border-red-200' :
+        displayStatus === 'cancelled' ? 'bg-gray-50 border-gray-200' :
+        displayStatus === 'issued' ? 'bg-sky-50 border-sky-200' :
+        displayStatus === 'created' ? 'bg-slate-50 border-slate-200' :
         'bg-amber-50 border-amber-200'
       }`}>
         <div className="flex items-center gap-2">
           <Badge className={`text-xs ${
-            invoice.status === 'received' ? 'bg-green-100 text-green-700 border-green-200' :
-            isOverdue ? 'bg-red-100 text-red-700 border-red-200' :
-            invoice.status === 'cancelled' ? 'bg-gray-100 text-gray-500 border-gray-200' :
+            displayStatus === 'received' ? 'bg-green-100 text-green-700 border-green-200' :
+            displayStatus === 'overdue' ? 'bg-red-100 text-red-700 border-red-200' :
+            displayStatus === 'cancelled' ? 'bg-gray-100 text-gray-500 border-gray-200' :
+            displayStatus === 'issued' ? 'bg-sky-100 text-sky-700 border-sky-200' :
+            displayStatus === 'created' ? 'bg-slate-100 text-slate-600 border-slate-200' :
             'bg-amber-100 text-amber-700 border-amber-200'
           }`}>
-            {isOverdue && invoice.status === 'pending' ? 'OVERDUE' : invoice.status.toUpperCase()}
+            {displayStatus.toUpperCase()}
           </Badge>
-          {invoice.status === 'received' && <span className="text-xs text-green-700">Payment received</span>}
+          {displayStatus === 'received' && <span className="text-xs text-green-700">Payment received</span>}
           {isOverdue && <span className="text-xs text-red-600">Payment past due date</span>}
         </div>
         <span className="text-2xl font-bold text-gray-900">₹{invoice.total_amount.toLocaleString('en-IN')}</span>
@@ -603,7 +642,7 @@ function InvoiceDetailContent({
                   <span className="text-green-600 font-medium tabular-nums">₹{invoice.total_amount.toLocaleString('en-IN')}</span>
                 </div>
               )}
-              {(invoice.status === 'pending' || isOverdue) && (
+              {isUnpaid && (
                 <div className="flex justify-between text-sm pt-1">
                   <span className={`font-medium ${isOverdue ? 'text-red-600' : 'text-amber-600'}`}>Balance Due</span>
                   <span className={`font-medium tabular-nums ${isOverdue ? 'text-red-600' : 'text-amber-600'}`}>₹{invoice.total_amount.toLocaleString('en-IN')}</span>

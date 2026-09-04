@@ -9,8 +9,9 @@ export default function ClientPayments() {
   const { data: profile } = useClientProfile();
   const { data: invoices, isLoading } = useClientInvoices(profile?.client_name);
 
+  // Unpaid = anything not yet paid or cancelled (created / issued / open / overdue).
   const pendingInvoices = useMemo(
-    () => (invoices || []).filter((inv: any) => inv.status === 'pending' || inv.status === 'overdue'),
+    () => (invoices || []).filter((inv: any) => inv.status !== 'received' && inv.status !== 'cancelled'),
     [invoices]
   );
 
@@ -82,7 +83,7 @@ export default function ClientPayments() {
           </div>
           <div className="divide-y divide-gray-100 dark:divide-gray-700">
             {pendingInvoices.map((inv: any) => {
-              const isOverdue = inv.status === 'overdue';
+              const isOverdue = inv.status === 'overdue' || (inv.due_date && new Date(inv.due_date) < new Date());
               return (
                 <div key={inv.id} className="px-4 py-4 flex items-center justify-between">
                   <div className="flex-1 min-w-0">

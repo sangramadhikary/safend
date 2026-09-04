@@ -69,7 +69,7 @@ export interface SharedInvoice {
   gst_amount: number | null;
   total_amount: number;
   due_date: string | null;
-  status: 'pending' | 'overdue' | 'received' | 'cancelled' | string;
+  status: 'created' | 'issued' | 'open' | 'pending' | 'overdue' | 'received' | 'cancelled' | string;
   created_at: string;
 }
 

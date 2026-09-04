@@ -127,6 +127,9 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [invoiceNumInfo, setInvoiceNumInfo] = useState<{ isReused: boolean; reusedFrom?: string } | null>(null);
   const [placeOfSupply, setPlaceOfSupply] = useState(DEFAULT_PLACE_OF_SUPPLY);
+  // Previous outstanding dues carried forward from this client's unpaid invoices.
+  const [outstandingInvoices, setOutstandingInvoices] = useState<{ ref: string; amount: number; due_date: string | null; status: string }[]>([]);
+  const [previousDue, setPreviousDue] = useState(0);
 
   // Auto-generate invoice number when moving to review step
   useEffect(() => {
@@ -136,6 +139,11 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
         setInvoiceNumInfo(null);
       }).catch(() => {});
     }
+  }, [step]);
+
+  // Clear any carried-forward dues whenever we leave the review step.
+  useEffect(() => {
+    if (step === 'select') { setOutstandingInvoices([]); setPreviousDue(0); }
   }, [step]);
 
   // Fetch active operational posts (clients)
@@ -199,6 +207,55 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   };
 
   const selectedClientInfo = useMemo(() => uniqueClients.find(c => c.name === selectedClientName), [uniqueClients, selectedClientName]);
+
+  // On reaching the review step, look up this client's unpaid invoices and
+  // carry their outstanding balance forward automatically, so an overdue
+  // client's previous dues are added to the new invoice's payment advice.
+  const reviewWorkOrderId = includedPosts[0]?.work_order_id ?? null;
+  useEffect(() => {
+    if (step !== 'review' || !selectedClientName) return;
+    let cancelled = false;
+
+    (async () => {
+      // Match by work order (preferred) OR by client name for invoices with no WO.
+      const matchFilter = reviewWorkOrderId
+        ? `work_order_id.eq.${reviewWorkOrderId},and(work_order_id.is.null,client_name.eq.${selectedClientName})`
+        : `client_name.eq.${selectedClientName}`;
+
+      try {
+        const { data, error } = await supabaseClient
+          .from('receivables')
+          .select('reference_number, total_amount, due_date, status, notes')
+          .eq('category', 'Invoices')
+          // All unpaid lifecycle states carry an outstanding balance forward.
+          .in('status', ['created', 'issued', 'open', 'pending', 'overdue'])
+          .or(matchFilter)
+          .order('due_date', { ascending: true });
+
+        if (cancelled || error || !data) return;
+
+        const unpaid = data.map((r: any) => {
+          // Net out any partial payment recorded in notes ("Balance: ₹Y").
+          const balanceMatch = (r.notes || '').match(/Balance:\s*₹?([\d,]+(?:\.\d+)?)/);
+          const effectiveAmount = balanceMatch
+            ? parseFloat(balanceMatch[1].replace(/,/g, ''))
+            : r.total_amount;
+          const isPastDue = r.due_date && new Date(r.due_date) < new Date();
+          return {
+            ref: r.reference_number || '—',
+            amount: effectiveAmount,
+            due_date: r.due_date,
+            status: isPastDue ? 'overdue' : 'open',
+          };
+        }).filter((r) => r.amount > 0);
+
+        setOutstandingInvoices(unpaid);
+        setPreviousDue(Math.round(unpaid.reduce((s, r) => s + r.amount, 0)));
+      } catch { /* non-critical — invoice can still be generated without carry-forward */ }
+    })();
+
+    return () => { cancelled = true; };
+  }, [step, selectedClientName, reviewWorkOrderId]);
 
   // Fetch duty data across selected posts for the client
   const handleFetchDutyData = async () => {
@@ -378,13 +435,30 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
         total_amount: totalAmount,
         due_date: dueDate || null,
         reference_number: finalInvoiceNumber,
-        status: 'pending',
+        // Lifecycle starts at 'created'; downloading the PDF promotes to 'issued'.
+        status: 'created',
         // ── GST engine: persist place_of_supply + gst_type as proper columns ──
         place_of_supply: placeOfSupply,
         gst_type: resolveGstConfig(placeOfSupply, gstPercent).gstType,
+        // Carry forward this client's outstanding dues so the payment advice
+        // shows previous balance + current invoice. total_amount stays the
+        // current invoice's own total; previous_balance is tracked separately.
+        previous_balance: previousDue > 0 ? previousDue : null,
+        previous_balance_breakdown:
+          previousDue > 0 && outstandingInvoices.length > 0
+            ? outstandingInvoices.map(i => ({
+                referenceNumber: i.ref,
+                date: i.due_date || null,
+                amount: i.amount,
+              }))
+            : null,
         notes: [
           `Billing Period: ${billingFrom} to ${billingTo}`,
           `GST: ${gstPercent}%`,
+          previousDue > 0 ? `Previous Due: ₹${previousDue.toLocaleString('en-IN')}` : '',
+          previousDue > 0 && outstandingInvoices.length > 0
+            ? `Outstanding: ${outstandingInvoices.map(i => `${i.ref} (₹${i.amount.toLocaleString('en-IN')})`).join(', ')}`
+            : '',
           selectedClientInfo?.gst_number ? `Client GSTIN: ${selectedClientInfo.gst_number.toUpperCase()}` : '',
           (() => {
             const firstPost = includedPosts[0];
@@ -415,7 +489,12 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['receivables'] });
-      toast({ title: 'Invoice Generated', description: `Invoice ${invoiceNumber} created for ₹${totalAmount.toLocaleString('en-IN')}.` });
+      toast({
+        title: 'Invoice Generated',
+        description: previousDue > 0
+          ? `Invoice ${invoiceNumber} created for ₹${totalAmount.toLocaleString('en-IN')} + ₹${previousDue.toLocaleString('en-IN')} previous due (₹${(totalAmount + previousDue).toLocaleString('en-IN')} payable).`
+          : `Invoice ${invoiceNumber} created for ₹${totalAmount.toLocaleString('en-IN')}.`,
+      });
       onSuccess();
     },
     onError: (error: any) => {
@@ -669,8 +748,60 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                   <span>Total Amount</span>
                   <span className="text-safend-red">₹{totalAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                 </div>
+                {previousDue > 0 && (
+                  <>
+                    <div className="flex justify-between text-sm text-amber-700 dark:text-amber-300">
+                      <span>Previous Outstanding</span>
+                      <span className="font-medium">₹{previousDue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="flex justify-between text-base font-bold border-t pt-2 mt-1">
+                      <span>Total Payable</span>
+                      <span className="text-safend-red">₹{(totalAmount + previousDue).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                    </div>
+                  </>
+                )}
               </CardContent>
             </Card>
+
+            {/* Previous outstanding dues carried forward for this client */}
+            {outstandingInvoices.length > 0 && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 overflow-hidden">
+                <div className="px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-amber-800 dark:text-amber-200">
+                    Previous dues carried forward — {outstandingInvoices.length} unpaid invoice{outstandingInvoices.length !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-[11px] font-bold text-amber-900 dark:text-amber-100">
+                    ₹{previousDue.toLocaleString('en-IN')}
+                  </span>
+                </div>
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="border-b border-amber-200 dark:border-amber-800">
+                      <th className="text-left px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Invoice #</th>
+                      <th className="text-center px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Due Date</th>
+                      <th className="text-center px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Status</th>
+                      <th className="text-right px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {outstandingInvoices.map((inv, i) => (
+                      <tr key={i} className="border-b border-amber-100 dark:border-amber-900/50 last:border-0">
+                        <td className="px-3 py-1 font-mono font-medium text-amber-900 dark:text-amber-100">{inv.ref}</td>
+                        <td className="px-3 py-1 text-center text-amber-700 dark:text-amber-300">
+                          {inv.due_date ? new Date(inv.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+                        </td>
+                        <td className="px-3 py-1 text-center">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${inv.status === 'overdue' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'}`}>
+                            {inv.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">₹{inv.amount.toLocaleString('en-IN')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {/* Invoice Details */}
             <div className="space-y-3">

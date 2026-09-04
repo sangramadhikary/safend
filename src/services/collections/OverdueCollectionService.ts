@@ -65,11 +65,13 @@ export async function checkAndAssignOverdueCollections(): Promise<{
   try {
     const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
-    // 1. Find pending receivables that are past due date
+    // 1. Find unpaid receivables that are past their due date. Unpaid stored
+    //    states span the lifecycle before payment: 'created', 'issued' and the
+    //    legacy 'pending'.
     const { data: overdueReceivables, error: fetchError } = await supabaseClient
       .from('receivables')
       .select('*')
-      .eq('status', 'pending')
+      .in('status', ['created', 'issued', 'pending'])
       .lt('due_date', today)
       .not('due_date', 'is', null);
 

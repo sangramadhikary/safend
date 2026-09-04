@@ -11,11 +11,17 @@ export default function ClientDashboard() {
 
   const isLoading = profileLoading || invoicesLoading || postsLoading || incidentsLoading;
 
+  // Any invoice that is not paid or cancelled still owes a balance.
+  const isUnpaidInvoice = (inv: any) => inv.status !== 'received' && inv.status !== 'cancelled';
+  // Past the due date and still unpaid = overdue (derived, not stored).
+  const isOverdueInvoice = (inv: any) =>
+    isUnpaidInvoice(inv) && inv.due_date && new Date(inv.due_date) < new Date();
+
   const totalDue = invoices
-    ?.filter((inv: any) => inv.status === 'pending' || inv.status === 'overdue')
+    ?.filter(isUnpaidInvoice)
     .reduce((sum: number, inv: any) => sum + (inv.total_amount || 0), 0) || 0;
 
-  const overdueCount = invoices?.filter((inv: any) => inv.status === 'overdue').length || 0;
+  const overdueCount = invoices?.filter(isOverdueInvoice).length || 0;
   const activePosts = posts?.filter((p: any) => p.status === 'active').length || 0;
   const openIncidents = incidents?.filter((i: any) => i.status !== 'resolved' && i.status !== 'closed').length || 0;
 
@@ -118,13 +124,26 @@ export default function ClientDashboard() {
                   <p className="text-sm font-semibold text-foreground dark:text-white">
                     ₹{(inv.total_amount || 0).toLocaleString('en-IN')}
                   </p>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${
-                    inv.status === 'received' ? 'bg-green-100 text-green-700' :
-                    inv.status === 'overdue' ? 'bg-red-100 text-red-700' :
-                    'bg-yellow-100 text-yellow-700'
-                  }`}>
-                    {inv.status}
-                  </span>
+                  {(() => {
+                    const label = inv.status === 'received' ? 'received'
+                      : inv.status === 'cancelled' ? 'cancelled'
+                      : isOverdueInvoice(inv) ? 'overdue'
+                      : inv.status === 'issued' ? 'issued'
+                      : inv.status === 'open' ? 'open'
+                      : 'created';
+                    return (
+                      <span className={`text-xs px-2 py-0.5 rounded-full capitalize ${
+                        label === 'received' ? 'bg-green-100 text-green-700' :
+                        label === 'overdue' ? 'bg-red-100 text-red-700' :
+                        label === 'cancelled' ? 'bg-gray-100 text-gray-500' :
+                        label === 'issued' ? 'bg-sky-100 text-sky-700' :
+                        label === 'created' ? 'bg-slate-100 text-slate-600' :
+                        'bg-yellow-100 text-yellow-700'
+                      }`}>
+                        {label}
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
             ))}
