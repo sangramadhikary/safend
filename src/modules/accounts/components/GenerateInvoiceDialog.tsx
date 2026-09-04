@@ -751,39 +751,39 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                     ₹{previousDue.toLocaleString('en-IN')}
                   </span>
                 </div>
-                <table className="w-full text-[11px]">
-                  <thead>
-                    <tr className="border-b border-amber-200 dark:border-amber-800">
-                      <th className="text-left px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Invoice #</th>
-                      <th className="text-center px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Due Date</th>
-                      <th className="text-center px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Status</th>
-                      <th className="text-right px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <Table className="text-[11px]">
+                  <TableHeader>
+                    <TableRow className="border-b border-amber-200 dark:border-amber-800">
+                      <TableHead className="h-auto px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Invoice #</TableHead>
+                      <TableHead className="h-auto px-3 py-1 text-center text-amber-700 dark:text-amber-300 font-semibold">Due Date</TableHead>
+                      <TableHead className="h-auto px-3 py-1 text-center text-amber-700 dark:text-amber-300 font-semibold">Status</TableHead>
+                      <TableHead className="h-auto px-3 py-1 text-right text-amber-700 dark:text-amber-300 font-semibold">Amount</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {outstandingInvoices.map((inv, i) => (
-                      <tr key={i} className="border-b border-amber-100 dark:border-amber-900/50 last:border-0">
-                        <td className="px-3 py-1 font-mono font-medium text-amber-900 dark:text-amber-100">{inv.ref}</td>
-                        <td className="px-3 py-1 text-center text-amber-700 dark:text-amber-300">
+                      <TableRow key={i} className="border-b border-amber-100 dark:border-amber-900/50 last:border-0">
+                        <TableCell className="px-3 py-1 font-mono font-medium text-amber-900 dark:text-amber-100">{inv.ref}</TableCell>
+                        <TableCell className="px-3 py-1 text-center text-amber-700 dark:text-amber-300">
                           {inv.due_date ? new Date(inv.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
-                        </td>
-                        <td className="px-3 py-1 text-center">
+                        </TableCell>
+                        <TableCell className="px-3 py-1 text-center">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${inv.status === 'overdue' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'}`}>
                             {inv.status}
                           </span>
-                        </td>
-                        <td className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">
+                        </TableCell>
+                        <TableCell className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">
                           ₹{inv.amount.toLocaleString('en-IN')}
                           {inv.previousBalance > 0 && (
                             <div className="text-[10px] font-normal text-amber-600 dark:text-amber-400">
                               ₹{inv.ownAmount.toLocaleString('en-IN')} + ₹{inv.previousBalance.toLocaleString('en-IN')} prev
                             </div>
                           )}
-                        </td>
-                      </tr>
+                        </TableCell>
+                      </TableRow>
                     ))}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
             )}
 
