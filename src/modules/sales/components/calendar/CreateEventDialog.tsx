@@ -164,7 +164,7 @@ export function CreateEventDialog({ isOpen, onClose, initialEvent, eventTypes }:
                     mode="single"
                     selected={formData.date}
                     onSelect={handleDateChange}
-                    initialFocus
+                    autoFocus
                   />
                 </PopoverContent>
               </Popover>

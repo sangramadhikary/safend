@@ -20,7 +20,9 @@ interface ChartProps {
   type: 'bar' | 'line' | 'pie';
   title?: string;
   description?: string;
-  height?: number | string;
+  // recharts' ResponsiveContainer takes a number or a `${number}%` template, not
+  // an arbitrary string. Every use here passes a pixel number, so keep it numeric.
+  height?: number;
   isLoading?: boolean;
   currency?: boolean;
   showLegend?: boolean;

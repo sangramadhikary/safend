@@ -717,7 +717,7 @@ export function OnboardingWizard({ candidate, branchId, branchUuid, stepOverride
                         </p>
                       </div>
                       <Button
-                        variant={generated ? 'outline-solid' : 'default'}
+                        variant={generated ? 'outline' : 'default'}
                         onClick={handleGenerateAgreement}
                         disabled={saving}
                         className={`shrink-0 gap-2 ${generated ? '' : 'bg-safend-red hover:bg-safend-red/90 text-white'}`}

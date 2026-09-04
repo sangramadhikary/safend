@@ -886,8 +886,8 @@ export function AttendanceManagement({ presetDate }: AttendanceManagementProps) 
                     selected={selectedDate}
                     onSelect={(d) => { if (d) { setSelectedDate(startOfDay(d)); setDatePickerOpen(false); } }}
                     disabled={(d) => d > today}
-                    toDate={today}
-                    initialFocus
+                    endMonth={today}
+                    autoFocus
                   />
                 </PopoverContent>
               </Popover>

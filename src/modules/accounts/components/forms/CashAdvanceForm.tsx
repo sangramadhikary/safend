@@ -29,6 +29,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { format } from 'date-fns';
 import { Calendar as CalendarIcon } from 'lucide-react';
 import { cn } from "@/lib/utils";
+import { toNumberInputValue } from './numberField';
 
 const cashAdvanceFormSchema = z.object({
   employeeId: z.string().min(1, { message: "Employee ID is required" }),
@@ -41,7 +42,10 @@ const cashAdvanceFormSchema = z.object({
   notes: z.string().optional(),
 });
 
-type CashAdvanceFormValues = z.infer<typeof cashAdvanceFormSchema>;
+// z.coerce.number() gives distinct input (unknown) and output (number) types;
+// since zod v4 useForm must be given both, or the Resolver/Control types clash.
+type CashAdvanceFormInput = z.input<typeof cashAdvanceFormSchema>;
+type CashAdvanceFormValues = z.output<typeof cashAdvanceFormSchema>;
 
 interface CashAdvanceFormProps {
   isOpen: boolean;
@@ -53,7 +57,7 @@ export function CashAdvanceForm({ isOpen, onClose, onSubmit }: CashAdvanceFormPr
   const { toast } = useToast();
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  const form = useForm<CashAdvanceFormValues>({
+  const form = useForm<CashAdvanceFormInput, any, CashAdvanceFormValues>({
     resolver: zodResolver(cashAdvanceFormSchema),
     defaultValues: {
       employeeId: "",
@@ -131,6 +135,7 @@ export function CashAdvanceForm({ isOpen, onClose, onSubmit }: CashAdvanceFormPr
                         type="number" 
                         placeholder="Enter amount" 
                         {...field} 
+                        value={toNumberInputValue(field.value)}
                       />
                     </FormControl>
                     <FormMessage />
@@ -194,7 +199,7 @@ export function CashAdvanceForm({ isOpen, onClose, onSubmit }: CashAdvanceFormPr
                           mode="single"
                           selected={field.value}
                           onSelect={field.onChange}
-                          initialFocus
+                          autoFocus
                         />
                       </PopoverContent>
                     </Popover>
@@ -233,7 +238,7 @@ export function CashAdvanceForm({ isOpen, onClose, onSubmit }: CashAdvanceFormPr
                           mode="single"
                           selected={field.value}
                           onSelect={field.onChange}
-                          initialFocus
+                          autoFocus
                         />
                       </PopoverContent>
                     </Popover>

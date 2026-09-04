@@ -24,6 +24,7 @@ import { format } from 'date-fns';
 import { Calendar as CalendarIcon, Upload } from 'lucide-react';
 import { cn } from "@/lib/utils";
 import { CashAdvance, settleAdvance } from '@/services/security/SecurityCashAdvanceService';
+import { toNumberInputValue } from './numberField';
 
 const settlementFormSchema = z.object({
   amount: z.coerce.number()
@@ -33,7 +34,10 @@ const settlementFormSchema = z.object({
   notes: z.string().optional(),
 });
 
-type SettlementFormValues = z.infer<typeof settlementFormSchema>;
+// z.coerce.number() gives distinct input (unknown) and output (number) types;
+// since zod v4 useForm must be given both, or the Resolver/Control types clash.
+type SettlementFormInput = z.input<typeof settlementFormSchema>;
+type SettlementFormValues = z.output<typeof settlementFormSchema>;
 
 interface SettlementFormProps {
   isOpen: boolean;
@@ -52,7 +56,7 @@ export function CashAdvanceSettlementForm({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
 
-  const form = useForm<SettlementFormValues>({
+  const form = useForm<SettlementFormInput, any, SettlementFormValues>({
     resolver: zodResolver(settlementFormSchema),
     defaultValues: {
       amount: advance?.balanceAmount || 0,
@@ -173,6 +177,7 @@ export function CashAdvanceSettlementForm({
                       type="number"
                       placeholder="Enter settlement amount"
                       {...field}
+                      value={toNumberInputValue(field.value)}
                       max={advance.balanceAmount || advance.amount}
                     />
                   </FormControl>
@@ -214,7 +219,7 @@ export function CashAdvanceSettlementForm({
                         mode="single"
                         selected={field.value}
                         onSelect={field.onChange}
-                        initialFocus
+                        autoFocus
                       />
                     </PopoverContent>
                   </Popover>

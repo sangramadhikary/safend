@@ -1085,7 +1085,7 @@ export function ProcessPayrollStep({ filter }: { filter: string }) {
             <div className="flex gap-2">
               <Button
                 type="button"
-                variant={dateMode === "month" ? "default" : "outline-solid"}
+                variant={dateMode === "month" ? "default" : "outline"}
                 size="sm"
                 onClick={() => { setDateMode("month"); if (selectedMonth) handleMonthChange(selectedMonth); }}
               >
@@ -1093,7 +1093,7 @@ export function ProcessPayrollStep({ filter }: { filter: string }) {
               </Button>
               <Button
                 type="button"
-                variant={dateMode === "range" ? "default" : "outline-solid"}
+                variant={dateMode === "range" ? "default" : "outline"}
                 size="sm"
                 onClick={() => setDateMode("range")}
               >
@@ -1102,7 +1102,7 @@ export function ProcessPayrollStep({ filter }: { filter: string }) {
               {payrollType === "personwise" && (
                 <Button
                   type="button"
-                  variant={dateMode === "tilldate" ? "default" : "outline-solid"}
+                  variant={dateMode === "tilldate" ? "default" : "outline"}
                   size="sm"
                   onClick={() => setDateMode("tilldate")}
                   className={dateMode === "tilldate" ? "bg-amber-600 hover:bg-amber-700" : ""}

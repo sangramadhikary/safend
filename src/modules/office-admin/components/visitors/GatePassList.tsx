@@ -65,11 +65,11 @@ export function GatePassList({ searchQuery, branchId }: GatePassListProps) {
       case 'active':
         return 'default';
       case 'expired':
-        return 'outline-solid';
+        return 'outline';
       case 'cancelled':
         return 'destructive';
       default:
-        return 'outline-solid';
+        return 'outline';
     }
   };
 

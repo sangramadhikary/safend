@@ -142,7 +142,7 @@ export function EmployeeTrackingView({ branch, searchQuery }: Props) {
                     <TableCell className="text-center">{item.quantity}</TableCell>
                     <TableCell className="text-sm">{item.issuedDate}</TableCell>
                     <TableCell>
-                      <Badge variant={item.status === 'active' ? 'default' : 'outline-solid'}>
+                      <Badge variant={item.status === 'active' ? 'default' : 'outline'}>
                         {item.status}
                       </Badge>
                     </TableCell>

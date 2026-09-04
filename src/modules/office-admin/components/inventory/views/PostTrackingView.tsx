@@ -152,7 +152,7 @@ export function PostTrackingView({ branch, searchQuery }: Props) {
                     <TableCell className="capitalize text-sm">{item.condition}</TableCell>
                     <TableCell className="text-sm">{item.issuedDate}</TableCell>
                     <TableCell>
-                      <Badge variant={item.status === 'active' ? 'default' : 'outline-solid'}>
+                      <Badge variant={item.status === 'active' ? 'default' : 'outline'}>
                         {item.status}
                       </Badge>
                     </TableCell>

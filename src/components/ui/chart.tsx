@@ -110,6 +110,15 @@ const ChartTooltipContent = React.forwardRef<
       indicator?: "line" | "dot" | "dashed"
       nameKey?: string
       labelKey?: string
+    } & {
+      // recharts 3 injects these into the custom tooltip content at render time
+      // but no longer lists them on Tooltip's public prop types, so declare them
+      // here for the destructure below.
+      active?: boolean
+      // `any[]` rather than a Record[] so the entries stay assignable to the
+      // recharts Payload type expected by labelFormatter/formatter below.
+      payload?: any[]
+      label?: any
     }
 >(
   (
@@ -259,11 +268,14 @@ const ChartLegend = RechartsPrimitive.Legend
 
 const ChartLegendContent = React.forwardRef<
   HTMLDivElement,
-  React.ComponentProps<"div"> &
-    Pick<RechartsPrimitive.LegendProps, "payload" | "verticalAlign"> & {
-      hideIcon?: boolean
-      nameKey?: string
-    }
+  React.ComponentProps<"div"> & {
+    // recharts 3 no longer exposes payload/verticalAlign on LegendProps for a
+    // Pick<>, though it still injects them into custom legend content.
+    payload?: Array<Record<string, any>>
+    verticalAlign?: "top" | "bottom" | "middle"
+    hideIcon?: boolean
+    nameKey?: string
+  }
 >(
   (
     { className, hideIcon = false, payload, verticalAlign = "bottom", nameKey },

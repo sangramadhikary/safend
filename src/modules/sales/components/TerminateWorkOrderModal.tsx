@@ -659,7 +659,7 @@ export function TerminateWorkOrderModal({ isOpen, onClose, workOrder }: Terminat
                       </span>
                     </div>
                     {daysRemaining !== null && (
-                      <Badge variant={daysRemaining <= 7 ? 'destructive' : 'outline-solid'} className="text-xs">
+                      <Badge variant={daysRemaining <= 7 ? 'destructive' : 'outline'} className="text-xs">
                         {daysRemaining > 0 ? `${daysRemaining} days left` : 'Overdue'}
                       </Badge>
                     )}

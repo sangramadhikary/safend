@@ -64,7 +64,12 @@ function mapRow(row: Record<string, unknown>): RentedProperty {
  * current branch so the map only shows relevant locations.
  */
 export async function getActiveRentedProperties(): Promise<RentedProperty[]> {
-  let query = supabaseClient
+  // Typed as the loose filter-builder shape rather than the fully-parameterised
+  // query type. Re-casting the doubly-.not()-chained builder back onto itself
+  // made TS expand the generic recursively (TS2589: excessively deep). The rows
+  // are validated through mapRow below, so the builder's element type is not
+  // relied on here.
+  let query: any = supabaseClient
     .from('rented_properties')
     .select('*')
     .eq('status', 'active')
@@ -72,7 +77,7 @@ export async function getActiveRentedProperties(): Promise<RentedProperty[]> {
     .not('longitude', 'is', null)
     .order('name');
 
-  query = applyBranchScope(query) as typeof query;
+  query = applyBranchScope(query);
 
   const { data, error } = await query;
   if (error) {

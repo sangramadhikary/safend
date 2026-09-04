@@ -192,7 +192,7 @@ export function SpeedometerGauge({
           <div className="flex space-x-2">
             <Button
               size="sm"
-              variant={isRunning ? "outline-solid" : "default"}
+              variant={isRunning ? "outline" : "default"}
               onClick={isRunning ? handlePause : handleStart}
               className="flex items-center gap-1"
             >

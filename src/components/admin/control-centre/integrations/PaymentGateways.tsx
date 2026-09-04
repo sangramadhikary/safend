@@ -191,7 +191,7 @@ export function PaymentGateways() {
                     </CardDescription>
                   </div>
                   <Button 
-                    variant={gateway.status === "connected" ? "outline-solid" : "destructive"}
+                    variant={gateway.status === "connected" ? "outline" : "destructive"}
                     onClick={() => handleConnectGateway(gateway)}
                   >
                     {gateway.status === "connected" ? "Update Configuration" : "Connect"}

@@ -367,7 +367,7 @@ export function PostWiseSalaryStep() {
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input placeholder="Search by post or client..." value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} className="h-9 pl-9" />
           </div>
-          <Button type="button" variant={showMissingOnly ? 'default' : 'outline-solid'} size="sm" className="h-9" onClick={() => setShowMissingOnly((value) => !value)}>
+          <Button type="button" variant={showMissingOnly ? 'default' : 'outline'} size="sm" className="h-9" onClick={() => setShowMissingOnly((value) => !value)}>
             <AlertCircle className="mr-1.5 h-3.5 w-3.5" />Missing only {postsWithMissing.length > 0 ? `(${postsWithMissing.length})` : ''}
           </Button>
         </div>

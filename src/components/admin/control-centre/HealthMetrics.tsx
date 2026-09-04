@@ -102,7 +102,7 @@ export function HealthMetrics() {
               <Server className="h-5 w-5 text-red-600" /> 
               System Overview
             </div>
-            <Badge variant={getOverallStatus() === 'healthy' ? 'default' : getOverallStatus() === 'warning' ? 'outline-solid' : 'destructive'}>
+            <Badge variant={getOverallStatus() === 'healthy' ? 'default' : getOverallStatus() === 'warning' ? 'outline' : 'destructive'}>
               {getOverallStatus()}
             </Badge>
           </CardTitle>

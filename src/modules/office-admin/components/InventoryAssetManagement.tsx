@@ -291,7 +291,7 @@ export function InventoryAssetManagement() {
                             <Badge variant={
                               asset.status === 'active' ? 'default' : 
                               asset.status === 'maintenance' ? 'destructive' : 
-                              'outline-solid'
+                              'outline'
                             }>
                               {asset.status}
                             </Badge>

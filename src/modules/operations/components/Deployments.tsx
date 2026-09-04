@@ -1251,9 +1251,9 @@ export function Deployments({ presetDate }: DeploymentsProps = {}) {
                     selected={selectedDate}
                     onSelect={(d) => { if (d) { goToDate(d); setDatePickerOpen(false); } }}
                     disabled={(d) => d < minDate || d > maxDate}
-                    fromDate={minDate}
-                    toDate={maxDate}
-                    initialFocus
+                    startMonth={minDate}
+                    endMonth={maxDate}
+                    autoFocus
                   />
                 </PopoverContent>
               </Popover>

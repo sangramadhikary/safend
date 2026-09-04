@@ -184,7 +184,7 @@ export function TrainingModule({ filter }: TrainingModuleProps) {
                       <TableRow key={program.id}>
                         <TableCell className="font-medium">{program.name}</TableCell>
                         <TableCell>
-                          <Badge variant={program.type === "Mandatory" ? "destructive" : "outline-solid"}>
+                          <Badge variant={program.type === "Mandatory" ? "destructive" : "outline"}>
                             {program.type}
                           </Badge>
                         </TableCell>

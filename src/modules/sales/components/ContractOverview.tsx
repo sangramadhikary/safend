@@ -286,14 +286,14 @@ export function ContractOverview({ onViewContract, onRenewContract }: ContractOv
       {/* Filter Tabs */}
       <div className="flex gap-2 flex-wrap">
         <Button 
-          variant={activeFilter === 'all' ? 'default' : 'outline-solid'} 
+          variant={activeFilter === 'all' ? 'default' : 'outline'} 
           size="sm"
           onClick={() => setActiveFilter('all')}
         >
           All Contracts ({contractsWithRenewal.length})
         </Button>
         <Button 
-          variant={activeFilter === 'critical' ? 'default' : 'outline-solid'} 
+          variant={activeFilter === 'critical' ? 'default' : 'outline'} 
           size="sm"
           onClick={() => setActiveFilter('critical')}
           className={activeFilter === 'critical' ? 'bg-red-600 hover:bg-red-700' : 'border-red-300 text-red-600'}
@@ -302,7 +302,7 @@ export function ContractOverview({ onViewContract, onRenewContract }: ContractOv
           Critical ({contractsWithRenewal.filter(c => c.priority === 'critical' || c.priority === 'high').length})
         </Button>
         <Button 
-          variant={activeFilter === 'expiring' ? 'default' : 'outline-solid'} 
+          variant={activeFilter === 'expiring' ? 'default' : 'outline'} 
           size="sm"
           onClick={() => setActiveFilter('expiring')}
           className={activeFilter === 'expiring' ? 'bg-orange-600 hover:bg-orange-700' : 'border-orange-300 text-orange-600'}
@@ -311,7 +311,7 @@ export function ContractOverview({ onViewContract, onRenewContract }: ContractOv
           Expiring Soon ({contractsWithRenewal.filter(c => c.daysUntilExpiry <= 30).length})
         </Button>
         <Button 
-          variant={activeFilter === 'active' ? 'default' : 'outline-solid'} 
+          variant={activeFilter === 'active' ? 'default' : 'outline'} 
           size="sm"
           onClick={() => setActiveFilter('active')}
           className={activeFilter === 'active' ? 'bg-green-600 hover:bg-green-700' : 'border-green-300 text-green-600'}

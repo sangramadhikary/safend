@@ -563,7 +563,7 @@ export function ActivityAudit() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      variant={liveTail ? 'default' : 'outline-solid'}
+                      variant={liveTail ? 'default' : 'outline'}
                       size="sm" className="h-9 gap-1.5 text-xs"
                       onClick={() => setLiveTail(!liveTail)}
                       aria-pressed={liveTail}
@@ -811,7 +811,7 @@ export function ActivityAudit() {
             />
 
             <Button
-              variant={filters.hasSnapshot === true ? 'default' : 'outline-solid'}
+              variant={filters.hasSnapshot === true ? 'default' : 'outline'}
               size="sm" className="h-9 gap-1.5 text-xs"
               onClick={() => patchFilters({ hasSnapshot: filters.hasSnapshot === true ? null : true })}
               aria-pressed={filters.hasSnapshot === true}

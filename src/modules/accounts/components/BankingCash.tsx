@@ -122,7 +122,7 @@ export function BankingCash({ filter }: BankingCashProps) {
                       <div className="text-xl font-bold">
                         {formatIndianCurrency(account.balance)}
                       </div>
-                      <Badge variant={account.accountType === 'current' ? 'outline-solid' : 'secondary'} className="mt-2">
+                      <Badge variant={account.accountType === 'current' ? 'outline' : 'secondary'} className="mt-2">
                         {account.accountType}
                       </Badge>
                     </div>

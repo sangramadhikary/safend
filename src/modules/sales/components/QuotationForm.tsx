@@ -23,6 +23,7 @@ import {
   createEmptyServiceInstances,
   ensurePerPostInstances,
   getPostServiceInstances,
+  calculatePostMonthlySubtotal,
   type ServiceInstancesMap,
   type PerPostServiceInstances,
 } from "./SecurityPostsEditor";
@@ -372,17 +373,14 @@ export function QuotationForm({ isOpen, onClose, onSubmit, editData, initialData
 
   // Calculation helpers (used for Terms & Pricing tab summary)
   const calculateSubtotal = () => {
-    let subtotal = 0;
-    Object.values(perPostServiceInstances).forEach(svcMap => {
-      (Object.keys(svcMap) as (keyof ServiceInstancesMap)[]).forEach(svcType => {
-        svcMap[svcType].forEach(inst => {
-          if (inst.shifts.day.enabled) subtotal += inst.shifts.day.quantity * inst.shifts.day.rate;
-          if (inst.shifts.afternoon.enabled && inst.shiftType === '8H') subtotal += inst.shifts.afternoon.quantity * inst.shifts.afternoon.rate;
-          if (inst.shifts.night.enabled) subtotal += inst.shifts.night.quantity * inst.shifts.night.rate;
-        });
-      });
-    });
-    return subtotal;
+    // Reuse the shared per-post calculator instead of re-implementing the shift
+    // loop. It runs each rate through rateAsNumber(), so a rate held as a string
+    // (the field keeps the raw text while the user types) contributes its numeric
+    // value rather than turning the whole subtotal into NaN.
+    return Object.values(perPostServiceInstances).reduce(
+      (subtotal, svcMap) => subtotal + calculatePostMonthlySubtotal(svcMap),
+      0
+    );
   };
 
   const calculateTotal = () => {

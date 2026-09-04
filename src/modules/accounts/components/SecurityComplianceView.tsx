@@ -339,7 +339,7 @@ export function SecurityComplianceView() {
                       <TableCell>
                         <Button 
                           size="sm"
-                          variant={fee.status === 'overdue' ? 'default' : 'outline-solid'}
+                          variant={fee.status === 'overdue' ? 'default' : 'outline'}
                         >
                           <IndianRupee className="h-4 w-4 mr-2" />
                           Pay Now

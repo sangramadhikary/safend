@@ -508,9 +508,9 @@ export function UserRolesManager() {
             </CardDescription>
           </div>
           <div className="flex gap-2 flex-wrap">
-            <Button onClick={() => setSelectedFilter("all")} variant={selectedFilter === "all" ? "default" : "outline-solid"} size="sm">All</Button>
-            <Button onClick={() => setSelectedFilter("active")} variant={selectedFilter === "active" ? "default" : "outline-solid"} size="sm">Active</Button>
-            <Button onClick={() => setSelectedFilter("inactive")} variant={selectedFilter === "inactive" ? "default" : "outline-solid"} size="sm">Inactive</Button>
+            <Button onClick={() => setSelectedFilter("all")} variant={selectedFilter === "all" ? "default" : "outline"} size="sm">All</Button>
+            <Button onClick={() => setSelectedFilter("active")} variant={selectedFilter === "active" ? "default" : "outline"} size="sm">Active</Button>
+            <Button onClick={() => setSelectedFilter("inactive")} variant={selectedFilter === "inactive" ? "default" : "outline"} size="sm">Inactive</Button>
             <Button variant="destructive" className="gap-2" onClick={handleAddUser} size="sm">
               <UserPlus className="h-4 w-4" />
               Add User

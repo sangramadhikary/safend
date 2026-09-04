@@ -198,7 +198,7 @@ export function PaymentsList({ searchQuery, onMarkPaid }: PaymentsListProps) {
                         {(payment.status === 'upcoming' || payment.status === 'due' || payment.status === 'overdue' || payment.status === 'partially_paid') ? (
                           <Button
                             size="sm"
-                            variant={isOverdue ? "destructive" : "outline-solid"}
+                            variant={isOverdue ? "destructive" : "outline"}
                             onClick={() => onMarkPaid(payment)}
                             className="text-xs"
                           >

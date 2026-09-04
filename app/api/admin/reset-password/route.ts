@@ -51,10 +51,13 @@ export async function POST(request: NextRequest) {
     // 2. Unenroll all Supabase TOTP MFA factors (authenticator app)
     let totpCount = 0;
     try {
-      const { data: factors } = await supabaseAdmin.auth.admin.listFactors({ userId });
+      // Admin MFA methods live under `admin.mfa` in supabase-js v2, and
+      // deleteFactor takes `id` (not `factorId`). The previous calls used the old
+      // shape, so this block silently threw and no factor was ever unenrolled.
+      const { data: factors } = await supabaseAdmin.auth.admin.mfa.listFactors({ userId });
       const allFactors = factors?.factors ?? [];
       for (const factor of allFactors) {
-        await supabaseAdmin.auth.admin.deleteFactor({ userId, factorId: factor.id });
+        await supabaseAdmin.auth.admin.mfa.deleteFactor({ id: factor.id, userId });
         totpCount++;
       }
     } catch (err: any) {

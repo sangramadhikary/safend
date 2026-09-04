@@ -137,7 +137,7 @@ export function VisitorsList({ searchQuery, branchId }: VisitorsListProps) {
                 {formatDistanceToNow(new Date(visitor.checkInTime), { addSuffix: true })}
               </td>
               <td className="py-3 px-4">
-                <Badge variant={visitor.status === "checked_in" ? "default" : "outline-solid"}>
+                <Badge variant={visitor.status === "checked_in" ? "default" : "outline"}>
                   {visitor.status === "checked_in" ? "Checked In" : "Checked Out"}
                 </Badge>
               </td>

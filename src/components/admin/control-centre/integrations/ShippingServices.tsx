@@ -153,7 +153,7 @@ export function ShippingServices() {
                     </CardDescription>
                   </div>
                   <Button 
-                    variant={service.status === "connected" ? "outline-solid" : "destructive"}
+                    variant={service.status === "connected" ? "outline" : "destructive"}
                     onClick={() => handleConnectService(service)}
                   >
                     {service.status === "connected" ? "Update Configuration" : "Connect"}

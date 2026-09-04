@@ -34,6 +34,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { format } from 'date-fns';
 import { Calendar as CalendarIcon } from 'lucide-react';
 import { cn } from "@/lib/utils";
+import { toNumberInputValue } from './numberField';
 
 // Define the form schema with validation
 const expenseFormSchema = z.object({
@@ -44,7 +45,10 @@ const expenseFormSchema = z.object({
   description: z.string().min(5, { message: "Description must be at least 5 characters" }).max(255),
 });
 
-type ExpenseFormValues = z.infer<typeof expenseFormSchema>;
+// z.coerce.number() gives distinct input (unknown) and output (number) types;
+// since zod v4 useForm must be given both, or the Resolver/Control types clash.
+type ExpenseFormInput = z.input<typeof expenseFormSchema>;
+type ExpenseFormValues = z.output<typeof expenseFormSchema>;
 
 interface ExpenseFormProps {
   isOpen: boolean;
@@ -57,7 +61,7 @@ export function ExpenseForm({ isOpen, onClose }: ExpenseFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   
   // Initialize form with default values
-  const form = useForm<ExpenseFormValues>({
+  const form = useForm<ExpenseFormInput, any, ExpenseFormValues>({
     resolver: zodResolver(expenseFormSchema),
     defaultValues: {
       category: "",
@@ -157,6 +161,7 @@ export function ExpenseForm({ isOpen, onClose }: ExpenseFormProps) {
                         type="number" 
                         placeholder="Enter amount" 
                         {...field} 
+                        value={toNumberInputValue(field.value)}
                       />
                     </FormControl>
                     <FormMessage />
@@ -196,7 +201,7 @@ export function ExpenseForm({ isOpen, onClose }: ExpenseFormProps) {
                           mode="single"
                           selected={field.value}
                           onSelect={field.onChange}
-                          initialFocus
+                          autoFocus
                         />
                       </PopoverContent>
                     </Popover>

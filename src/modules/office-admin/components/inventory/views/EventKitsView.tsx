@@ -181,7 +181,7 @@ export function EventKitsView({ branch }: Props) {
                     <TableCell className="text-sm">{CATEGORY_LABELS[item.itemCategory]}</TableCell>
                     <TableCell className="text-center">{item.quantity}</TableCell>
                     <TableCell>
-                      <Badge variant={item.status === 'active' ? 'default' : item.status === 'returned' ? 'outline-solid' : 'destructive'}>
+                      <Badge variant={item.status === 'active' ? 'default' : item.status === 'returned' ? 'outline' : 'destructive'}>
                         {item.status}
                       </Badge>
                     </TableCell>

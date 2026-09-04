@@ -24,6 +24,7 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { toNumberInputValue } from './numberField';
 
 const transactionFormSchema = z.object({
   type: z.string().min(1, { message: "Transaction type is required" }),
@@ -31,7 +32,12 @@ const transactionFormSchema = z.object({
   description: z.string().min(5, { message: "Description must be at least 5 characters" }),
 });
 
-type TransactionFormValues = z.infer<typeof transactionFormSchema>;
+// `z.coerce.number()` gives the schema a different input type (unknown, the raw
+// field value) from its output type (number, after coercion). Since zod v4 the
+// resolver tracks both, so useForm must be told both — a single generic assumes
+// they are identical and produces the Resolver/Control mismatch.
+type TransactionFormInput = z.input<typeof transactionFormSchema>;
+type TransactionFormValues = z.output<typeof transactionFormSchema>;
 
 interface TransactionFormProps {
   isOpen: boolean;
@@ -42,7 +48,7 @@ export function TransactionForm({ isOpen, onClose }: TransactionFormProps) {
   const { toast } = useToast();
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  const form = useForm<TransactionFormValues>({
+  const form = useForm<TransactionFormInput, any, TransactionFormValues>({
     resolver: zodResolver(transactionFormSchema),
     defaultValues: {
       type: "",
@@ -108,10 +114,11 @@ export function TransactionForm({ isOpen, onClose }: TransactionFormProps) {
                 <FormItem>
                   <FormLabel>Amount (₹)</FormLabel>
                   <FormControl>
-                    <Input 
-                      type="number" 
-                      placeholder="Enter amount" 
-                      {...field} 
+                    <Input
+                      type="number"
+                      placeholder="Enter amount"
+                      {...field}
+                      value={toNumberInputValue(field.value)}
                     />
                   </FormControl>
                   <FormMessage />

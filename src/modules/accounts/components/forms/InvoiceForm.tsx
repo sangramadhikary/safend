@@ -27,6 +27,7 @@ import { useAccountsContext } from '@/contexts/AccountsContext';
 import { useAccountsMutation } from '@/hooks/accounts/useAccountsData';
 import { AccountsService } from '@/services/accounts/AccountsService';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { toNumberInputValue } from './numberField';
 
 // Define the form schema
 const invoiceFormSchema = z.object({
@@ -38,7 +39,10 @@ const invoiceFormSchema = z.object({
   dueDate: z.string().min(1, { message: "Due date is required" }),
 });
 
-type InvoiceFormValues = z.infer<typeof invoiceFormSchema>;
+// z.coerce.number() gives distinct input (unknown) and output (number) types;
+// since zod v4 useForm must be given both, or the Resolver/Control types clash.
+type InvoiceFormInput = z.input<typeof invoiceFormSchema>;
+type InvoiceFormValues = z.output<typeof invoiceFormSchema>;
 
 interface InvoiceFormProps {
   isOpen: boolean;
@@ -50,7 +54,7 @@ export function InvoiceForm({ isOpen, onClose }: InvoiceFormProps) {
   const { selectedBranch } = useAccountsContext();
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  const form = useForm<InvoiceFormValues>({
+  const form = useForm<InvoiceFormInput, any, InvoiceFormValues>({
     resolver: zodResolver(invoiceFormSchema),
     defaultValues: {
       clientName: "",
@@ -146,6 +150,7 @@ export function InvoiceForm({ isOpen, onClose }: InvoiceFormProps) {
                         type="number" 
                         placeholder="Enter amount" 
                         {...field} 
+                        value={toNumberInputValue(field.value)}
                       />
                     </FormControl>
                     <FormMessage />
@@ -164,6 +169,7 @@ export function InvoiceForm({ isOpen, onClose }: InvoiceFormProps) {
                         type="number" 
                         placeholder="Enter GST amount" 
                         {...field} 
+                        value={toNumberInputValue(field.value)}
                       />
                     </FormControl>
                     <FormMessage />

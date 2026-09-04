@@ -32,6 +32,7 @@ import { OneTimeInvoiceForm } from './OneTimeInvoiceForm';
 import { InvoiceImportDialog } from './InvoiceImportDialog';
 import { PayrollReceivablesSection } from './PayrollReceivablesSection';
 import { recordDeletedInvoiceNumber } from '@/services/invoiceNumberService';
+import { closePendingRequestsForReceivable } from '@/services/supabase/InvoiceDeleteRequestService';
 import { addNotification } from '@/services/supabase/NotificationService';
 import { checkAndAssignOverdueCollections } from '@/services/collections/OverdueCollectionService';
 import { isValidGSTIN } from '@/lib/security/lookups';
@@ -101,6 +102,30 @@ const PAYROLL_RECEIVABLE_TYPES = ['Loan Recovery', 'Uniform Charges', 'Mess Char
 // Categories without Add button (auto-generated / live views)
 const NO_ADD_CATEGORIES = ['Payroll Receivables'];
 
+/**
+ * Resolves a human-readable invoice label for a receivable row.
+ *
+ * `reference_number` is nullable and legitimately null for several categories —
+ * Event Letters always store null, while Taxes / Other Income / generic entries
+ * only carry a reference when the user typed one. It must therefore never be
+ * interpolated into a string directly: doing so is what produced the
+ * "Invoice #null" text in admin delete-request notifications.
+ *
+ * Falls back to the legacy "Inv#: XXX" marker that imported records keep inside
+ * `description`, then to a short form of the row id.
+ */
+const getInvoiceLabel = (
+  entry: Pick<ReceivableEntry, 'id' | 'description' | 'reference_number'>
+): string => {
+  if (entry.reference_number) return entry.reference_number;
+  const legacy = (entry.description || '')
+    .split(' | ')
+    .find((part) => part.startsWith('Inv#:'))
+    ?.replace('Inv#: ', '')
+    .trim();
+  return legacy || entry.id.slice(0, 8);
+};
+
 export function ManageReceivables({ filter }: ReceivablesProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -138,8 +163,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     bankAccountId: '',              // for Bank Transfer
     transactionNumber: '',          // for Bank Transfer
     transactionDateTime: '',        // for Bank Transfer
-    paymentType: 'full',            // full | partial
+    paymentType: 'full',            // full | partial | invoice_only
     amountReceived: '',
+    tdsDeducted: '',                // TDS withheld by the client on this payment
     balanceHandling: 'due_date',    // due_date | credit_note (for partial)
     balanceDueDate: '',
   });
@@ -293,16 +319,17 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         .eq('id', id);
       if (error) throw new Error(error.message);
 
-      // Record the invoice number as available for reuse
+      // Record the serial as cancelled for audit. The number is not released back
+      // into circulation — reissuing it would put two documents on one serial.
       if (entry?.reference_number) {
         try {
           await recordDeletedInvoiceNumber(entry.reference_number);
         } catch { /* non-critical */ }
       }
 
-      // Cancelling voids an issued tax invoice and recycles its number, so the
-      // amount and client are recorded explicitly — the row itself survives but
-      // its commercial meaning is reversed.
+      // Cancelling voids an issued tax invoice, so the amount and client are
+      // recorded explicitly — the row itself survives but its commercial meaning
+      // is reversed.
       void logChange({
         action: 'accounts.invoice.cancel',
         target: entry?.reference_number || id,
@@ -431,7 +458,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         throw new Error('Only admins can delete invoices directly.');
       }
 
-      // Record the invoice number for reuse
+      // Record the serial as cancelled — audit only. Since the Rule 46(b) work in
+      // 20260802000000 a cancelled number is NOT returned to circulation; the row
+      // exists so the resulting gap in the sequence is explainable to an auditor.
       if (entry.reference_number) {
         await recordDeletedInvoiceNumber(entry.reference_number);
       }
@@ -451,13 +480,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         .eq('id', entry.id);
       if (error) throw new Error(error.message);
 
-      // Remove any pending delete requests for this invoice
-      try {
-        await supabaseClient
-          .from('invoice_delete_requests')
-          .delete()
-          .eq('receivable_id', entry.id);
-      } catch { /* non-critical */ }
+      // Close any pending delete requests for this invoice rather than deleting
+      // them. The admin has effectively granted the request, and the row is the
+      // only record of who asked and why — discarding it would erase that, and
+      // leaving it pending would point the admin review queue at a receivable
+      // that no longer exists.
+      await closePendingRequestsForReceivable(entry.id, 'Admin (direct delete)');
 
       // The whole entry is recorded because the row is now gone: this audit record
       // is the only remaining evidence of the invoice's existence, its value, and
@@ -469,7 +497,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       setDeleteConfirmOpen(false);
       setEntryToDelete(null);
       setDeleteReason('');
-      toast({ title: "Invoice Deleted", description: "Invoice permanently deleted. The invoice number is now available for reuse." });
+      toast({ title: "Invoice Deleted", description: "Invoice permanently deleted. Its number is retired, not reissued — the gap in the sequence is intentional." });
     },
     onError: (error: any) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -512,7 +540,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           await addNotification({
             userId: adminRole.user_id,
             title: 'Invoice Delete Request',
-            message: `${userName} requested to delete Invoice #${entry.reference_number} (${entry.client_name || 'Unknown'}, ₹${entry.total_amount.toLocaleString('en-IN')}). Reason: ${reason || 'Not specified'}`,
+            message: `${userName} requested to delete Invoice #${getInvoiceLabel(entry)} (${entry.client_name || 'Unknown'}, ₹${entry.total_amount.toLocaleString('en-IN')}). Reason: ${reason || 'Not specified'}`,
             type: 'warning',
             relatedItemType: 'accounts',
             relatedItemId: entry.id,
@@ -1910,7 +1938,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <Button
               key={key}
               size="sm"
-              variant={periodFilter === key ? 'default' : 'outline-solid'}
+              variant={periodFilter === key ? 'default' : 'outline'}
               className={`text-xs h-8 ${periodFilter === key ? '' : 'text-muted-foreground'}`}
               onClick={() => setPeriodFilter(key)}
             >
@@ -1930,7 +1958,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               <Button
                 key={s}
                 size="sm"
-                variant={statusFilter === s ? 'default' : 'outline-solid'}
+                variant={statusFilter === s ? 'default' : 'outline'}
                 className={`text-xs h-8 ${statusFilter === s ? '' : 'text-muted-foreground'}`}
                 onClick={() => setStatusFilter(s)}
               >
@@ -2002,7 +2030,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                   const effective = getEffectiveStatus(entry);
                   // Extract service type from description (format: "ServiceType | Inv#: XXX")
                   const descParts = entry.description.split(' | ');
-                  const invoiceNum = entry.reference_number || (descParts.find(p => p.startsWith('Inv#:'))?.replace('Inv#: ', '') || entry.id.slice(0, 8));
+                  const invoiceNum = getInvoiceLabel(entry);
                   // Derive service names from line_items for a richer, accurate label.
                   // Strip accumulated shift-type duplicates (e.g. "(8-Hour) (8-Hour)") from stored labels.
                   const cleanShift = (s: string) =>
@@ -2114,7 +2142,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                             <DropdownMenuItem onClick={() => handleSendByMail(entry)}>
                               <Mail className="h-4 w-4 mr-2 text-purple-600" /> Send Reminder
                             </DropdownMenuItem>
-                            {((entry.status === 'received' || entry.status === 'partial') || ((entry.notes || '').match(/Total Paid:\s*₹/) || (entry.notes || '').match(/Amount:\s*₹/))) && (
+                            {/* A partial payment does NOT produce a 'partial' status — the row
+                                stays 'pending' and the payment is recorded in `notes`, so the
+                                notes markers are what reveal a partially paid invoice. A
+                                `status === 'partial'` test used to sit here and could never
+                                match the four values the column actually holds. */}
+                            {(entry.status === 'received' || (entry.notes || '').match(/Total Paid:\s*₹/) || (entry.notes || '').match(/Amount:\s*₹/)) && (
                               <DropdownMenuItem 
                                 className="text-amber-600 focus:text-white focus:bg-amber-600" 
                                 onClick={() => {
@@ -2171,7 +2204,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                   else if (currentPage >= totalPages - 2) { page = totalPages - 4 + i; }
                   else { page = currentPage - 2 + i; }
                   return (
-                    <Button key={page} size="sm" variant={currentPage === page ? 'default' : 'outline-solid'} className="h-8 w-8 p-0" onClick={() => setCurrentPage(page)}>
+                    <Button key={page} size="sm" variant={currentPage === page ? 'default' : 'outline'} className="h-8 w-8 p-0" onClick={() => setCurrentPage(page)}>
                       {page}
                     </Button>
                   );
@@ -2244,7 +2277,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               <div className="p-3 rounded-lg border bg-muted/30 space-y-1 text-sm">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Invoice No:</span>
-                  <span className="font-mono font-medium">{entryToDelete.reference_number}</span>
+                  <span className="font-mono font-medium">{getInvoiceLabel(entryToDelete)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Client:</span>
@@ -2267,9 +2300,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                 />
               </div>
 
-              {isAdmin && (
+              {isAdmin && entryToDelete.reference_number && (
                 <p className="text-xs text-blue-700 bg-blue-50 dark:bg-blue-950/20 p-2 rounded border border-blue-200 dark:border-blue-800">
-                  Invoice number <span className="font-mono font-semibold">{entryToDelete.reference_number}</span> will be recycled for reuse.
+                  Invoice number <span className="font-mono font-semibold">{entryToDelete.reference_number}</span> will be retired, not reissued — it will leave an intentional gap in the sequence.
                 </p>
               )}
             </div>

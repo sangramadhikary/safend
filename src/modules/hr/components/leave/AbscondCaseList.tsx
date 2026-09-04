@@ -204,7 +204,7 @@ export function AbscondCaseList({ cases, onClose }: AbscondCaseListProps) {
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label className="text-right">Status</Label>
                 <div className="col-span-3">
-                  <Badge variant={selectedCase?.status === 'PENDING' ? 'destructive' : 'outline-solid'}>
+                  <Badge variant={selectedCase?.status === 'PENDING' ? 'destructive' : 'outline'}>
                     {selectedCase?.status}
                   </Badge>
                 </div>

@@ -91,7 +91,7 @@ export function EventsPanel({ scope }: { scope: TrackingScope }) {
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          variant={typeFilter === null ? 'default' : 'outline-solid'}
+          variant={typeFilter === null ? 'default' : 'outline'}
           className="h-7 px-2.5 text-xs"
           onClick={() => setTypeFilter(null)}
         >
@@ -101,7 +101,7 @@ export function EventsPanel({ scope }: { scope: TrackingScope }) {
           <Button
             key={type}
             size="sm"
-            variant={typeFilter === type ? 'default' : 'outline-solid'}
+            variant={typeFilter === type ? 'default' : 'outline'}
             className="h-7 px-2.5 text-xs"
             onClick={() => setTypeFilter(type)}
           >

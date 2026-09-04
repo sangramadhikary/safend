@@ -23,7 +23,10 @@ const DATA = [
   { year: '2024', personnel: 2700 },
 ];
 
-function ChartTooltip({ active, payload, label }: TooltipContentProps<number, string>) {
+// Partial<>: recharts injects these props when it renders the tooltip content,
+// so the element is written as <ChartTooltip /> with none supplied. recharts 3
+// types every field as required, which rejects that call without Partial.
+function ChartTooltip({ active, payload, label }: Partial<TooltipContentProps<number, string>>) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg">

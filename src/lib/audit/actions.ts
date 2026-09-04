@@ -301,14 +301,26 @@ export const AUDIT_ACTIONS = {
     code: 'accounts.invoice.delete', label: 'Invoice Deleted',
     category: 'delete', severity: 'critical', module: 'Accounts', snapshot: true,
   },
-  // Cancelling voids a issued tax invoice and releases its number for reuse, so it
-  // is tracked separately from both an ordinary edit and a hard delete.
+  // Cancelling voids an issued tax invoice, so it is tracked separately from both
+  // an ordinary edit and a hard delete. The serial is NOT released for reuse —
+  // since the Rule 46(b) work in 20260802000000 the gap is left in place and the
+  // value is reversed by credit note instead.
   'accounts.invoice.cancel': {
     code: 'accounts.invoice.cancel', label: 'Invoice Cancelled',
     category: 'update', severity: 'critical', module: 'Accounts', snapshot: true,
   },
   'accounts.invoice.delete.request': {
     code: 'accounts.invoice.delete.request', label: 'Invoice Delete Requested',
+    category: 'update', severity: 'warning', module: 'Accounts', snapshot: false,
+  },
+  // Approving a request hard-deletes the receivable, so it carries the same
+  // weight as an admin deleting it directly.
+  'accounts.invoice.delete.approve': {
+    code: 'accounts.invoice.delete.approve', label: 'Invoice Delete Approved',
+    category: 'delete', severity: 'critical', module: 'Accounts', snapshot: true,
+  },
+  'accounts.invoice.delete.reject': {
+    code: 'accounts.invoice.delete.reject', label: 'Invoice Delete Rejected',
     category: 'update', severity: 'warning', module: 'Accounts', snapshot: false,
   },
   'accounts.payment.receive': {

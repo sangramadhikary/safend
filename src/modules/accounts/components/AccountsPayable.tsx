@@ -169,7 +169,7 @@ export function AccountsPayable({ filter }: AccountsPayableProps) {
   
   // Status badge component
   const StatusBadge = ({ status }: { status: string }) => {
-    let variant: "outline" | "secondary" | "destructive" | "default" = "outline-solid";
+    let variant: "outline" | "secondary" | "destructive" | "default" = "outline";
     
     switch(status) {
       case 'pending': variant = "outline"; break;

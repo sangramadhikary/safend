@@ -77,7 +77,11 @@ export async function POST(request: NextRequest) {
 
         // Find the existing user by email
         const { data: listData } = await supabaseAdmin.auth.admin.listUsers();
-        const existingUser = listData?.users?.find((u) => u.email === email);
+        // Type the element explicitly: with strictNullChecks off the compiler
+        // otherwise infers `u` as `never` here and rejects `.email`.
+        const existingUser = listData?.users?.find(
+          (u: import('@supabase/supabase-js').User) => u.email === email
+        );
 
         if (!existingUser) {
           return NextResponse.json({ error: authError.message }, { status: 400 });

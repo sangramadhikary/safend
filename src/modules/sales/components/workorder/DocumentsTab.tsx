@@ -594,7 +594,7 @@ export function DocumentsTab({
                               className="flex-1 font-mono text-xs h-9"
                             />
                             <Button type="button" size="sm"
-                              variant={uploadedUrl ? 'outline-solid' : 'secondary'}
+                              variant={uploadedUrl ? 'outline' : 'secondary'}
                               className="h-9 px-3 text-xs shrink-0"
                               onClick={() => handlePerPostUpload(idx)}>
                               <Upload className="h-3.5 w-3.5 mr-1.5" />

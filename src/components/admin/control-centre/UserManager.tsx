@@ -255,9 +255,9 @@ export function UserManager() {
                 </CardDescription>
               </div>
               <div className="flex gap-2">
-                <Button onClick={() => setSelectedFilter("all")} variant={selectedFilter === "all" ? "default" : "outline-solid"}>All</Button>
-                <Button onClick={() => setSelectedFilter("active")} variant={selectedFilter === "active" ? "default" : "outline-solid"}>Active</Button>
-                <Button onClick={() => setSelectedFilter("inactive")} variant={selectedFilter === "inactive" ? "default" : "outline-solid"}>Inactive</Button>
+                <Button onClick={() => setSelectedFilter("all")} variant={selectedFilter === "all" ? "default" : "outline"}>All</Button>
+                <Button onClick={() => setSelectedFilter("active")} variant={selectedFilter === "active" ? "default" : "outline"}>Active</Button>
+                <Button onClick={() => setSelectedFilter("inactive")} variant={selectedFilter === "inactive" ? "default" : "outline"}>Inactive</Button>
                 <Button variant="destructive" className="gap-2" onClick={handleAddUser}>
                   <UserPlus className="h-4 w-4" />
                   Add User

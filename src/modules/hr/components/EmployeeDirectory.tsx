@@ -1582,7 +1582,7 @@ export function EmployeeDirectory({ filter }: EmployeeDirectoryProps) {
                         key={status}
                         type="button"
                         size="sm"
-                        variant={selected ? 'default' : 'outline-solid'}
+                        variant={selected ? 'default' : 'outline'}
                         className={selected ? 'bg-safend-red hover:bg-safend-red/90' : ''}
                         onClick={() => toggleAdvancedStatus(status)}
                       >
@@ -1649,7 +1649,7 @@ export function EmployeeDirectory({ filter }: EmployeeDirectoryProps) {
                         key={range.label}
                         type="button"
                         size="sm"
-                        variant={selected ? 'default' : 'outline-solid'}
+                        variant={selected ? 'default' : 'outline'}
                         className={selected ? 'bg-safend-red hover:bg-safend-red/90' : ''}
                         onClick={() => setAdvFilters((current) => ({ ...current, ageFrom: range.from, ageTo: range.to }))}
                       >
@@ -1673,8 +1673,8 @@ export function EmployeeDirectory({ filter }: EmployeeDirectoryProps) {
 
             <section className="space-y-4 rounded-lg border p-4">
               <div><h3 className="text-sm font-semibold">Smart employee filters</h3><p className="text-xs text-muted-foreground">Birthday, today&apos;s deployment, profile health, medical and education.</p></div>
-              <div className="space-y-2"><Label className="flex items-center gap-2"><CalendarDays className="h-4 w-4 text-safend-red" />Birthday</Label><div className="flex flex-wrap gap-2">{[['', 'Any birthday'], ['today', 'Birthday today'], ['month', 'This month']].map(([value, label]) => <Button key={label} type="button" size="sm" variant={(advFilters.birthday || '') === value ? 'default' : 'outline-solid'} className={(advFilters.birthday || '') === value ? 'bg-safend-red' : ''} onClick={() => setAdvFilters(c => ({ ...c, birthday: value as AdvancedSearchFilters['birthday'] }))}>{label}</Button>)}</div></div>
-              <div className="space-y-2"><Label className="flex items-center gap-2"><Briefcase className="h-4 w-4 text-safend-red" />Today&apos;s post deployment</Label><div className="flex flex-wrap gap-2">{[['', 'Any'], ['posted', 'Posted today'], ['not_posted', 'Not posted today']].map(([value, label]) => <Button key={label} type="button" size="sm" variant={(advFilters.postedToday || '') === value ? 'default' : 'outline-solid'} onClick={() => setAdvFilters(c => ({ ...c, postedToday: value as AdvancedSearchFilters['postedToday'] }))}>{label}</Button>)}</div></div>
+              <div className="space-y-2"><Label className="flex items-center gap-2"><CalendarDays className="h-4 w-4 text-safend-red" />Birthday</Label><div className="flex flex-wrap gap-2">{[['', 'Any birthday'], ['today', 'Birthday today'], ['month', 'This month']].map(([value, label]) => <Button key={label} type="button" size="sm" variant={(advFilters.birthday || '') === value ? 'default' : 'outline'} className={(advFilters.birthday || '') === value ? 'bg-safend-red' : ''} onClick={() => setAdvFilters(c => ({ ...c, birthday: value as AdvancedSearchFilters['birthday'] }))}>{label}</Button>)}</div></div>
+              <div className="space-y-2"><Label className="flex items-center gap-2"><Briefcase className="h-4 w-4 text-safend-red" />Today&apos;s post deployment</Label><div className="flex flex-wrap gap-2">{[['', 'Any'], ['posted', 'Posted today'], ['not_posted', 'Not posted today']].map(([value, label]) => <Button key={label} type="button" size="sm" variant={(advFilters.postedToday || '') === value ? 'default' : 'outline'} onClick={() => setAdvFilters(c => ({ ...c, postedToday: value as AdvancedSearchFilters['postedToday'] }))}>{label}</Button>)}</div></div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5"><Label>Profile</Label><Select value={advFilters.profile || 'any'} onValueChange={v => setAdvFilters(c => ({ ...c, profile: v === 'any' ? '' : v as 'complete' | 'incomplete' }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="any">Any profile</SelectItem><SelectItem value="complete">Complete profile</SelectItem><SelectItem value="incomplete">Incomplete profile</SelectItem></SelectContent></Select></div>
                 <div className="space-y-1.5"><Label>Medical</Label><Select value={advFilters.medical || 'any'} onValueChange={v => setAdvFilters(c => ({ ...c, medical: v === 'any' ? '' : v as 'declared' | 'none' }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="any">Any medical status</SelectItem><SelectItem value="declared">Condition declared</SelectItem><SelectItem value="none">No condition declared</SelectItem></SelectContent></Select></div>

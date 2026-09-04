@@ -21,7 +21,8 @@ interface AreaChartProps {
     color: string;
     stackId?: string;
   }[];
-  height?: number | string;
+  // recharts wants number | `${number}%`, not a free string; callers pass pixels.
+  height?: number;
   showGrid?: boolean;
   showLegend?: boolean;
   fillOpacity?: number;

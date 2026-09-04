@@ -188,7 +188,7 @@ export function BranchManager({ searchTerm }: BranchManagerProps) {
                     <TableCell className="font-medium">{branch.name}</TableCell>
                     <TableCell className="text-muted-foreground">{branch.code}</TableCell>
                     <TableCell>
-                      <Badge variant={branch.type === 'main' ? 'default' : 'outline-solid'} className="gap-1">
+                      <Badge variant={branch.type === 'main' ? 'default' : 'outline'} className="gap-1">
                         {branch.type === 'main' ? <Crown className="h-3 w-3" /> : <GitBranch className="h-3 w-3" />}
                         {branch.type === 'main' ? 'Main' : 'Sub'}
                       </Badge>

@@ -150,7 +150,7 @@ export function LeadsTable({
   const getStatusBadge = useCallback((status: string) => {
     const variants: Record<string, any> = {
       "New Lead": "default", "Qualified Lead": "secondary",
-      "Opportunity": "outline-solid", "Client": "default", "Inactive": "secondary"
+      "Opportunity": "outline", "Client": "default", "Inactive": "secondary"
     };
     return <Badge variant={variants[status] || "default"}>{status}</Badge>;
   }, []);

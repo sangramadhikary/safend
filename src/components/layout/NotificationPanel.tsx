@@ -22,8 +22,16 @@ import {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   sendDeletionApprovalNotification,
+  addNotification,
   UserNotification,
 } from "@/services/supabase/NotificationService";
+import {
+  subscribeToInvoiceDeleteRequests,
+  approveInvoiceDeleteRequest,
+  rejectInvoiceDeleteRequest,
+  invoiceRequestLabel,
+  InvoiceDeleteRequest,
+} from "@/services/supabase/InvoiceDeleteRequestService";
 import {
   subscribeToPendingTasks,
   PendingTask,
@@ -41,7 +49,11 @@ type Notification = {
   id: string;
   title: string;
   message: string;
-  time: string;
+  /**
+   * Kept as a Date, not a pre-formatted string. Formatting at subscribe time
+   * froze the relative label, so an open panel showed "Just now" indefinitely.
+   */
+  createdAt: Date;
   read: boolean;
   type?: "info" | "success" | "warning" | "error";
 };
@@ -61,6 +73,9 @@ export function NotificationPanel() {
   const [deletionRequests, setDeletionRequests] = useState<DeletionRequest[]>(
     []
   );
+  const [invoiceDeleteRequests, setInvoiceDeleteRequests] = useState<
+    InvoiceDeleteRequest[]
+  >([]);
   const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
   const [processingId, setProcessingId] = useState<string | null>(null);
 
@@ -91,10 +106,30 @@ export function NotificationPanel() {
 
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
+  /**
+   * Re-render clock for relative timestamps.
+   *
+   * Relative labels are computed during render, so they need something to
+   * invalidate them; without this a panel left open keeps showing the label that
+   * was correct when the data arrived.
+   */
+  // Seeded at 0 rather than Date.now(): reading the clock during render makes the
+  // value unstable across a prerender, which Next 16 blocks. The real time is set
+  // in the effect below, which only runs on the client.
+  const [nowTick, setNowTick] = useState(0);
+
+  useEffect(() => {
+    setNowTick(Date.now());
+    const interval = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Format time ago helper
-  const formatTimeAgo = (date: Date) => {
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
+  const formatTimeAgo = (date: Date, now: number = nowTick) => {
+    // Before the effect runs, nowTick is 0. Fall back to the timestamp itself so
+    // the first paint shows "Just now" rather than a date decades in the future.
+    const effectiveNow = now > 0 ? now : date.getTime();
+    const diffMs = effectiveNow - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
@@ -119,7 +154,7 @@ export function NotificationPanel() {
             id: n.id || "",
             title: n.title,
             message: n.message,
-            time: formatTimeAgo(n.createdAt as Date),
+            createdAt: n.createdAt as Date,
             read: n.read,
             type: n.type,
           }));
@@ -136,6 +171,18 @@ export function NotificationPanel() {
 
     const unsubscribe = subscribeToDeletionRequests((requests) => {
       setDeletionRequests(requests);
+    });
+    return () => unsubscribe();
+  }, [isAdmin]);
+
+  // Subscribe to invoice delete requests (only for admin).
+  // Separate queue from `deletion_requests` above: different table, different
+  // approval side effect (deleting a receivable rather than a sales record).
+  useEffect(() => {
+    if (!isAdmin) return;
+
+    const unsubscribe = subscribeToInvoiceDeleteRequests((requests) => {
+      setInvoiceDeleteRequests(requests);
     });
     return () => unsubscribe();
   }, [isAdmin]);
@@ -167,9 +214,14 @@ export function NotificationPanel() {
   }, [userId]);
 
   const unreadCount = notifications.filter((n) => !n.read).length;
-  const pendingDeletionCount = isAdmin
-    ? deletionRequests.filter((r) => r.status === "pending").length
-    : 0;
+  const pendingSalesDeletions = isAdmin
+    ? deletionRequests.filter((r) => r.status === "pending")
+    : [];
+  const pendingInvoiceDeletions = isAdmin
+    ? invoiceDeleteRequests.filter((r) => r.status === "pending")
+    : [];
+  const pendingDeletionCount =
+    pendingSalesDeletions.length + pendingInvoiceDeletions.length;
   const pendingTasksCount = pendingTasks.length;
   const totalBadgeCount = unreadCount + pendingDeletionCount + pendingTasksCount;
 
@@ -342,6 +394,88 @@ export function NotificationPanel() {
     setProcessingId(null);
   };
 
+  // Handle approve invoice deletion — deletes the receivable, then closes the request
+  const handleApproveInvoiceDeletion = async (request: InvoiceDeleteRequest) => {
+    if (!request.id) return;
+
+    setProcessingId(request.id);
+
+    const label = invoiceRequestLabel(request);
+    const result = await approveInvoiceDeleteRequest(request, userName || "Admin");
+
+    if (result.success) {
+      // Drop it locally rather than waiting for the realtime event, so the queue
+      // still clears if this table is not in the realtime publication.
+      setInvoiceDeleteRequests((prev) =>
+        prev.filter((r) => r.receivableId !== request.receivableId)
+      );
+
+      // `requestedBy` is already an auth user id, so it can be notified directly
+      // rather than resolved from a display name.
+      await addNotification({
+        userId: request.requestedBy,
+        title: "Deletion Approved",
+        message: `Your request to delete Invoice #${label} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")}) has been approved. The invoice has been deleted.`,
+        type: "success",
+        relatedItemType: "accounts",
+        relatedItemId: request.receivableId,
+      });
+
+      toast({
+        title: "Deletion Approved",
+        description: `Invoice #${label} has been deleted.`,
+      });
+    } else {
+      toast({
+        title: "Error",
+        description: result.error || "Failed to delete the invoice",
+        variant: "destructive",
+      });
+    }
+
+    setProcessingId(null);
+  };
+
+  // Handle reject invoice deletion — the invoice is left untouched
+  const handleRejectInvoiceDeletion = async (request: InvoiceDeleteRequest) => {
+    if (!request.id) return;
+
+    setProcessingId(request.id);
+
+    const label = invoiceRequestLabel(request);
+    const result = await rejectInvoiceDeleteRequest(request, userName || "Admin");
+
+    if (result.success) {
+      // See the approve handler: clear locally so the queue updates without
+      // depending on a realtime event arriving.
+      setInvoiceDeleteRequests((prev) =>
+        prev.filter((r) => r.id !== request.id)
+      );
+
+      await addNotification({
+        userId: request.requestedBy,
+        title: "Deletion Rejected",
+        message: `Your request to delete Invoice #${label} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")}) has been rejected. The invoice remains active.`,
+        type: "error",
+        relatedItemType: "accounts",
+        relatedItemId: request.receivableId,
+      });
+
+      toast({
+        title: "Request Rejected",
+        description: `The delete request for Invoice #${label} has been rejected.`,
+      });
+    } else {
+      toast({
+        title: "Error",
+        description: result.error || "Failed to reject request",
+        variant: "destructive",
+      });
+    }
+
+    setProcessingId(null);
+  };
+
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -427,7 +561,7 @@ export function NotificationPanel() {
                           {notification.message}
                         </p>
                         <p className="text-[11px] text-muted-foreground/70 mt-1.5">
-                          {notification.time}
+                          {formatTimeAgo(notification.createdAt)}
                         </p>
                       </div>
                       {!notification.read && (
@@ -548,7 +682,7 @@ export function NotificationPanel() {
                 )}
               </div>
               <div className="max-h-[360px] overflow-y-auto">
-                {deletionRequests.filter(r => r.status === 'pending').length === 0 ? (
+                {pendingDeletionCount === 0 ? (
                   <div className="flex flex-col items-center justify-center py-10 px-6 text-center">
                     <Trash2 className="h-8 w-8 text-gray-300 mb-2" />
                     <p className="text-sm text-muted-foreground">
@@ -556,9 +690,83 @@ export function NotificationPanel() {
                     </p>
                   </div>
                 ) : (
-                  deletionRequests
-                    .filter(r => r.status === 'pending')
-                    .map((request) => (
+                  <>
+                    {/* Invoice delete requests (Accounts → receivables).
+                        Approving hard-deletes a tax invoice, so it is confirmed
+                        before it runs and labelled distinctly from sales items. */}
+                    {pendingInvoiceDeletions.map((request) => (
+                      <div
+                        key={request.id}
+                        className="border-b last:border-0 px-4 py-3 bg-red-50/50 dark:bg-red-900/10"
+                      >
+                        <div className="space-y-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-amber-100 text-amber-800 border-amber-200 shrink-0">
+                                Invoice
+                              </Badge>
+                              <span className="text-[10px] font-mono text-gray-500 truncate">
+                                #{invoiceRequestLabel(request)}
+                              </span>
+                            </div>
+                            <h5 className="font-medium text-sm mt-1 truncate">
+                              {request.clientName || "Unknown client"}
+                            </h5>
+                            <p className="text-xs text-muted-foreground">
+                              ₹{request.amount.toLocaleString("en-IN")}
+                            </p>
+                          </div>
+
+                          <div className="bg-white dark:bg-gray-800 rounded p-2 border">
+                            <p className="text-xs text-gray-600 dark:text-gray-300 line-clamp-2">
+                              <span className="font-medium">Reason:</span> {request.reason}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div className="text-[11px] text-muted-foreground truncate mr-2">
+                              <span>By: {request.requestedByName || request.requestedBy}</span>
+                              <span className="mx-1">•</span>
+                              <span>{formatTimeAgo(request.requestedAt as Date)}</span>
+                            </div>
+
+                            <div className="flex gap-1 shrink-0">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 text-green-600 hover:text-green-700 hover:bg-green-50"
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      `Permanently delete Invoice #${invoiceRequestLabel(request)} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")})? This cannot be undone.`
+                                    )
+                                  ) {
+                                    handleApproveInvoiceDeletion(request);
+                                  }
+                                }}
+                                disabled={processingId === request.id}
+                              >
+                                <CheckCircle className="h-3.5 w-3.5 mr-1" />
+                                Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                onClick={() => handleRejectInvoiceDeletion(request)}
+                                disabled={processingId === request.id}
+                              >
+                                <XCircle className="h-3.5 w-3.5 mr-1" />
+                                Reject
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Sales pipeline deletion requests (leads, quotations, agreements, work orders) */}
+                    {pendingSalesDeletions.map((request) => (
                       <div
                         key={request.id}
                         className="border-b last:border-0 px-4 py-3 bg-red-50/50 dark:bg-red-900/10"
@@ -617,7 +825,8 @@ export function NotificationPanel() {
                           </div>
                         </div>
                       </div>
-                    ))
+                    ))}
+                  </>
                 )}
               </div>
             </TabsContent>

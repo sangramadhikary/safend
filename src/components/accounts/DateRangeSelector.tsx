@@ -153,7 +153,7 @@ export function DateRangeSelector({
                 mode="single"
                 selected={range.startDate}
                 onSelect={handleStartDateChange}
-                initialFocus
+                autoFocus
                 className="p-3 pointer-events-auto"
               />
             </PopoverContent>
@@ -180,7 +180,7 @@ export function DateRangeSelector({
                 mode="single"
                 selected={range.endDate}
                 onSelect={handleEndDateChange}
-                initialFocus
+                autoFocus
                 className="p-3 pointer-events-auto"
               />
             </PopoverContent>

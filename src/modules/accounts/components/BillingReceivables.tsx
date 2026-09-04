@@ -108,7 +108,7 @@ export function BillingReceivables({ filter }: BillingReceivablesProps) {
   
   // Status badge component
   const StatusBadge = ({ status }: { status: string }) => {
-    let variant: "outline" | "secondary" | "destructive" | "default" = "outline-solid";
+    let variant: "outline" | "secondary" | "destructive" | "default" = "outline";
     
     switch(status) {
       case 'draft': variant = "outline"; break;
