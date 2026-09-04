@@ -19,6 +19,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
+import { fetchClientOutstandingInvoices, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY } from '@/lib/tax/gst';
 
 interface GenerateInvoiceDialogProps {
@@ -128,7 +129,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   const [invoiceNumInfo, setInvoiceNumInfo] = useState<{ isReused: boolean; reusedFrom?: string } | null>(null);
   const [placeOfSupply, setPlaceOfSupply] = useState(DEFAULT_PLACE_OF_SUPPLY);
   // Previous outstanding dues carried forward from this client's unpaid invoices.
-  const [outstandingInvoices, setOutstandingInvoices] = useState<{ ref: string; amount: number; due_date: string | null; status: string }[]>([]);
+  const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
   const [previousDue, setPreviousDue] = useState(0);
 
   // Auto-generate invoice number when moving to review step
@@ -211,51 +212,24 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   // On reaching the review step, look up this client's unpaid invoices and
   // carry their outstanding balance forward automatically, so an overdue
   // client's previous dues are added to the new invoice's payment advice.
-  const reviewWorkOrderId = includedPosts[0]?.work_order_id ?? null;
+  // Matching is by normalised client name (see fetchClientOutstandingInvoices)
+  // so invoices across multiple work orders — or with no work order — are all
+  // captured, not just those tied to the current work order.
   useEffect(() => {
     if (step !== 'review' || !selectedClientName) return;
     let cancelled = false;
 
     (async () => {
-      // Match by work order (preferred) OR by client name for invoices with no WO.
-      const matchFilter = reviewWorkOrderId
-        ? `work_order_id.eq.${reviewWorkOrderId},and(work_order_id.is.null,client_name.eq.${selectedClientName})`
-        : `client_name.eq.${selectedClientName}`;
-
       try {
-        const { data, error } = await supabaseClient
-          .from('receivables')
-          .select('reference_number, total_amount, due_date, status, notes')
-          .eq('category', 'Invoices')
-          // All unpaid lifecycle states carry an outstanding balance forward.
-          .in('status', ['created', 'issued', 'open', 'pending', 'overdue'])
-          .or(matchFilter)
-          .order('due_date', { ascending: true });
-
-        if (cancelled || error || !data) return;
-
-        const unpaid = data.map((r: any) => {
-          // Net out any partial payment recorded in notes ("Balance: ₹Y").
-          const balanceMatch = (r.notes || '').match(/Balance:\s*₹?([\d,]+(?:\.\d+)?)/);
-          const effectiveAmount = balanceMatch
-            ? parseFloat(balanceMatch[1].replace(/,/g, ''))
-            : r.total_amount;
-          const isPastDue = r.due_date && new Date(r.due_date) < new Date();
-          return {
-            ref: r.reference_number || '—',
-            amount: effectiveAmount,
-            due_date: r.due_date,
-            status: isPastDue ? 'overdue' : 'open',
-          };
-        }).filter((r) => r.amount > 0);
-
+        const unpaid = await fetchClientOutstandingInvoices(supabaseClient, selectedClientName);
+        if (cancelled) return;
         setOutstandingInvoices(unpaid);
-        setPreviousDue(Math.round(unpaid.reduce((s, r) => s + r.amount, 0)));
+        setPreviousDue(sumOutstanding(unpaid));
       } catch { /* non-critical — invoice can still be generated without carry-forward */ }
     })();
 
     return () => { cancelled = true; };
-  }, [step, selectedClientName, reviewWorkOrderId]);
+  }, [step, selectedClientName]);
 
   // Fetch duty data across selected posts for the client
   const handleFetchDutyData = async () => {
@@ -795,7 +769,14 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                             {inv.status}
                           </span>
                         </td>
-                        <td className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">₹{inv.amount.toLocaleString('en-IN')}</td>
+                        <td className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">
+                          ₹{inv.amount.toLocaleString('en-IN')}
+                          {inv.previousBalance > 0 && (
+                            <div className="text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                              ₹{inv.ownAmount.toLocaleString('en-IN')} + ₹{inv.previousBalance.toLocaleString('en-IN')} prev
+                            </div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

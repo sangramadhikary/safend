@@ -16,6 +16,7 @@ import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
+import { fetchClientOutstandingInvoices, type OutstandingInvoice } from '@/lib/invoice/outstanding';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY } from '@/lib/tax/gst';
 
 // ── SAC codes (GST classification for security services) ─────────────────────
@@ -156,7 +157,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const [tdsEnabled, setTdsEnabled] = useState(false);
   const [tdsRate,    setTdsRate]    = useState('2');
   const [previousDue, setPreviousDue] = useState('');
-  const [outstandingInvoices, setOutstandingInvoices] = useState<{ ref: string; amount: number; due_date: string | null; status: string }[]>([]);
+  const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
 
   // ── Service lines ─────────────────────────────────────────────────────────
   const [lines, setLines] = useState<ServiceLine[]>([newLine()]);
@@ -200,7 +201,14 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       setGstPercent(gstMatch ? gstMatch[1] : '18');
       setTdsEnabled(!!tdsMatch);
       setTdsRate(tdsMatch ? tdsMatch[1] : '2');
-      setPreviousDue(prevMatch ? prevMatch[1].replace(/,/g, '') : '');
+      // Prefer the stored previous_balance column; fall back to the notes regex
+      // for legacy invoices saved before the column was populated.
+      const storedPrevBalance = editEntry.previous_balance != null ? Number(editEntry.previous_balance) : null;
+      setPreviousDue(
+        storedPrevBalance && storedPrevBalance > 0
+          ? String(storedPrevBalance)
+          : (prevMatch ? prevMatch[1].replace(/,/g, '') : '')
+      );
       // Restore Place of Supply from proper DB column first, then notes fallback
       const posMatch = notes.match(/Place of Supply:\s*([^|]+)/);
       setPlaceOfSupply(
@@ -277,6 +285,28 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         setLines([newLine()]);
       }
     }
+  }, [open, editEntry]);
+
+  // When EDITING an existing invoice, surface the client's other outstanding
+  // invoices so the previous due can be reviewed/added. Unlike the new-invoice
+  // flow this does NOT auto-fill the amount (the invoice may already carry a
+  // previous balance, and re-adding could double up) — it only populates the
+  // suggestion panel; the user opts in via the "Include previous balance"
+  // button. The invoice being edited is excluded from its own detection.
+  useEffect(() => {
+    if (!open || !editEntry || !editEntry.client_name) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const unpaid = await fetchClientOutstandingInvoices(
+          supabaseClient,
+          editEntry.client_name,
+          editEntry.reference_number || null,
+        );
+        if (!cancelled) setOutstandingInvoices(unpaid);
+      } catch { /* non-critical — user can enter the amount manually */ }
+    })();
+    return () => { cancelled = true; };
   }, [open, editEntry]);
 
   // Reset on close
@@ -513,44 +543,21 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
     setOutstandingInvoices([]);
     setPreviousDue('');
     try {
-      const { data, error } = await supabaseClient
-        .from('receivables')
-        .select('reference_number, total_amount, due_date, status, notes')
-        .eq('category', 'Invoices')
-        // All unpaid lifecycle states carry an outstanding balance forward.
-        .in('status', ['created', 'issued', 'open', 'pending', 'overdue'])
-        .or(`work_order_id.eq.${woId},and(work_order_id.is.null,client_name.eq.${wo.clientName})`)
-        .order('due_date', { ascending: true });
+      const unpaid = await fetchClientOutstandingInvoices(
+        supabaseClient,
+        wo.clientName,
+        editEntry?.reference_number || null,
+      );
 
-      if (!error && data && data.length > 0) {
-        // Subtract any partial payments recorded in notes ("Amount: ₹X | Balance: ₹Y")
-        const unpaid = data.map((r: any) => {
-          const balanceMatch = (r.notes || '').match(/Balance:\s*₹?([\d,]+(?:\.\d+)?)/);
-          const effectiveAmount = balanceMatch
-            ? parseFloat(balanceMatch[1].replace(/,/g, ''))
-            : r.total_amount;
-          // Derive a display status: past the due date reads as "overdue",
-          // otherwise "open" (stored lifecycle values like created/issued are
-          // internal and not meaningful in this outstanding-balance panel).
-          const isPastDue = r.due_date && new Date(r.due_date) < new Date();
-          return {
-            ref: r.reference_number || '—',
-            amount: effectiveAmount,
-            due_date: r.due_date,
-            status: isPastDue ? 'overdue' : 'open',
-          };
-        }).filter(r => r.amount > 0);
-
-        if (unpaid.length > 0) {
-          setOutstandingInvoices(unpaid);
-          // Auto-carry the outstanding balance into the new invoice so an
-          // overdue client's dues are added by default. The user can still
-          // override the amount in the Previous Due field. We only auto-fill
-          // when raising a fresh invoice (not editing) and the field is empty.
-          if (!editEntry) {
-            const outstandingTotal = Math.round(unpaid.reduce((s, r) => s + r.amount, 0));
-            if (outstandingTotal > 0) setPreviousDue(String(outstandingTotal));
-          }
+      if (unpaid.length > 0) {
+        setOutstandingInvoices(unpaid);
+        // Auto-carry the outstanding balance into the new invoice so an
+        // overdue client's dues are added by default. The user can still
+        // override the amount in the Previous Due field. We only auto-fill
+        // when raising a fresh invoice (not editing) and the field is empty.
+        if (!editEntry) {
+          const outstandingTotal = Math.round(unpaid.reduce((s, r) => s + r.amount, 0));
+          if (outstandingTotal > 0) setPreviousDue(String(outstandingTotal));
         }
       }
     } catch { /* non-critical — user can enter manually */ }
@@ -1291,7 +1298,14 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                               {inv.status}
                             </span>
                           </td>
-                          <td className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">₹{inv.amount.toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-1 text-right font-semibold text-amber-900 dark:text-amber-100">
+                            ₹{inv.amount.toLocaleString('en-IN')}
+                            {inv.previousBalance > 0 && (
+                              <div className="text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                                ₹{inv.ownAmount.toLocaleString('en-IN')} + ₹{inv.previousBalance.toLocaleString('en-IN')} prev
+                              </div>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
