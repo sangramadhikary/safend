@@ -39,6 +39,7 @@ import { isValidGSTIN } from '@/lib/security/lookups';
 import { isEInvoiceRequired } from '@/lib/invoice/calculations';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, type GstType } from '@/lib/tax/gst';
 import { auditActions, logAuditEvent, logChange } from '@/utils/auditLog';
+import { formatINRShort } from '@/lib/format';
 
 interface ReceivablesProps {
   filter: string;
@@ -105,8 +106,11 @@ const RECEIVABLE_CATEGORIES = [
 // Payroll receivable sub-types
 const PAYROLL_RECEIVABLE_TYPES = ['Loan Recovery', 'Uniform Charges', 'Mess Charges', 'Penalty Deduction', 'EPF', 'ESIC', 'Insurance'];
 
-// Categories without Add button (auto-generated / live views)
-const NO_ADD_CATEGORIES = ['Payroll Receivables'];
+// Categories without an Add button.
+// - Payroll Receivables: auto-generated / live view.
+// - All Receivables: an aggregate view across every category; there is no single
+//   "entry" type to create here, so entries are added from their specific tab.
+const NO_ADD_CATEGORIES = ['Payroll Receivables', 'All Receivables'];
 
 /**
  * Resolves a human-readable invoice label for a receivable row.
@@ -1334,7 +1338,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
 
   const getAddButtonLabel = () => {
     switch (filter) {
-      case 'Invoices': return 'Raise Invoice';
+      case 'Invoices': return 'New Invoice';
       case 'Invoice Adjustments': return 'New Adjustment';
       case 'Event Letters': return 'Create Event Letter';
       case 'Taxes (ITC/TDS)': return 'Record Tax Receivable';
@@ -1493,16 +1497,23 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   useEffect(() => { setCurrentPage(1); }, [searchTerm, statusFilter, periodFilter, filter]);
 
   // Calculate summary totals accounting for partial payments
-  const { totalPending, totalOverdue, totalReceived } = useMemo(() => {
+  const {
+    totalPending, totalOverdue, totalReceived,
+    overdueCount, unpaidCount, receivedCount, collectionRate,
+  } = useMemo(() => {
     let pending = 0;
     let overdue = 0;
     let received = 0;
+    let oCount = 0;   // overdue invoices
+    let uCount = 0;   // unpaid (not fully received / cancelled) invoices
+    let rCount = 0;   // fully received invoices
 
     receivables.forEach(r => {
       const effective = getEffectiveStatus(r);
       if (r.status === 'received') {
         received += r.total_amount;
-      } else {
+        rCount += 1;
+      } else if (effective !== 'cancelled') {
         // Check if partial payment was recorded
         const amountMatch = (r.notes || '').match(/Total Paid:\s*₹([\d,]+(?:\.\d+)?)/) || 
                             (r.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
@@ -1513,13 +1524,22 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         } else {
           pending += r.total_amount;
         }
+        uCount += 1;
         if (effective === 'overdue') {
           overdue += r.total_amount - partialReceived;
+          oCount += 1;
         }
       }
     });
 
-    return { totalPending: pending, totalOverdue: overdue, totalReceived: received };
+    // Collected as a share of everything billed (received + still owed).
+    const billed = received + pending;
+    const rate = billed > 0 ? Math.round((received / billed) * 100) : 0;
+
+    return {
+      totalPending: pending, totalOverdue: overdue, totalReceived: received,
+      overdueCount: oCount, unpaidCount: uCount, receivedCount: rCount, collectionRate: rate,
+    };
   }, [receivables]);
 
   // Bulk selection helpers
@@ -1906,10 +1926,10 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   };
 
   return (
-    // Fill the module's scroll region (h-[calc(100vh-250px)]) minus this panel's
+    // Fill the module's scroll region (h-[calc(100vh-200px)]) minus this panel's
     // p-6 padding (~3rem), so the header/cards/filters stay fixed and only the
     // table rows scroll — the page itself does not scroll.
-    <div className="flex flex-col h-[calc(100vh-298px)] min-h-0 gap-3">
+    <div className="flex flex-col h-[calc(100vh-248px)] min-h-0 gap-3">
       {/* Header with title + actions */}
       <div className="flex justify-between items-center shrink-0">
         <div>
@@ -1950,31 +1970,42 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       {filter !== 'Payroll Receivables' && (<>
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 shrink-0">
+        {/* Outstanding receivable — money still owed by clients */}
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('all')}>
           <CardContent className="p-3">
-            <p className="text-[11px] text-muted-foreground">Total Outstanding</p>
-            <p className="text-lg font-bold text-amber-600 leading-tight">₹{totalPending.toLocaleString('en-IN')}</p>
-            {totalOverdue > 0 && <p className="text-[11px] text-red-600">₹{totalOverdue.toLocaleString('en-IN')} overdue</p>}
+            <p className="text-[11px] text-muted-foreground">Outstanding Receivable</p>
+            <p className="text-lg font-bold text-amber-600 leading-tight" title={`₹${totalPending.toLocaleString('en-IN')}`}>{formatINRShort(totalPending)}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {unpaidCount} unpaid invoice{unpaidCount !== 1 ? 's' : ''}
+              {totalOverdue > 0 && <span className="text-red-600"> · {formatINRShort(totalOverdue)} overdue</span>}
+            </p>
           </CardContent>
         </Card>
+        {/* Overdue — past due date and unpaid */}
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('overdue')}>
           <CardContent className="p-3">
-            <p className="text-[11px] text-muted-foreground">Overdue</p>
-            <p className="text-lg font-bold text-red-600 leading-tight">₹{totalOverdue.toLocaleString('en-IN')}</p>
-            <p className="text-[11px] text-muted-foreground">{receivables.filter(r => getEffectiveStatus(r) === 'overdue').length} invoices</p>
+            <p className="text-[11px] text-muted-foreground">Overdue (Past Due)</p>
+            <p className="text-lg font-bold text-red-600 leading-tight" title={`₹${totalOverdue.toLocaleString('en-IN')}`}>{formatINRShort(totalOverdue)}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {overdueCount} of {unpaidCount} unpaid
+              {unpaidCount > 0 && <span> · {Math.round((overdueCount / unpaidCount) * 100)}%</span>}
+            </p>
           </CardContent>
         </Card>
+        {/* Collected — payments received against invoices */}
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('received')}>
           <CardContent className="p-3">
-            <p className="text-[11px] text-muted-foreground">Total Received</p>
-            <p className="text-lg font-bold text-green-600 leading-tight">₹{totalReceived.toLocaleString('en-IN')}</p>
+            <p className="text-[11px] text-muted-foreground">Collected (Received)</p>
+            <p className="text-lg font-bold text-green-600 leading-tight" title={`₹${totalReceived.toLocaleString('en-IN')}`}>{formatINRShort(totalReceived)}</p>
+            <p className="text-[11px] text-muted-foreground">{collectionRate}% collection rate</p>
           </CardContent>
         </Card>
+        {/* Total billed value + invoice counts */}
         <Card>
           <CardContent className="p-3">
-            <p className="text-[11px] text-muted-foreground">Entries</p>
-            <p className="text-lg font-bold leading-tight">{receivables.length}</p>
-            <p className="text-[11px] text-muted-foreground">Showing {filteredReceivables.length} filtered</p>
+            <p className="text-[11px] text-muted-foreground">Total Invoiced</p>
+            <p className="text-lg font-bold leading-tight" title={`₹${(totalReceived + totalPending).toLocaleString('en-IN')}`}>{formatINRShort(totalReceived + totalPending)}</p>
+            <p className="text-[11px] text-muted-foreground">{receivables.length} invoices · {filteredReceivables.length} shown</p>
           </CardContent>
         </Card>
       </div>

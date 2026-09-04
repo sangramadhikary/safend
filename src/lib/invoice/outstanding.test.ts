@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { fetchWorkOrderOutstandingInvoices, sumOutstanding } from './outstanding';
+import { fetchWorkOrderOutstandingInvoices, computeOutstandingFromRows, sumOutstanding } from './outstanding';
 
 /**
  * Builds a mock Supabase query surface that records the filters applied and
@@ -20,6 +20,42 @@ function mockClient(rows: any[]) {
 }
 
 const WO = 'wo-123';
+
+describe('computeOutstandingFromRows (batch / dropdown due totals)', () => {
+  it('does not double-count a rolled-forward chain (WO-2026-6689 scenario)', () => {
+    // Older invoice fully rolled into a newer one via breakdown + Outstanding note.
+    const rows = [
+      { reference_number: '26270008', status: 'overdue', total_amount: 52500, previous_balance: 34500,
+        previous_balance_breakdown: null,
+        notes: 'GST: 18% | Previous Due: ₹34,500', due_date: '2026-08-12' },
+      { reference_number: '26270038', status: 'issued', total_amount: 52500, previous_balance: 87000,
+        previous_balance_breakdown: [{ referenceNumber: '26270008', amount: 87000 }],
+        notes: 'GST: 18% | Previous Due: ₹87,000 | Outstanding: 26270008 (₹87,000)', due_date: '2026-09-12' },
+    ];
+
+    const result = computeOutstandingFromRows(rows);
+
+    // Only the newer invoice counts: 52,500 + 87,000 = 1,39,500 (not 2,26,500).
+    expect(result.map((r) => r.ref)).toEqual(['26270038']);
+    expect(sumOutstanding(result)).toBe(139500);
+  });
+
+  it('nets a partial-payment balance without re-adding previous_balance (WO-2026-2512)', () => {
+    const rows = [
+      { reference_number: '26270004', status: 'pending', total_amount: 37760, previous_balance: 0,
+        notes: 'Balance: ₹6,430 | Total Paid: ₹34,000', due_date: '2026-09-10' },
+      { reference_number: '26270040', status: 'created', total_amount: 37760, previous_balance: 6430,
+        previous_balance_breakdown: [{ referenceNumber: '26270004', amount: 6430 }],
+        notes: 'Outstanding: 26270004 (₹6,430)', due_date: '2026-09-10' },
+    ];
+
+    const result = computeOutstandingFromRows(rows);
+
+    // 26270004 rolled forward -> dropped; only 26270040 = 37,760 + 6,430.
+    expect(result.map((r) => r.ref)).toEqual(['26270040']);
+    expect(sumOutstanding(result)).toBe(44190);
+  });
+});
 
 describe('fetchWorkOrderOutstandingInvoices', () => {
   it('scopes strictly to the work order and returns [] when no work order given', async () => {

@@ -11,13 +11,14 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { ArrowLeft, Loader2, Info, Plus, Trash2, EyeOff, Eye } from 'lucide-react';
+import { ArrowLeft, Loader2, Info, Plus, Trash2, EyeOff, Eye, Search } from 'lucide-react';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
-import { fetchWorkOrderOutstandingInvoices, type OutstandingInvoice } from '@/lib/invoice/outstanding';
-import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY } from '@/lib/tax/gst';
+import { fetchWorkOrderOutstandingInvoices, computeOutstandingFromRows, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
+import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, extractStateCode } from '@/lib/tax/gst';
+import { formatINRShort } from '@/lib/format';
 
 // ── SAC codes (GST classification for security services) ─────────────────────
 // Security guard & allied services → 998525 (Private security services)
@@ -123,8 +124,9 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const queryClient = useQueryClient();
 
   // ── Customer mode ─────────────────────────────────────────────────────────
-  const [customerMode, setCustomerMode] = useState<'new' | 'existing'>('new');
+  const [customerMode, setCustomerMode] = useState<'new' | 'existing'>('existing');
   const [selectedWorkOrderId, setSelectedWorkOrderId] = useState('');
+  const [workOrderSearch, setWorkOrderSearch] = useState('');
 
   // ── Client & invoice meta ──────────────────────────────────────────────────
   const [clientName,    setClientName]    = useState('');
@@ -134,7 +136,15 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const [dueDate,       setDueDate]       = useState('');
   const [paymentStatus, setPaymentStatus] = useState<'due'|'paid'>('due');
   const [invoiceNumInfo, setInvoiceNumInfo] = useState<{ isReused: boolean; reusedFrom?: string } | null>(null);
-  const [placeOfSupply, setPlaceOfSupply] = useState(DEFAULT_PLACE_OF_SUPPLY);
+  // Store Place of Supply in the dropdown's own value format (state label) so
+  // <SelectValue /> renders it. Stored values elsewhere use "21-Odisha"; the
+  // dropdown items use "21 - Odisha", so we normalise via the state code.
+  const posLabelFor = (value: string | null | undefined): string => {
+    const code = extractStateCode(value);
+    const match = code ? INDIAN_STATES.find(s => s.code === code) : null;
+    return match ? match.label : (INDIAN_STATES.find(s => s.code === '21')?.label ?? '');
+  };
+  const [placeOfSupply, setPlaceOfSupply] = useState<string>(() => posLabelFor(DEFAULT_PLACE_OF_SUPPLY));
 
   // ── Service period ────────────────────────────────────────────────────────
   // 'month' = "YYYY-MM" (single month picker), 'range' = ISO date range
@@ -192,6 +202,9 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       const prevMatch  = notes.match(/Previous Due:\s*₹?([\d,]+)/);
       const gstMatch   = notes.match(/GST:\s*([\d.]+)%/);
 
+      // Editing an existing invoice: its client fields are already loaded, so
+      // show the manual ("New Customer") view rather than the work-order picker.
+      setCustomerMode('new');
       setClientName(editEntry.client_name || '');
       setClientGstin(gstinMatch ? gstinMatch[1].trim().toUpperCase() : '');
       setClientAddress(addrMatch ? addrMatch[1].trim() : '');
@@ -209,12 +222,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           ? String(storedPrevBalance)
           : (prevMatch ? prevMatch[1].replace(/,/g, '') : '')
       );
-      // Restore Place of Supply from proper DB column first, then notes fallback
+      // Restore Place of Supply from proper DB column first, then notes fallback,
+      // normalised to the dropdown's label format so it displays.
       const posMatch = notes.match(/Place of Supply:\s*([^|]+)/);
-      setPlaceOfSupply(
+      setPlaceOfSupply(posLabelFor(
         editEntry.place_of_supply ||
         (posMatch ? posMatch[1].trim() : DEFAULT_PLACE_OF_SUPPLY)
-      );
+      ));
       // Restore service period
       if (editEntry.service_period_start) {
         const s: string = editEntry.service_period_start;
@@ -318,8 +332,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       setPaymentStatus('due'); setGstPercent('18');
       setTdsEnabled(false); setTdsRate('2'); setPreviousDue('');
       setOutstandingInvoices([]);
-      setCustomerMode('new'); setSelectedWorkOrderId('');
-      setPlaceOfSupply(DEFAULT_PLACE_OF_SUPPLY);
+      setCustomerMode('existing'); setSelectedWorkOrderId('');
+      setPlaceOfSupply(posLabelFor(DEFAULT_PLACE_OF_SUPPLY));
       setServicePeriodMode('month'); setServicePeriodMonth('');
       setServicePeriodStart(''); setServicePeriodEnd('');
       setLines([newLine()]);
@@ -328,6 +342,30 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       setTransactionNumber(''); setTransactionDatetime('');
     }
   }, [open]);
+
+  // Auto-select Place of Supply from the client's GSTIN. The first two digits
+  // of a GSTIN are the state code (e.g. 21 = Odisha); for a B2B supply the place
+  // of supply is the recipient's registered state, so the GSTIN is authoritative.
+  // We set the dropdown's own value format (INDIAN_STATES[].label).
+  useEffect(() => {
+    const code = clientGstin.trim().slice(0, 2);
+    if (clientGstin.trim().length >= 2 && /^\d{2}$/.test(code)) {
+      const match = INDIAN_STATES.find(s => s.code === code);
+      if (match) setPlaceOfSupply(match.label);
+    }
+  }, [clientGstin]);
+
+  // Auto-fill Due Date with today + 7 days when the form opens for a NEW invoice
+  // and no due date is set yet (standard 7-day payment term).
+  useEffect(() => {
+    if (!open || editEntry) return;
+    setDueDate(prev => {
+      if (prev) return prev;
+      const d = new Date();
+      d.setDate(d.getDate() + 7);
+      return d.toISOString().split('T')[0]; // yyyy-mm-dd for <input type="date">
+    });
+  }, [open, editEntry]);
 
   // Maps operational_post service_instances keys → SERVICE_OPTIONS labels
   const INSTANCE_KEY_TO_SERVICE: Record<string, string> = {
@@ -367,6 +405,45 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         for (const p of (postsData ?? [])) {
           if (!postsMap[p.work_order_id]) postsMap[p.work_order_id] = [];
           postsMap[p.work_order_id].push(p);
+        }
+      }
+
+      // Derive, per work order:
+      //  (a) whether an invoice was created THIS MONTH, and
+      //  (b) the outstanding due still owed — using the SAME dedup/amount logic
+      //      as the carry-forward feature (computeOutstandingFromRows), so the
+      //      figure never double-counts a balance already rolled into a newer
+      //      invoice.
+      const invoicesByWo: Record<string, { totalDue: number; invoicedThisMonth: boolean }> = {};
+      if (workOrderIds.length > 0) {
+        const { data: invData } = await supabaseClient
+          .from('receivables')
+          .select('work_order_id, reference_number, total_amount, previous_balance, previous_balance_breakdown, due_date, status, notes, created_at')
+          .eq('category', 'Invoices')
+          .in('work_order_id', workOrderIds);
+
+        const now = new Date();
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const UNPAID = ['created', 'issued', 'open', 'pending', 'overdue'];
+
+        // Group all invoices for a work order so the outstanding calc sees the
+        // whole set (needed for roll-forward dedup).
+        const rowsByWo: Record<string, any[]> = {};
+        for (const inv of (invData ?? [])) {
+          const woId = inv.work_order_id;
+          if (!woId) continue;
+          (rowsByWo[woId] ||= []).push(inv);
+
+          if (!invoicesByWo[woId]) invoicesByWo[woId] = { totalDue: 0, invoicedThisMonth: false };
+          // Any invoice created this month counts, regardless of paid/unpaid.
+          if (inv.created_at && new Date(inv.created_at) >= monthStart) {
+            invoicesByWo[woId].invoicedThisMonth = true;
+          }
+        }
+
+        for (const [woId, rows] of Object.entries(rowsByWo)) {
+          const unpaidRows = rows.filter((r: any) => UNPAID.includes(String(r.status)));
+          invoicesByWo[woId].totalDue = sumOutstanding(computeOutstandingFromRows(unpaidRows, null, now));
         }
       }
 
@@ -416,8 +493,18 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           descPerPostServiceInstances: desc.perPostServiceInstances || {},
           postNames,
           totalGuards,
+          // Per-work-order invoice signals for the picker.
+          totalDue: invoicesByWo[row.id]?.totalDue || 0,
+          invoicedThisMonth: invoicesByWo[row.id]?.invoicedThisMonth || false,
         };
-      }).filter((r: any) => r.clientName);
+      })
+      .filter((r: any) => r.clientName)
+      // Alphabetical by client, then by first post name, for a scannable list.
+      .sort((a: any, b: any) => {
+        const byClient = a.clientName.localeCompare(b.clientName, undefined, { sensitivity: 'base' });
+        if (byClient !== 0) return byClient;
+        return (a.postNames[0] || '').localeCompare(b.postNames[0] || '', undefined, { sensitivity: 'base' });
+      });
     },
   });
 
@@ -682,7 +769,12 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         status,
         line_items: lineItems,
         // ── Persist as proper DB columns ──────────────────────────────────
-        place_of_supply: placeOfSupply,
+        // Store the canonical "code-Name" form (the dropdown works in "code - Name").
+        place_of_supply: (() => {
+          const code = extractStateCode(placeOfSupply);
+          const st = code ? INDIAN_STATES.find(s => s.code === code) : null;
+          return st ? `${st.code}-${st.name}` : placeOfSupply;
+        })(),
         gst_type: gstPct === 0 ? 'exempt' : gstType,
         service_period_start: resolvedPeriodStart,
         service_period_end: resolvedPeriodEnd,
@@ -792,8 +884,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           <section>
             <div className="flex gap-2">
               {([
-                { v: 'new',      l: 'New Customer',      hint: 'Enter details manually' },
                 { v: 'existing', l: 'Existing Customer',  hint: 'Pick from active work orders' },
+                { v: 'new',      l: 'New Customer',      hint: 'Enter details manually' },
               ] as const).map(opt => (
                 <button
                   key={opt.v}
@@ -835,49 +927,103 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                       );
                     })()}
                   </SelectTrigger>
-                  <SelectContent className="max-h-80">
-                    {activeWorkOrders.length === 0 && (
-                      <div className="px-3 py-2 text-xs text-muted-foreground">No active work orders found.</div>
-                    )}
-                    {activeWorkOrders.map((wo: any) => {
-                      const postNames: string[] = wo.postNames || [];
-                      const totalGuards: number = wo.totalGuards || 0;
-                      return (
-                        <SelectItem
-                          key={wo.id}
-                          value={wo.id}
-                          className="py-2"
-                          // Keeps type-ahead matching on post name as well as client / WO id
-                          textValue={`${wo.clientName} ${wo.workOrderId} ${postNames.join(' ')}`}
-                        >
-                          <div className="flex flex-col gap-0.5">
-                            <div className="flex items-center gap-2">
-                              <span className="font-semibold text-sm">{wo.clientName}</span>
-                              <span className="text-[11px] font-mono text-muted-foreground bg-muted px-1 rounded">{wo.workOrderId}</span>
-                              {wo.status && (
-                                <span className="text-[10px] text-muted-foreground capitalize">
-                                  ({String(wo.status).replace(/_/g, ' ')})
-                                </span>
-                              )}
-                            </div>
-                            {postNames.length > 0 ? (
-                              <div className="flex flex-wrap gap-1 mt-0.5">
-                                {postNames.map((name: string, i: number) => (
-                                  <span key={i} className="text-[10px] bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded border border-blue-200 dark:border-blue-800">
-                                    {name}
-                                  </span>
-                                ))}
-                                {totalGuards > 0 && (
-                                  <span className="text-[10px] text-muted-foreground ml-1">· {totalGuards} guards</span>
-                                )}
+                  <SelectContent className="max-h-[420px] w-[--radix-select-trigger-width] p-0">
+                    {/* Search box — filters the list by client, post or WO number.
+                        stopPropagation on keydown prevents Radix Select from
+                        hijacking keystrokes for its built-in type-ahead. */}
+                    <div className="sticky top-0 z-10 bg-popover border-b p-2">
+                      <div className="relative">
+                        <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                        <Input
+                          autoFocus
+                          value={workOrderSearch}
+                          onChange={(e) => setWorkOrderSearch(e.target.value)}
+                          onKeyDown={(e) => e.stopPropagation()}
+                          placeholder="Search client, post or WO number…"
+                          className="h-8 pl-7 text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Column header row — must use the SAME fixed widths as rows below */}
+                    <div className="flex items-center gap-3 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground border-b bg-muted/40">
+                      <span className="flex-1 min-w-0">Client / Post</span>
+                      <span className="w-[120px] shrink-0">Work Order</span>
+                      <span className="w-[130px] shrink-0">This Month</span>
+                      <span className="w-[80px] shrink-0 text-right">Due</span>
+                    </div>
+
+                    <div className="max-h-[300px] overflow-y-auto py-1">
+                      {(() => {
+                        const q = workOrderSearch.trim().toLowerCase();
+                        const list = q
+                          ? activeWorkOrders.filter((wo: any) =>
+                              `${wo.clientName} ${wo.workOrderId} ${(wo.postNames || []).join(' ')}`
+                                .toLowerCase()
+                                .includes(q))
+                          : activeWorkOrders;
+
+                        if (activeWorkOrders.length === 0) {
+                          return <div className="px-3 py-3 text-xs text-muted-foreground">No active work orders found.</div>;
+                        }
+                        if (list.length === 0) {
+                          return <div className="px-3 py-3 text-xs text-muted-foreground">No work orders match “{workOrderSearch}”.</div>;
+                        }
+
+                        return list.map((wo: any) => {
+                          const postNames: string[] = wo.postNames || [];
+                          const postLabel = postNames.length ? postNames.join(', ') : 'No post recorded';
+                          const totalDue: number = wo.totalDue || 0;
+                          // Straightforward: was an invoice created this month or not?
+                          const invoicedThisMonth = !!wo.invoicedThisMonth;
+                          return (
+                            <SelectItem
+                              key={wo.id}
+                              value={wo.id}
+                              // pl-3 overrides the default pl-8 check-indicator gutter;
+                              // the last-child span (Radix ItemText) is forced full-width
+                              // so the fixed columns below line up perfectly.
+                              className="py-2 pl-3 pr-3 rounded-none focus:bg-accent/60 [&>span:last-child]:w-full"
+                              textValue={`${wo.clientName} ${wo.workOrderId} ${postNames.join(' ')}`}
+                            >
+                              <div className="flex items-center gap-3 w-full">
+                                {/* Client + Post */}
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-semibold text-sm truncate">{wo.clientName}</p>
+                                  <p className="text-[11px] text-blue-700 dark:text-blue-300 truncate" title={postLabel}>{postLabel}</p>
+                                </div>
+                                {/* Work Order number */}
+                                <div className="w-[120px] shrink-0">
+                                  <span className="text-[11px] font-mono text-muted-foreground bg-muted px-1 py-0.5 rounded truncate inline-block max-w-full align-middle">{wo.workOrderId}</span>
+                                </div>
+                                {/* This month — plain yes/no with a coloured dot */}
+                                <div className="w-[130px] shrink-0">
+                                  {invoicedThisMonth ? (
+                                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-slate-400" /> Invoiced
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-600">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Not invoiced
+                                    </span>
+                                  )}
+                                </div>
+                                {/* Due amount */}
+                                <div className="w-[80px] shrink-0 text-right whitespace-nowrap">
+                                  {totalDue > 0 ? (
+                                    <span className="text-[13px] font-semibold text-red-600" title={`₹${totalDue.toLocaleString('en-IN')}`}>
+                                      {formatINRShort(totalDue)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[11px] text-muted-foreground">—</span>
+                                  )}
+                                </div>
                               </div>
-                            ) : (
-                              <span className="text-[10px] text-muted-foreground italic mt-0.5">No post recorded</span>
-                            )}
-                          </div>
-                        </SelectItem>
-                      );
-                    })}
+                            </SelectItem>
+                          );
+                        });
+                      })()}
+                    </div>
                   </SelectContent>
                 </Select>
                 {selectedWorkOrderId && (() => {

@@ -178,7 +178,7 @@ function AccountsModuleContent() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <ModuleHeader 
         title={`Accounts & Finance${branchName ? ` - ${branchName}` : ''}`}
         description="Manage financial operations, accounting, compliance and banking"
@@ -231,7 +231,7 @@ function AccountsModuleContent() {
           </div>
           )}
           
-          <ScrollArea className="h-[calc(100vh-250px)]">
+          <ScrollArea className="h-[calc(100vh-200px)]">
             <div className="p-6">
               <>
                   {/* Dashboard Tab */}

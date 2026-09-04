@@ -131,6 +131,36 @@ function toOutstanding(r: any, now: Date): OutstandingInvoice {
 }
 
 /**
+ * Pure core: given the raw unpaid receivables rows for a SINGLE work order,
+ * return the outstanding invoices with correct amounts and no double counting.
+ * Shared by the async fetch (single WO) and any batch computation (all WOs at
+ * once) so both produce identical figures. Callers must pass only rows for one
+ * work order that are already filtered to unpaid statuses.
+ *
+ * @param rows        Unpaid receivables rows for one work order.
+ * @param excludeRef  Reference number of the invoice being edited, to skip.
+ * @param now         Reference "today" for overdue derivation (injectable for tests).
+ */
+export function computeOutstandingFromRows(
+  rows: any[],
+  excludeRef: string | null = null,
+  now: Date = new Date(),
+): OutstandingInvoice[] {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+
+  // Refs already carried forward by a newer invoice — skip so we never
+  // double-count an older invoice that lives both on its own row and inside a
+  // newer invoice's previous balance.
+  const rolledForward = collectRolledForwardRefs(rows);
+
+  return rows
+    .filter((r: any) => !excludeRef || r.reference_number !== excludeRef)
+    .filter((r: any) => !r.reference_number || !rolledForward.has(String(r.reference_number)))
+    .map((r: any) => toOutstanding(r, now))
+    .filter((r) => r.amount > 0);
+}
+
+/**
  * Fetch the unpaid invoices for a single WORK ORDER and the amount still owed
  * on each. Scoped to the work order so a client's other work orders are never
  * pulled in.
@@ -158,17 +188,7 @@ export async function fetchWorkOrderOutstandingInvoices(
 
   if (error || !data) return [];
 
-  const now = new Date();
-  // Refs already carried forward by a newer invoice — skip so we never
-  // double-count an older invoice that lives both on its own row and inside a
-  // newer invoice's previous balance.
-  const rolledForward = collectRolledForwardRefs(data);
-
-  return data
-    .filter((r: any) => !excludeRef || r.reference_number !== excludeRef)
-    .filter((r: any) => !r.reference_number || !rolledForward.has(String(r.reference_number)))
-    .map((r: any) => toOutstanding(r, now))
-    .filter((r) => r.amount > 0);
+  return computeOutstandingFromRows(data, excludeRef);
 }
 
 /** Sum the remaining balances of a set of outstanding invoices (rounded). */

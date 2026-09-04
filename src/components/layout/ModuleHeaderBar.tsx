@@ -153,10 +153,10 @@ function ModuleHeaderBarInner() {
   if (!meta || SKIP_PATHS.some(p => pathname.startsWith(p))) return null;
 
   return (
-    <div className="px-3 sm:px-4 md:px-6 pt-4 sm:pt-6 pb-0 space-y-12">
+    <div className="px-3 sm:px-4 md:px-6 pt-3 sm:pt-4 pb-0 space-y-3">
       {/* Title + description */}
       <div>
-        <h1 className="text-2xl sm:text-3xl font-bold leading-tight bg-linear-to-r from-red-700 via-red-500 to-black bg-clip-text text-transparent! dark:via-red-400 dark:to-white">
+        <h1 className="text-xl sm:text-2xl font-bold leading-tight bg-linear-to-r from-red-700 via-red-500 to-black bg-clip-text text-transparent! dark:via-red-400 dark:to-white">
           {meta.title}
         </h1>
         <p className="text-sm text-muted-foreground mt-0.5">{meta.description}</p>
