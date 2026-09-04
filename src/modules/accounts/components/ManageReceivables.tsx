@@ -1909,12 +1909,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     // Fill the module's scroll region (h-[calc(100vh-250px)]) minus this panel's
     // p-6 padding (~3rem), so the header/cards/filters stay fixed and only the
     // table rows scroll — the page itself does not scroll.
-    <div className="flex flex-col h-[calc(100vh-298px)] min-h-0 gap-5">
+    <div className="flex flex-col h-[calc(100vh-298px)] min-h-0 gap-3">
       {/* Header with title + actions */}
-      <div className="flex justify-between items-start shrink-0">
+      <div className="flex justify-between items-center shrink-0">
         <div>
-          <h2 className="text-2xl font-bold">{filter === 'All Receivables' ? 'All Receivables' : filter}</h2>
-          <p className="text-sm text-muted-foreground">{getCategoryDescription()}</p>
+          <h2 className="text-xl font-bold leading-tight">{filter === 'All Receivables' ? 'All Receivables' : filter}</h2>
+          <p className="text-xs text-muted-foreground">{getCategoryDescription()}</p>
         </div>
         <div className="flex items-center gap-2">
           {filter === 'Invoices' && (
@@ -1949,38 +1949,38 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       {/* Standard receivables ledger (all categories except the live Payroll Receivables view) */}
       {filter !== 'Payroll Receivables' && (<>
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 shrink-0">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 shrink-0">
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('all')}>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total Outstanding</p>
-            <p className="text-xl font-bold text-amber-600">₹{totalPending.toLocaleString('en-IN')}</p>
-            {totalOverdue > 0 && <p className="text-xs text-red-600 mt-1">₹{totalOverdue.toLocaleString('en-IN')} overdue</p>}
+          <CardContent className="p-3">
+            <p className="text-[11px] text-muted-foreground">Total Outstanding</p>
+            <p className="text-lg font-bold text-amber-600 leading-tight">₹{totalPending.toLocaleString('en-IN')}</p>
+            {totalOverdue > 0 && <p className="text-[11px] text-red-600">₹{totalOverdue.toLocaleString('en-IN')} overdue</p>}
           </CardContent>
         </Card>
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('overdue')}>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Overdue</p>
-            <p className="text-xl font-bold text-red-600">₹{totalOverdue.toLocaleString('en-IN')}</p>
-            <p className="text-xs text-muted-foreground mt-1">{receivables.filter(r => getEffectiveStatus(r) === 'overdue').length} invoices</p>
+          <CardContent className="p-3">
+            <p className="text-[11px] text-muted-foreground">Overdue</p>
+            <p className="text-lg font-bold text-red-600 leading-tight">₹{totalOverdue.toLocaleString('en-IN')}</p>
+            <p className="text-[11px] text-muted-foreground">{receivables.filter(r => getEffectiveStatus(r) === 'overdue').length} invoices</p>
           </CardContent>
         </Card>
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('received')}>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total Received</p>
-            <p className="text-xl font-bold text-green-600">₹{totalReceived.toLocaleString('en-IN')}</p>
+          <CardContent className="p-3">
+            <p className="text-[11px] text-muted-foreground">Total Received</p>
+            <p className="text-lg font-bold text-green-600 leading-tight">₹{totalReceived.toLocaleString('en-IN')}</p>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Entries</p>
-            <p className="text-xl font-bold">{receivables.length}</p>
-            <p className="text-xs text-muted-foreground mt-1">Showing {filteredReceivables.length} filtered</p>
+          <CardContent className="p-3">
+            <p className="text-[11px] text-muted-foreground">Entries</p>
+            <p className="text-lg font-bold leading-tight">{receivables.length}</p>
+            <p className="text-[11px] text-muted-foreground">Showing {filteredReceivables.length} filtered</p>
           </CardContent>
         </Card>
       </div>
 
       {/* Filters Row: Search + Period + Status */}
-      <div className="space-y-3 shrink-0">
+      <div className="space-y-2 shrink-0">
         {/* Period filter */}
         <div className="flex items-center gap-1.5">
           {([
@@ -2058,7 +2058,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               )}
             </div>
           ) : (
-            <Table containerClassName="flex-1 min-h-0">
+            <Table containerClassName="flex-1 min-h-0" className="[&_th]:h-9 [&_td]:py-2 [&_th]:py-2">
               <TableHeader className="sticky top-0 z-20 bg-background [&_tr]:border-b [&_th]:bg-background">
                 <TableRow>
                   <TableHead className="w-10">
