@@ -19,7 +19,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
-import { fetchClientOutstandingInvoices, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
+import { fetchWorkOrderOutstandingInvoices, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY } from '@/lib/tax/gst';
 
 interface GenerateInvoiceDialogProps {
@@ -209,19 +209,19 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
 
   const selectedClientInfo = useMemo(() => uniqueClients.find(c => c.name === selectedClientName), [uniqueClients, selectedClientName]);
 
-  // On reaching the review step, look up this client's unpaid invoices and
-  // carry their outstanding balance forward automatically, so an overdue
-  // client's previous dues are added to the new invoice's payment advice.
-  // Matching is by normalised client name (see fetchClientOutstandingInvoices)
-  // so invoices across multiple work orders — or with no work order — are all
-  // captured, not just those tied to the current work order.
+  // On reaching the review step, look up the unpaid invoices for THIS WORK
+  // ORDER and carry their outstanding balance forward automatically. Billing is
+  // per work order, so we scope to the current work order — never the client's
+  // other work orders. (The generated invoice also persists work_order_id below
+  // so this scoping works on future runs.)
+  const reviewWorkOrderId = includedPosts[0]?.work_order_id ?? null;
   useEffect(() => {
-    if (step !== 'review' || !selectedClientName) return;
+    if (step !== 'review' || !reviewWorkOrderId) return;
     let cancelled = false;
 
     (async () => {
       try {
-        const unpaid = await fetchClientOutstandingInvoices(supabaseClient, selectedClientName);
+        const unpaid = await fetchWorkOrderOutstandingInvoices(supabaseClient, reviewWorkOrderId);
         if (cancelled) return;
         setOutstandingInvoices(unpaid);
         setPreviousDue(sumOutstanding(unpaid));
@@ -229,7 +229,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     })();
 
     return () => { cancelled = true; };
-  }, [step, selectedClientName]);
+  }, [step, reviewWorkOrderId]);
 
   // Fetch duty data across selected posts for the client
   const handleFetchDutyData = async () => {
@@ -409,6 +409,9 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
         total_amount: totalAmount,
         due_date: dueDate || null,
         reference_number: finalInvoiceNumber,
+        // Persist the work order so previous-due carry-forward is scoped
+        // correctly (per work order, not per client) on future invoices.
+        work_order_id: includedPosts[0]?.work_order_id ?? null,
         // Lifecycle starts at 'created'; downloading the PDF promotes to 'issued'.
         status: 'created',
         // ── GST engine: persist place_of_supply + gst_type as proper columns ──

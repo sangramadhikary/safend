@@ -16,7 +16,7 @@ import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
-import { fetchClientOutstandingInvoices, type OutstandingInvoice } from '@/lib/invoice/outstanding';
+import { fetchWorkOrderOutstandingInvoices, type OutstandingInvoice } from '@/lib/invoice/outstanding';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY } from '@/lib/tax/gst';
 
 // ── SAC codes (GST classification for security services) ─────────────────────
@@ -287,20 +287,21 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
     }
   }, [open, editEntry]);
 
-  // When EDITING an existing invoice, surface the client's other outstanding
-  // invoices so the previous due can be reviewed/added. Unlike the new-invoice
-  // flow this does NOT auto-fill the amount (the invoice may already carry a
-  // previous balance, and re-adding could double up) — it only populates the
-  // suggestion panel; the user opts in via the "Include previous balance"
-  // button. The invoice being edited is excluded from its own detection.
+  // When EDITING an existing invoice, surface the SAME WORK ORDER's other
+  // outstanding invoices so the previous due can be reviewed/added. Unlike the
+  // new-invoice flow this does NOT auto-fill the amount (the invoice may
+  // already carry a previous balance, and re-adding could double up) — it only
+  // populates the suggestion panel; the user opts in via the "Include previous
+  // balance" button. The invoice being edited is excluded from its own
+  // detection. Invoices with no work order have no scope to carry from.
   useEffect(() => {
-    if (!open || !editEntry || !editEntry.client_name) return;
+    if (!open || !editEntry || !editEntry.work_order_id) return;
     let cancelled = false;
     (async () => {
       try {
-        const unpaid = await fetchClientOutstandingInvoices(
+        const unpaid = await fetchWorkOrderOutstandingInvoices(
           supabaseClient,
-          editEntry.client_name,
+          editEntry.work_order_id,
           editEntry.reference_number || null,
         );
         if (!cancelled) setOutstandingInvoices(unpaid);
@@ -543,9 +544,11 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
     setOutstandingInvoices([]);
     setPreviousDue('');
     try {
-      const unpaid = await fetchClientOutstandingInvoices(
+      // Scope the carry-forward to THIS work order only (billing is per work
+      // order, not per client).
+      const unpaid = await fetchWorkOrderOutstandingInvoices(
         supabaseClient,
-        wo.clientName,
+        woId,
         editEntry?.reference_number || null,
       );
 
