@@ -1906,9 +1906,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   };
 
   return (
-    <div className="space-y-5">
+    // Fill the module's scroll region (h-[calc(100vh-250px)]) minus this panel's
+    // p-6 padding (~3rem), so the header/cards/filters stay fixed and only the
+    // table rows scroll — the page itself does not scroll.
+    <div className="flex flex-col h-[calc(100vh-298px)] min-h-0 gap-5">
       {/* Header with title + actions */}
-      <div className="flex justify-between items-start">
+      <div className="flex justify-between items-start shrink-0">
         <div>
           <h2 className="text-2xl font-bold">{filter === 'All Receivables' ? 'All Receivables' : filter}</h2>
           <p className="text-sm text-muted-foreground">{getCategoryDescription()}</p>
@@ -1946,7 +1949,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       {/* Standard receivables ledger (all categories except the live Payroll Receivables view) */}
       {filter !== 'Payroll Receivables' && (<>
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 shrink-0">
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setStatusFilter('all')}>
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground">Total Outstanding</p>
@@ -1977,7 +1980,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       </div>
 
       {/* Filters Row: Search + Period + Status */}
-      <div className="space-y-3">
+      <div className="space-y-3 shrink-0">
         {/* Period filter */}
         <div className="flex items-center gap-1.5">
           {([
@@ -2038,10 +2041,10 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         </div>
       </div>
 
-      {/* Table — only the rows scroll; the column header stays pinned. Everything
-          above (title, summary cards, filters, search) scrolls with the page. */}
-      <Card>
-        <CardContent className="p-0">
+      {/* Table — fills remaining height; only the rows scroll, the column header
+          stays pinned. Everything above stays fixed (no whole-page scroll). */}
+      <Card className="flex-1 min-h-0 flex flex-col">
+        <CardContent className="p-0 flex-1 min-h-0 flex flex-col">
           {isLoading ? (
             <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
           ) : filteredReceivables.length === 0 ? (
@@ -2055,7 +2058,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               )}
             </div>
           ) : (
-            <Table containerClassName="max-h-[calc(100vh-360px)]">
+            <Table containerClassName="flex-1 min-h-0">
               <TableHeader className="sticky top-0 z-20 bg-background [&_tr]:border-b [&_th]:bg-background">
                 <TableRow>
                   <TableHead className="w-10">
