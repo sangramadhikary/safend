@@ -71,6 +71,25 @@ describe('fetchWorkOrderOutstandingInvoices', () => {
     expect(result[0].amount).toBe(6000);
   });
 
+  it('does not add previous_balance again when a partial-payment Balance note exists', async () => {
+    // Real case (26270001): total 37,760, previous_balance 2,060, paid down to a
+    // "Balance: ₹2,180" note. The 2,180 already includes the 2,060, so the owed
+    // amount must be exactly 2,180 — not 2,180 + 2,060.
+    const { client } = mockClient([
+      {
+        reference_number: '26270001', total_amount: 37760, previous_balance: 2060,
+        due_date: '2026-10-03', status: 'pending',
+        notes: 'GST: 18% | Previous Due: ₹2,060 || PAYMENT: Amount: ₹37,000 | Balance: ₹2,180 | Total Paid: ₹37,640',
+      },
+    ]);
+
+    const result = await fetchWorkOrderOutstandingInvoices(client, WO);
+
+    expect(result[0].amount).toBe(2180);
+    expect(result[0].previousBalance).toBe(0); // folded into the balance, not shown separately
+    expect(sumOutstanding(result)).toBe(2180);
+  });
+
   it('excludes the invoice currently being edited', async () => {
     const { client } = mockClient([
       { reference_number: 'SELF', total_amount: 5000, previous_balance: 0, due_date: null, status: 'created', notes: null },

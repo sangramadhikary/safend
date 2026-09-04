@@ -98,14 +98,33 @@ function collectRolledForwardRefs(rows: any[]): Set<string> {
 /** Shape a raw receivables row into an OutstandingInvoice. */
 function toOutstanding(r: any, now: Date): OutstandingInvoice {
   const notesBalance = parseBalanceFromNotes(r.notes);
-  const ownAmount = notesBalance != null ? notesBalance : Number(r.total_amount) || 0;
   const previousBalance = Number(r.previous_balance) || 0;
   const isPastDue = !!r.due_date && new Date(r.due_date) < now;
+
+  let amount: number;
+  let ownAmount: number;
+  if (notesBalance != null) {
+    // A recorded partial payment leaves a "Balance: ₹Y" note. That balance is
+    // computed against the invoice's FULL payable (total_amount + previous
+    // balance), so it is already the complete amount still owed — we must NOT
+    // add previous_balance again or we double-count it. Treat the whole
+    // remaining balance as the invoice's own amount.
+    amount = notesBalance;
+    ownAmount = notesBalance;
+  } else {
+    // No partial payment: owed = the invoice's own charges plus any previous
+    // balance carried forward on it.
+    ownAmount = Number(r.total_amount) || 0;
+    amount = ownAmount + previousBalance;
+  }
+
   return {
     ref: r.reference_number || '—',
-    amount: ownAmount + previousBalance,
+    amount,
     ownAmount,
-    previousBalance,
+    // Only surface a separate "previous" component when it is genuinely additive
+    // (i.e. not already folded into a partial-payment balance).
+    previousBalance: notesBalance != null ? 0 : previousBalance,
     due_date: r.due_date ?? null,
     status: isPastDue ? 'overdue' : 'open',
   };
