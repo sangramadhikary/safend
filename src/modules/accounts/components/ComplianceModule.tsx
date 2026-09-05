@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -28,6 +28,39 @@ import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { exportToCSV, exportToJSON, exportToExcel, exportToPDF } from '../utils/complianceExport';
 import { CountUp } from '@/components/dashboard/CountUp';
+import { formatINRShort } from '@/lib/format';
+import { useGstLiability } from '@/modules/accounts/hooks/useGstLiability';
+
+/**
+ * Format a rupee amount with Indian digit grouping and exactly 2 decimals
+ * (paise). Unlike the shared formatINR/formatCurrency helpers, this keeps paise
+ * because GST figures are money-precise and must not show floating-point tails
+ * such as "454677.0096774192" nor be rounded away to whole rupees.
+ */
+const inr2 = (value: number): string =>
+  `₹${(Number(value) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/**
+ * Compose a GST ledger description as "Post Name | Invoice Number" from a
+ * receivables row. Post name lives in the line_items[].post JSON (there is no
+ * post-name column); invoice number is the reference_number column. Both can be
+ * absent on legacy rows, so fall back to the stored description / any available
+ * part rather than rendering an empty cell.
+ */
+const ledgerDescriptionOf = (row: any): string => {
+  const items = Array.isArray(row?.line_items) ? row.line_items : [];
+  const postNames = [...new Set(items.map((li: any) => li?.post).filter(Boolean))].join(', ');
+  // Invoice number: prefer the dedicated column, else parse the "| Inv#: NNNN"
+  // suffix that the invoice writers embed into description.
+  const invNo =
+    row?.reference_number ||
+    (typeof row?.description === 'string' ? (row.description.match(/Inv#:\s*([^\s|]+)/i)?.[1] ?? '') : '');
+
+  if (postNames && invNo) return `${postNames} | ${invNo}`;
+  if (postNames) return postNames;
+  if (invNo) return invNo;
+  return row?.description || '—';
+};
 
 export interface ComplianceModuleProps {
   filter: string;
@@ -146,6 +179,10 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
   // Internal sub-tab for GST section
   const [gstSubTab, setGstSubTab] = useState('gstr1');
 
+  // GST return period. 'all' = lifetime; otherwise a 'YYYY-MM' key that scopes
+  // every GST view (GSTR-1/3B/ITC/ledger) to a single filing month.
+  const [gstPeriod, setGstPeriod] = useState<string>('all');
+
   // ─── GST AUTO-PULL: Receivables (Outward / GSTR-1) ────────────────────────
   const { data: gstOutward = [], isLoading: loadingOutward } = useQuery({
     queryKey: ['compliance', 'gst-outward'],
@@ -155,8 +192,11 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       // notes a positive one — both must be pulled in so the summed output tax nets correctly.
       const { data, error } = await supabaseClient
         .from('receivables')
-        .select('id, description, client_name, amount, gst_amount, total_amount, status, created_at, gst_treatment')
+        .select('id, description, client_name, amount, gst_amount, total_amount, status, created_at, gst_treatment, reference_number, line_items')
         .or('gst_amount.gt.0,gst_amount.lt.0,gst_treatment.eq.rcm')
+        // Cancelled invoices create no GST liability, so keep them out of every
+        // GST computation (GSTR-1, GSTR-3B, ITC, ledger).
+        .neq('status', 'cancelled')
         .order('created_at', { ascending: false });
       if (error) { console.warn('Failed to fetch GST outward:', error.message); return []; }
       return data ?? [];
@@ -164,12 +204,12 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
     enabled: activeSection === 'gst',
   });
 
-  // Split outward supplies by GST treatment
-  const forwardOutward = useMemo(() => gstOutward.filter((e: any) => (e.gst_treatment || 'forward') !== 'rcm'), [gstOutward]);
-  const rcmOutward = useMemo(() => gstOutward.filter((e: any) => e.gst_treatment === 'rcm'), [gstOutward]);
+  // Split outward supplies by GST treatment (full, unfiltered by period).
+  const forwardOutwardAll = useMemo(() => gstOutward.filter((e: any) => (e.gst_treatment || 'forward') !== 'rcm'), [gstOutward]);
+  const rcmOutwardAll = useMemo(() => gstOutward.filter((e: any) => e.gst_treatment === 'rcm'), [gstOutward]);
 
   // ─── GST AUTO-PULL: Payables (Inward / ITC) ──────────────────────────────
-  const { data: gstInward = [], isLoading: loadingInward } = useQuery({
+  const { data: gstInwardAll = [], isLoading: loadingInward } = useQuery({
     queryKey: ['compliance', 'gst-inward'],
     queryFn: async () => {
       const { data, error } = await supabaseClient
@@ -177,6 +217,8 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
         .select('id, description, vendor_name, amount, gst_amount, total_amount, status, created_at')
         .not('gst_amount', 'is', null)
         .gt('gst_amount', 0)
+        // Rejected payables are not valid purchases, so no ITC may be claimed.
+        .neq('status', 'rejected')
         .order('created_at', { ascending: false });
       if (error) { console.warn('Failed to fetch GST inward:', error.message); return []; }
       return data ?? [];
@@ -184,14 +226,77 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
     enabled: activeSection === 'gst',
   });
 
+  // ─── GST PAYMENTS (challans paid to government) ──────────────────────────
+  // These are recorded as payables under 'Statutory & Taxes' with a GST tax
+  // type. Payments recorded from this screen carry a structured
+  // "GST Period: YYYY-MM" tag in notes so they can be matched to a return
+  // period; older/ManagePayables entries without the tag are treated as
+  // unallocated (period 'all') so they still reduce the lifetime balance.
+  const { data: gstPayments = [] } = useQuery({
+    queryKey: ['compliance', 'gst-payments'],
+    queryFn: async () => {
+      const { data, error } = await supabaseClient
+        .from('payables')
+        .select('id, description, amount, total_amount, reference_number, notes, status, created_at')
+        .eq('category', 'Statutory & Taxes')
+        .ilike('notes', '%Tax Type: GST%')
+        .neq('status', 'rejected')
+        .order('created_at', { ascending: false });
+      if (error) { console.warn('Failed to fetch GST payments:', error.message); return []; }
+      return data ?? [];
+    },
+    enabled: activeSection === 'gst',
+  });
+
+  // Extract the machine-readable "GST Period: YYYY-MM" tag from a payment's
+  // notes; returns null when untagged (legacy / free-text period entries).
+  const paymentPeriodOf = (p: any): string | null => {
+    const m = typeof p?.notes === 'string' ? p.notes.match(/GST Period:\s*(\d{4}-\d{2})/) : null;
+    return m ? m[1] : null;
+  };
+
+  // ─── GST RETURN PERIOD (month) SCOPING ───────────────────────────────────
+  // Key a row into a 'YYYY-MM' bucket, and a human label for the dropdown.
+  const periodKeyOf = (createdAt: string) => {
+    const d = new Date(createdAt);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  };
+  const periodLabelOf = (key: string) => {
+    const [y, m] = key.split('-').map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { year: 'numeric', month: 'long' });
+  };
+
+  // Distinct months present across outward + inward, newest first.
+  const periodOptions = useMemo(() => {
+    const keys = new Set<string>();
+    [...gstOutward, ...gstInwardAll].forEach((e: any) => { if (e.created_at) keys.add(periodKeyOf(e.created_at)); });
+    return Array.from(keys).sort((a, b) => (a < b ? 1 : -1));
+  }, [gstOutward, gstInwardAll]);
+
+  const inPeriod = (e: any) => gstPeriod === 'all' || periodKeyOf(e.created_at) === gstPeriod;
+
+  // Period-scoped lists. All downstream views (GSTR-1/3B/ITC/ledger) consume
+  // these, so the selector flows everywhere from one place.
+  const forwardOutward = useMemo(() => forwardOutwardAll.filter(inPeriod), [forwardOutwardAll, gstPeriod]);
+  const rcmOutward = useMemo(() => rcmOutwardAll.filter(inPeriod), [rcmOutwardAll, gstPeriod]);
+  const gstInward = useMemo(() => gstInwardAll.filter(inPeriod), [gstInwardAll, gstPeriod]);
+  // GSTR-1 lists every outward supply (forward + RCM), period-scoped.
+  const gstOutwardScoped = useMemo(() => gstOutward.filter(inPeriod), [gstOutward, gstPeriod]);
+
   // ─── GSTR-3B CALCULATIONS ────────────────────────────────────────────────
   const gstr3bSummary = useMemo(() => {
+    // Round to paise (2 dp) after summation. Per-invoice GST can be a
+    // non-terminating decimal (e.g. monthly price ÷ 31 days), and summing many
+    // such values in binary floating point accumulates error that surfaces as
+    // long tails like 454677.0096774192. Rounding here keeps money at 2 dp.
+    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
     // Only forward-charge supplies create output GST liability for the agency.
     // RCM supplies are reported but the tax is paid by the recipient, so they're excluded here.
-    const totalOutputGST = forwardOutward.reduce((s: number, e: any) => s + (e.gst_amount || 0), 0);
-    const totalITC = gstInward.reduce((s: number, e: any) => s + (e.gst_amount || 0), 0);
-    const netPayable = totalOutputGST - totalITC;
-    const rcmTurnover = rcmOutward.reduce((s: number, e: any) => s + (e.amount || 0), 0);
+    const totalOutputGST = round2(forwardOutward.reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+    const totalITC = round2(gstInward.reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+    const netPayable = round2(totalOutputGST - totalITC);
+    const rcmTurnover = round2(rcmOutward.reduce((s: number, e: any) => s + (e.amount || 0), 0));
 
     // Month-wise breakdown (forward-charge output only)
     const monthMap: Record<string, { output: number; itc: number }> = {};
@@ -206,43 +311,195 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       monthMap[month].itc += e.gst_amount || 0;
     });
     const monthWise = Object.entries(monthMap)
-      .map(([month, vals]) => ({ month, output: vals.output, itc: vals.itc, net: vals.output - vals.itc }))
+      .map(([month, vals]) => {
+        const output = round2(vals.output);
+        const itc = round2(vals.itc);
+        return { month, output, itc, net: round2(output - itc) };
+      })
       .sort((a, b) => new Date(b.month).getTime() - new Date(a.month).getTime());
 
     return { totalOutputGST, totalITC, netPayable, rcmTurnover, monthWise };
   }, [forwardOutward, rcmOutward, gstInward]);
 
+  // ─── GST PAID / REMAINING (settlement against net payable) ───────────────
+  // Sum GST payments applicable to the selected period. A period-tagged payment
+  // counts only in its own month; an untagged payment counts toward the
+  // lifetime ('all') view so nothing is silently dropped.
+  const gstSettlement = useMemo(() => {
+    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const paid = round2(
+      gstPayments.reduce((s: number, p: any) => {
+        const tag = paymentPeriodOf(p);
+        const applies = gstPeriod === 'all' ? true : tag === gstPeriod;
+        return applies ? s + (p.amount || p.total_amount || 0) : s;
+      }, 0)
+    );
+    const netPayable = gstr3bSummary.netPayable;
+    // Remaining liability can't be negative for display purposes; an overpayment
+    // is surfaced separately.
+    const remaining = round2(netPayable - paid);
+    return { paid, remaining, overpaid: remaining < 0 ? Math.abs(remaining) : 0 };
+  }, [gstPayments, gstPeriod, gstr3bSummary.netPayable]);
+
+  // Full GST liability + settlement for ANY month key (YYYY-MM), used by the
+  // Record GST Payment dialog to AUTO-FILL every value. Delegates to the shared
+  // hook so the CGST/SGST/IGST split is derived EXACTLY from each invoice's
+  // persisted place of supply (gst_type) — never a blanket 50/50 assumption —
+  // and stays identical to the ManagePayables tax form.
+  const { computePeriodLiability } = useGstLiability(activeSection === 'gst');
+
   // ─── GST LEDGER (Combined chronological view) ────────────────────────────
   const gstLedger = useMemo(() => {
+    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const entries: any[] = [];
-    gstOutward.forEach((e: any) => entries.push({
-      id: e.id,
-      date: e.created_at,
-      description: e.description,
-      party: e.client_name || '—',
-      type: 'Output',
-      debit: 0,
-      credit: e.gst_amount || 0,
-    }));
-    gstInward.forEach((e: any) => entries.push({
-      id: e.id,
-      date: e.created_at,
-      description: e.description,
-      party: e.vendor_name || '—',
-      type: 'Input (ITC)',
-      debit: e.gst_amount || 0,
-      credit: 0,
-    }));
+    // Only forward-charge output GST is the agency's liability. RCM supplies are
+    // reported in GSTR-1 but the tax is discharged by the recipient, so they must
+    // NOT post to the agency's GST ledger — otherwise the running balance won't
+    // reconcile with the Net GST Payable shown in the GSTR-3B summary.
+    forwardOutward.forEach((e: any) => {
+      // Output GST is normally a credit. A credit note carries a NEGATIVE
+      // gst_amount — that reduces output liability, so post its absolute value
+      // to the debit side instead of showing a negative credit.
+      const gst = e.gst_amount || 0;
+      const isCreditNote = gst < 0;
+      entries.push({
+        id: e.id,
+        date: e.created_at,
+        description: ledgerDescriptionOf(e),
+        party: e.client_name || '—',
+        type: isCreditNote ? 'Output (Credit Note)' : 'Output',
+        debit: isCreditNote ? Math.abs(gst) : 0,
+        credit: isCreditNote ? 0 : gst,
+      });
+    });
+    gstInward.forEach((e: any) => {
+      // ITC is normally a debit. A negative inward adjustment reverses ITC, so
+      // post its absolute value to the credit side.
+      const gst = e.gst_amount || 0;
+      const isReversal = gst < 0;
+      entries.push({
+        id: e.id,
+        date: e.created_at,
+        description: e.description,
+        party: e.vendor_name || '—',
+        type: isReversal ? 'Input (ITC Reversal)' : 'Input (ITC)',
+        debit: isReversal ? 0 : gst,
+        credit: isReversal ? Math.abs(gst) : 0,
+      });
+    });
     entries.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-    // Calculate running balance
-    let balance = 0;
+    // Opening balance: when scoped to a single month, seed the running balance
+    // with the net GST position (output − ITC) accrued in ALL prior periods, so
+    // the closing balance still reflects the true cumulative liability rather
+    // than resetting to zero at the start of the month.
+    let opening = 0;
+    if (gstPeriod !== 'all') {
+      const priorNet = (list: any[], sign: 1 | -1) =>
+        list.reduce((s, e) => (periodKeyOf(e.created_at) < gstPeriod ? s + sign * (e.gst_amount || 0) : s), 0);
+      opening = round2(priorNet(forwardOutwardAll, 1) - priorNet(gstInwardAll, 1));
+    }
+
+    // Calculate running balance (rounded to paise so it reconciles exactly with
+    // the Net GST Payable card and avoids floating-point drift).
+    let balance = opening;
     entries.forEach(e => {
-      balance += e.credit - e.debit;
+      balance = round2(balance + (e.credit || 0) - (e.debit || 0));
       e.balance = balance;
     });
+
+    // Surface the opening balance as a synthetic first row when non-zero, so the
+    // ledger clearly shows the carried-forward position for the selected month.
+    if (gstPeriod !== 'all' && opening !== 0) {
+      entries.unshift({
+        id: `opening-${gstPeriod}`,
+        date: `${gstPeriod}-01T00:00:00`,
+        description: `Opening balance (carried forward)`,
+        party: '—',
+        type: 'Opening',
+        debit: 0,
+        credit: 0,
+        balance: opening,
+        isOpening: true,
+      });
+    }
     return entries;
-  }, [gstOutward, gstInward]);
+  }, [forwardOutward, gstInward, forwardOutwardAll, gstInwardAll, gstPeriod]);
+
+  // ─── RECORD GST PAYMENT (challan) ────────────────────────────────────────
+  // Persists the payment as a 'Statutory & Taxes' payable (same pipeline as
+  // ManagePayables) with a machine-readable "GST Period: YYYY-MM" tag, so it
+  // both appears in the general Ledger Book and settles the GST net payable
+  // for the correct return period. No separate table is used.
+  const [gstPayOpen, setGstPayOpen] = useState(false);
+  // Only the fields a human genuinely decides are editable (period, actual date
+  // paid, challan no., mode). Amount and tax split are AUTO-DERIVED from the
+  // computed liability to eliminate manual-entry errors, with an explicit
+  // override switch for exceptional cases (e.g. part-payment / inter-state).
+  const [gstPayForm, setGstPayForm] = useState<{
+    period: string; date: string; challan: string; mode: string;
+    override: boolean; interState: boolean;
+    itcOverride: boolean; itcAmount: string;
+    amount: string; cgst: string; sgst: string; igst: string;
+  }>({ period: '', date: '', challan: '', mode: '', override: false, interState: false, itcOverride: false, itcAmount: '', amount: '', cgst: '', sgst: '', igst: '' });
+
+  // Auto-derive amount + tax split from the selected month unless the user has
+  // switched on manual override. Runs whenever the period, override, or
+  // inter-state toggle changes, and when the dialog opens.
+  useEffect(() => {
+    if (!gstPayOpen || !gstPayForm.period || gstPayForm.override) return;
+    const itcOv = gstPayForm.itcOverride && gstPayForm.itcAmount !== '' ? parseFloat(gstPayForm.itcAmount) : undefined;
+    const c = computePeriodLiability(gstPayForm.period, itcOv);
+    setGstPayForm(f => ({
+      ...f,
+      amount: String(c.remaining),
+      date: f.date || new Date().toISOString().split('T')[0],
+      itcAmount: f.itcAmount === '' ? String(c.computedItc) : f.itcAmount,
+      // Exact split from each invoice's place of supply (gst_type).
+      cgst: String(c.cgst),
+      sgst: String(c.sgst),
+      igst: String(c.igst),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gstPayOpen, gstPayForm.period, gstPayForm.override, gstPayForm.itcOverride, gstPayForm.itcAmount]);
+
+  const recordGstPayment = useMutation({
+    mutationFn: async (input: {
+      period: string; amount: number; date: string; challan: string; mode: string;
+      cgst: number; sgst: number; igst: number; itcUsed?: number | null;
+    }) => {
+      const periodLabel = periodLabelOf(input.period);
+      const breakdown = [
+        input.cgst ? `CGST ₹${input.cgst}` : '',
+        input.sgst ? `SGST ₹${input.sgst}` : '',
+        input.igst ? `IGST ₹${input.igst}` : '',
+      ].filter(Boolean).join(', ');
+      const itcNote = input.itcUsed != null ? ` | ITC Used: ₹${input.itcUsed} (overridden)` : '';
+      const { error } = await supabaseClient.from('payables').insert({
+        category: 'Statutory & Taxes',
+        description: `GST - ${periodLabel}`,
+        vendor_name: 'GST Department',
+        amount: input.amount,
+        gst_amount: null, // A tax remittance is not itself an ITC-bearing purchase.
+        total_amount: input.amount,
+        due_date: input.date,
+        payment_mode: input.mode || null,
+        reference_number: input.challan || null,
+        status: 'paid',
+        // "GST Period: YYYY-MM" links this payment to the return period in the
+        // GSTR-3B settlement. Same structured note format as ManagePayables.
+        notes: `Tax Type: GST | Period: ${periodLabel} | GST Period: ${input.period}${breakdown ? ` | Breakup: ${breakdown}` : ''}${itcNote} | Paid On: ${input.date} | Status: Paid`,
+      });
+      if (error) throw new Error(error.message);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['compliance', 'gst-payments'] });
+      queryClient.invalidateQueries({ queryKey: ['payables'] });
+      setGstPayOpen(false);
+      toast({ title: 'GST Payment Recorded', description: 'The challan has been saved and applied to the period.' });
+    },
+    onError: (e: any) => toast({ title: 'Error', description: e.message, variant: 'destructive' }),
+  });
 
   // ─── COMPLIANCE FILINGS (for TDS, EPF/ESIC/PT) ───────────────────────────
   const { data: entries = [], isLoading } = useQuery<ComplianceEntry[]>({
@@ -340,8 +597,8 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
   const getExportData = (): any[] => {
     if (activeSection === 'gst') {
       if (gstSubTab === 'gstr1') {
-        return gstOutward.map((e: any) => ({
-          Description: e.description,
+        return gstOutwardScoped.map((e: any) => ({
+          Description: ledgerDescriptionOf(e),
           Client: e.client_name || '—',
           'Taxable Amount': e.amount,
           'GST Amount': e.gst_amount,
@@ -372,12 +629,12 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       if (gstSubTab === 'gst_ledger') {
         return gstLedger.map(e => ({
           Date: new Date(e.date).toLocaleDateString('en-IN'),
+          'Client Name': e.party,
           Description: e.description,
-          Party: e.party,
           Type: e.type,
           'Debit (ITC)': e.debit || '',
           'Credit (Output)': e.credit || '',
-          Balance: e.balance,
+          'Running Balance': e.balance,
         }));
       }
     }
@@ -512,15 +769,31 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       {/* ─── GST SECTION (Auto-pulled) ─────────────────────────────────────── */}
       {activeSection === 'gst' && (
         <>
-          {/* GST Sub-tabs */}
-          <Tabs value={gstSubTab} onValueChange={setGstSubTab}>
-            <TabsList className="h-9">
-              <TabsTrigger value="gstr1" className="text-xs px-3">GSTR-1</TabsTrigger>
-              <TabsTrigger value="gstr3b" className="text-xs px-3">GSTR-3B</TabsTrigger>
-              <TabsTrigger value="itc" className="text-xs px-3">ITC Register</TabsTrigger>
-              <TabsTrigger value="gst_ledger" className="text-xs px-3">GST Ledger</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          {/* GST Sub-tabs + return-period selector */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <Tabs value={gstSubTab} onValueChange={setGstSubTab}>
+              <TabsList className="h-9">
+                <TabsTrigger value="gstr1" className="text-xs px-3">GSTR-1</TabsTrigger>
+                <TabsTrigger value="gstr3b" className="text-xs px-3">GSTR-3B</TabsTrigger>
+                <TabsTrigger value="itc" className="text-xs px-3">ITC Register</TabsTrigger>
+                <TabsTrigger value="gst_ledger" className="text-xs px-3">GST Ledger</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <div className="flex items-center gap-2">
+              <CalendarClock className="h-4 w-4 text-muted-foreground" />
+              <Select value={gstPeriod} onValueChange={setGstPeriod}>
+                <SelectTrigger className="h-9 w-[190px] text-sm">
+                  <SelectValue placeholder="Return period" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All periods (lifetime)</SelectItem>
+                  {periodOptions.map((key) => (
+                    <SelectItem key={key} value={key}>{periodLabelOf(key)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
 
           {/* GST Filing Due Date Alerts */}
           <GSTFilingAlerts />
@@ -557,7 +830,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                     <CardTitle className="text-base">GSTR-1 — Outward Supplies (Sales with GST)</CardTitle>
                   </CardHeader>
                   <CardContent className="p-0">
-                    {gstOutward.length === 0 ? (
+                    {gstOutwardScoped.length === 0 ? (
                       <div className="text-center py-12 text-muted-foreground">
                         <FileText className="h-10 w-10 mx-auto mb-3 opacity-30" />
                         <p>No outward supplies with GST found.</p>
@@ -577,34 +850,36 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {gstOutward
+                          {gstOutwardScoped
                             .filter((e: any) => {
                               if (!searchTerm) return true;
                               const s = searchTerm.toLowerCase();
-                              return e.description?.toLowerCase().includes(s) || (e.client_name || '').toLowerCase().includes(s);
+                              return ledgerDescriptionOf(e).toLowerCase().includes(s)
+                                || e.description?.toLowerCase().includes(s)
+                                || (e.client_name || '').toLowerCase().includes(s);
                             })
                             .map((entry: any) => (
                             <TableRow key={entry.id}>
-                              <TableCell className="font-medium">{entry.description}</TableCell>
+                              <TableCell className="font-medium">{ledgerDescriptionOf(entry)}</TableCell>
                               <TableCell>
                                 {entry.client_name || '—'}
                                 {entry.gst_treatment === 'rcm' && <Badge variant="outline" className="ml-2 text-[10px] border-amber-400 text-amber-600">RCM</Badge>}
                                 {entry.gst_treatment === 'exempt' && <Badge variant="outline" className="ml-2 text-[10px]">Exempt</Badge>}
                               </TableCell>
-                              <TableCell className="text-right">₹{(entry.amount || 0).toLocaleString()}</TableCell>
+                              <TableCell className="text-right">{inr2(entry.amount || 0)}</TableCell>
                               <TableCell className="text-right text-green-600">
-                                {entry.gst_treatment === 'rcm' ? <span className="text-amber-600 text-xs">by recipient</span> : `₹${(entry.gst_amount || 0).toLocaleString()}`}
+                                {entry.gst_treatment === 'rcm' ? <span className="text-amber-600 text-xs">by recipient</span> : inr2(entry.gst_amount || 0)}
                               </TableCell>
-                              <TableCell className="text-right font-semibold">₹{(entry.total_amount || 0).toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-semibold">{inr2(entry.total_amount || 0)}</TableCell>
                               <TableCell>{new Date(entry.created_at).toLocaleDateString('en-IN')}</TableCell>
                               <TableCell>{getStatusBadge(entry.status)}</TableCell>
                             </TableRow>
                           ))}
                           <TableRow className="font-bold bg-gray-50 dark:bg-gray-900">
                             <TableCell colSpan={2}>Total (Forward-charge GST)</TableCell>
-                            <TableCell className="text-right">₹{gstOutward.reduce((s: number, e: any) => s + (e.amount || 0), 0).toLocaleString()}</TableCell>
-                            <TableCell className="text-right text-green-600">₹{forwardOutward.reduce((s: number, e: any) => s + (e.gst_amount || 0), 0).toLocaleString()}</TableCell>
-                            <TableCell className="text-right">₹{gstOutward.reduce((s: number, e: any) => s + (e.total_amount || 0), 0).toLocaleString()}</TableCell>
+                            <TableCell className="text-right">{inr2(gstOutwardScoped.reduce((s: number, e: any) => s + (e.amount || 0), 0))}</TableCell>
+                            <TableCell className="text-right text-green-600">{inr2(forwardOutward.reduce((s: number, e: any) => s + (e.gst_amount || 0), 0))}</TableCell>
+                            <TableCell className="text-right">{inr2(gstOutwardScoped.reduce((s: number, e: any) => s + (e.total_amount || 0), 0))}</TableCell>
                             <TableCell colSpan={2} />
                           </TableRow>
                         </TableBody>
@@ -651,18 +926,18 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                             <TableRow key={entry.id}>
                               <TableCell className="font-medium">{entry.description}</TableCell>
                               <TableCell>{entry.vendor_name || '—'}</TableCell>
-                              <TableCell className="text-right">₹{entry.amount.toLocaleString()}</TableCell>
-                              <TableCell className="text-right text-blue-600">₹{entry.gst_amount.toLocaleString()}</TableCell>
-                              <TableCell className="text-right font-semibold">₹{entry.total_amount.toLocaleString()}</TableCell>
+                              <TableCell className="text-right">{inr2(entry.amount)}</TableCell>
+                              <TableCell className="text-right text-blue-600">{inr2(entry.gst_amount)}</TableCell>
+                              <TableCell className="text-right font-semibold">{inr2(entry.total_amount)}</TableCell>
                               <TableCell>{new Date(entry.created_at).toLocaleDateString('en-IN')}</TableCell>
                               <TableCell>{getStatusBadge(entry.status)}</TableCell>
                             </TableRow>
                           ))}
                           <TableRow className="font-bold bg-gray-50 dark:bg-gray-900">
                             <TableCell colSpan={2}>Total</TableCell>
-                            <TableCell className="text-right">₹{gstInward.reduce((s: number, e: any) => s + e.amount, 0).toLocaleString()}</TableCell>
-                            <TableCell className="text-right text-blue-600">₹{gstInward.reduce((s: number, e: any) => s + e.gst_amount, 0).toLocaleString()}</TableCell>
-                            <TableCell className="text-right">₹{gstInward.reduce((s: number, e: any) => s + e.total_amount, 0).toLocaleString()}</TableCell>
+                            <TableCell className="text-right">{inr2(gstInward.reduce((s: number, e: any) => s + e.amount, 0))}</TableCell>
+                            <TableCell className="text-right text-blue-600">{inr2(gstInward.reduce((s: number, e: any) => s + e.gst_amount, 0))}</TableCell>
+                            <TableCell className="text-right">{inr2(gstInward.reduce((s: number, e: any) => s + e.total_amount, 0))}</TableCell>
                             <TableCell colSpan={2} />
                           </TableRow>
                         </TableBody>
@@ -680,28 +955,218 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                     <Card className="border-green-200 dark:border-green-800">
                       <CardContent className="p-5">
                         <p className="text-xs text-muted-foreground font-medium">Total Output GST</p>
-                        <p className="text-2xl font-bold text-green-600 mt-1">₹<CountUp to={gstr3bSummary.totalOutputGST} duration={2} separator="," /></p>
+                        <p className="text-2xl font-bold text-green-600 mt-1" title={inr2(gstr3bSummary.totalOutputGST)}>
+                          <CountUp to={gstr3bSummary.totalOutputGST} duration={2} separator="," formatter={formatINRShort} />
+                        </p>
                         <p className="text-xs text-muted-foreground mt-1">GST collected on sales</p>
                       </CardContent>
                     </Card>
                     <Card className="border-blue-200 dark:border-blue-800">
                       <CardContent className="p-5">
                         <p className="text-xs text-muted-foreground font-medium">Total ITC (Input Tax Credit)</p>
-                        <p className="text-2xl font-bold text-blue-600 mt-1">₹<CountUp to={gstr3bSummary.totalITC} duration={2} separator="," /></p>
+                        <p className="text-2xl font-bold text-blue-600 mt-1" title={inr2(gstr3bSummary.totalITC)}>
+                          <CountUp to={gstr3bSummary.totalITC} duration={2} separator="," formatter={formatINRShort} />
+                        </p>
                         <p className="text-xs text-muted-foreground mt-1">GST paid on purchases</p>
                       </CardContent>
                     </Card>
                     <Card className={`border-2 ${gstr3bSummary.netPayable > 0 ? 'border-red-300 dark:border-red-700' : 'border-green-300 dark:border-green-700'}`}>
                       <CardContent className="p-5">
                         <p className="text-xs text-muted-foreground font-medium">Net GST Payable</p>
-                        <p className={`text-2xl font-bold mt-1 ${gstr3bSummary.netPayable > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                          ₹<CountUp to={Math.abs(gstr3bSummary.netPayable)} duration={2} separator="," />
+                        <p className={`text-2xl font-bold mt-1 ${gstr3bSummary.netPayable > 0 ? 'text-red-600' : 'text-green-600'}`} title={inr2(Math.abs(gstr3bSummary.netPayable))}>
+                          <CountUp to={Math.abs(gstr3bSummary.netPayable)} duration={2} separator="," formatter={formatINRShort} />
                           {gstr3bSummary.netPayable < 0 && ' (Credit)'}
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">Forward Output GST − ITC</p>
+
+                        {/* Settlement: paid vs remaining for the selected period */}
+                        <div className="mt-3 border-t pt-2 space-y-1">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">GST Paid{gstPeriod !== 'all' ? ` (${periodLabelOf(gstPeriod)})` : ''}</span>
+                            <span className="font-semibold text-green-600" title={inr2(gstSettlement.paid)}>{inr2(gstSettlement.paid)}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">{gstSettlement.overpaid > 0 ? 'Overpaid' : 'Remaining'}</span>
+                            <span className={`font-bold ${gstSettlement.overpaid > 0 ? 'text-blue-600' : gstSettlement.remaining > 0 ? 'text-red-600' : 'text-green-600'}`} title={inr2(gstSettlement.overpaid > 0 ? gstSettlement.overpaid : gstSettlement.remaining)}>
+                              {inr2(gstSettlement.overpaid > 0 ? gstSettlement.overpaid : gstSettlement.remaining)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <Button
+                          size="sm"
+                          className="w-full mt-3"
+                          onClick={() => {
+                            const period = gstPeriod !== 'all' ? gstPeriod : (periodOptions[0] || periodKeyOf(new Date().toISOString()));
+                            // Amount/split/date are auto-filled by the effect from
+                            // computePeriodLiability once the dialog opens.
+                            setGstPayForm({
+                              period, date: '', challan: '', mode: '',
+                              override: false, interState: false,
+                              itcOverride: false, itcAmount: '',
+                              amount: '', cgst: '', sgst: '', igst: '',
+                            });
+                            setGstPayOpen(true);
+                          }}
+                        >
+                          <Plus className="h-4 w-4 mr-1" /> Record GST Payment
+                        </Button>
                       </CardContent>
                     </Card>
                   </div>
+
+                  {/* Record GST Payment dialog */}
+                  <Dialog open={gstPayOpen} onOpenChange={setGstPayOpen}>
+                    <DialogContent>
+                      <DialogHeader>
+                        <DialogTitle>Record GST Payment</DialogTitle>
+                      </DialogHeader>
+                      {(() => {
+                        const itcOv = gstPayForm.itcOverride && gstPayForm.itcAmount !== '' ? parseFloat(gstPayForm.itcAmount) : undefined;
+                        const liab = gstPayForm.period ? computePeriodLiability(gstPayForm.period, itcOv) : null;
+                        const amtNum = parseFloat(gstPayForm.amount) || 0;
+                        const splitSum = (parseFloat(gstPayForm.cgst) || 0) + (parseFloat(gstPayForm.sgst) || 0) + (parseFloat(gstPayForm.igst) || 0);
+                        const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+                        const alreadyClear = !!liab && liab.remaining <= 0;
+                        const splitMismatch = round2(splitSum) !== round2(amtNum);
+                        const overRemaining = !!liab && amtNum > liab.remaining + 0.01;
+                        const canSave = !recordGstPayment.isPending && !!gstPayForm.period && amtNum > 0 && !!gstPayForm.date && !splitMismatch;
+                        return (
+                      <>
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <Label>Return Period *</Label>
+                          <Select value={gstPayForm.period} onValueChange={(v) => setGstPayForm(f => ({ ...f, period: v }))}>
+                            <SelectTrigger><SelectValue placeholder="Select period" /></SelectTrigger>
+                            <SelectContent>
+                              {periodOptions.map((key) => (
+                                <SelectItem key={key} value={key}>{periodLabelOf(key)}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {/* Auto-computed liability summary for the chosen month */}
+                        {liab && (
+                          <div className="rounded-md border bg-muted/30 p-3 text-xs space-y-1">
+                            <div className="flex justify-between"><span className="text-muted-foreground">Output GST</span><span className="font-medium">{inr2(liab.output)}</span></div>
+                            <div className="flex items-center justify-between">
+                              <label className="flex items-center gap-2 cursor-pointer text-muted-foreground">
+                                <input type="checkbox" checked={gstPayForm.itcOverride} onChange={(e) => setGstPayForm(f => ({ ...f, itcOverride: e.target.checked }))} />
+                                <span>Less: ITC {gstPayForm.itcOverride ? '(overridden)' : '(auto)'}</span>
+                              </label>
+                              {gstPayForm.itcOverride ? (
+                                <Input type="number" min="0" value={gstPayForm.itcAmount} onChange={(e) => setGstPayForm(f => ({ ...f, itcAmount: e.target.value }))} className="h-7 w-32 text-right text-xs" placeholder="ITC used" />
+                              ) : (
+                                <span className="font-medium">− {inr2(liab.itc)}</span>
+                              )}
+                            </div>
+                            {gstPayForm.itcOverride && liab.computedItc !== liab.itc && (
+                              <div className="flex justify-between text-[11px] text-muted-foreground"><span>Computed ITC (from purchases)</span><span>{inr2(liab.computedItc)}</span></div>
+                            )}
+                            <div className="flex justify-between border-t pt-1"><span className="text-muted-foreground">Net Payable</span><span className="font-semibold">{inr2(liab.net)}</span></div>
+                            <div className="flex justify-between"><span className="text-muted-foreground">Already Paid</span><span className="font-medium text-green-600">− {inr2(liab.paid)}</span></div>
+                            <div className="flex justify-between border-t pt-1"><span className="text-muted-foreground">Remaining (auto-filled)</span><span className={`font-bold ${liab.remaining > 0 ? 'text-red-600' : 'text-green-600'}`}>{inr2(liab.remaining)}</span></div>
+                            <div className="flex justify-between text-[11px] text-muted-foreground pt-1"><span>Due date (auto)</span><span>{new Date(liab.dueDate).toLocaleDateString('en-IN')}</span></div>
+                          </div>
+                        )}
+
+                        {alreadyClear && (
+                          <div className="rounded-md border border-green-300 bg-green-50 dark:bg-green-950/20 px-3 py-2 text-xs text-green-700 dark:text-green-400">
+                            This period is already fully settled. Recording another payment will overpay it.
+                          </div>
+                        )}
+
+                        {/* Manual-override toggle. The tax split is derived
+                            exactly from each invoice's place of supply, so no
+                            inter-state guess is needed here. */}
+                        <div className="flex items-center gap-2 text-xs">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox" checked={gstPayForm.override} onChange={(e) => setGstPayForm(f => ({ ...f, override: e.target.checked }))} />
+                            <span>Manual override (part-payment / adjust amount)</span>
+                          </label>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <Label>Amount Paid (₹) *</Label>
+                            <Input type="number" min="0" value={gstPayForm.amount} readOnly={!gstPayForm.override}
+                              className={!gstPayForm.override ? 'bg-muted' : ''}
+                              onChange={(e) => setGstPayForm(f => ({ ...f, amount: e.target.value }))} placeholder="Auto from liability" />
+                          </div>
+                          <div className="space-y-1">
+                            <Label>Payment Date *</Label>
+                            <Input type="date" value={gstPayForm.date} onChange={(e) => setGstPayForm(f => ({ ...f, date: e.target.value }))} />
+                          </div>
+                        </div>
+
+                        {/* Tax split — auto (read-only) unless override */}
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="space-y-1">
+                            <Label className="text-xs">CGST (₹)</Label>
+                            <Input type="number" min="0" value={gstPayForm.cgst} readOnly={!gstPayForm.override} className={!gstPayForm.override ? 'bg-muted' : ''} onChange={(e) => setGstPayForm(f => ({ ...f, cgst: e.target.value }))} />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">SGST (₹)</Label>
+                            <Input type="number" min="0" value={gstPayForm.sgst} readOnly={!gstPayForm.override} className={!gstPayForm.override ? 'bg-muted' : ''} onChange={(e) => setGstPayForm(f => ({ ...f, sgst: e.target.value }))} />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">IGST (₹)</Label>
+                            <Input type="number" min="0" value={gstPayForm.igst} readOnly={!gstPayForm.override} className={!gstPayForm.override ? 'bg-muted' : ''} onChange={(e) => setGstPayForm(f => ({ ...f, igst: e.target.value }))} />
+                          </div>
+                        </div>
+                        {gstPayForm.override && splitMismatch && (
+                          <p className="text-[11px] text-amber-600">CGST + SGST + IGST ({inr2(splitSum)}) must equal Amount Paid ({inr2(amtNum)}).</p>
+                        )}
+                        {overRemaining && !gstPayForm.override && (
+                          <p className="text-[11px] text-amber-600">Amount exceeds the remaining liability — switch on Manual override to proceed intentionally.</p>
+                        )}
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <Label>Challan / CIN Number</Label>
+                            <Input value={gstPayForm.challan} onChange={(e) => setGstPayForm(f => ({ ...f, challan: e.target.value }))} placeholder="CIN / challan no." />
+                          </div>
+                          <div className="space-y-1">
+                            <Label>Payment Mode</Label>
+                            <Select value={gstPayForm.mode} onValueChange={(v) => setGstPayForm(f => ({ ...f, mode: v }))}>
+                              <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="Bank Transfer">Bank Transfer</SelectItem>
+                                <SelectItem value="UPI">UPI</SelectItem>
+                                <SelectItem value="NEFT/RTGS">NEFT/RTGS</SelectItem>
+                                <SelectItem value="Cheque">Cheque</SelectItem>
+                                <SelectItem value="Cash">Cash</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <Button variant="outline" onClick={() => setGstPayOpen(false)}>Cancel</Button>
+                        <Button
+                          disabled={!canSave}
+                          onClick={() => recordGstPayment.mutate({
+                            period: gstPayForm.period,
+                            amount: amtNum,
+                            date: gstPayForm.date,
+                            challan: gstPayForm.challan,
+                            mode: gstPayForm.mode,
+                            cgst: parseFloat(gstPayForm.cgst) || 0,
+                            sgst: parseFloat(gstPayForm.sgst) || 0,
+                            igst: parseFloat(gstPayForm.igst) || 0,
+                            itcUsed: gstPayForm.itcOverride && gstPayForm.itcAmount !== '' ? (parseFloat(gstPayForm.itcAmount) || 0) : null,
+                          })}
+                        >
+                          {recordGstPayment.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+                          Save Payment
+                        </Button>
+                      </DialogFooter>
+                      </>
+                        );
+                      })()}
+                    </DialogContent>
+                  </Dialog>
 
                   {/* RCM supplies — reported, but tax paid by recipient (excluded from payable above) */}
                   {gstr3bSummary.rcmTurnover > 0 && (
@@ -709,7 +1174,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                       <CardContent className="p-4 flex items-center justify-between">
                         <div>
                           <p className="text-xs text-muted-foreground font-medium">RCM Outward Supplies (Security Services)</p>
-                          <p className="text-lg font-bold text-amber-700 dark:text-amber-400 mt-0.5">₹{gstr3bSummary.rcmTurnover.toLocaleString()}</p>
+                          <p className="text-lg font-bold text-amber-700 dark:text-amber-400 mt-0.5" title={inr2(gstr3bSummary.rcmTurnover)}>{formatINRShort(gstr3bSummary.rcmTurnover)}</p>
                         </div>
                         <p className="text-[11px] text-amber-700 dark:text-amber-400 max-w-xs text-right">
                           Reported in GSTR-1 as reverse-charge supplies. GST is paid by the registered recipient — <b>not</b> included in the agency&apos;s net payable.
@@ -742,10 +1207,10 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                             {gstr3bSummary.monthWise.map(m => (
                               <TableRow key={m.month}>
                                 <TableCell className="font-medium">{m.month}</TableCell>
-                                <TableCell className="text-right text-green-600">₹{m.output.toLocaleString()}</TableCell>
-                                <TableCell className="text-right text-blue-600">₹{m.itc.toLocaleString()}</TableCell>
+                                <TableCell className="text-right text-green-600">₹{m.output.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                                <TableCell className="text-right text-blue-600">₹{m.itc.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
                                 <TableCell className={`text-right font-semibold ${m.net > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                  ₹{Math.abs(m.net).toLocaleString()}{m.net < 0 ? ' (Cr)' : ''}
+                                  ₹{Math.abs(m.net).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{m.net < 0 ? ' (Cr)' : ''}
                                 </TableCell>
                               </TableRow>
                             ))}
@@ -774,12 +1239,12 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                         <TableHeader>
                           <TableRow>
                             <TableHead>Date</TableHead>
+                            <TableHead>Client Name</TableHead>
                             <TableHead>Description</TableHead>
-                            <TableHead>Party</TableHead>
                             <TableHead>Type</TableHead>
                             <TableHead className="text-right">Debit (ITC)</TableHead>
                             <TableHead className="text-right">Credit (Output)</TableHead>
-                            <TableHead className="text-right">Balance</TableHead>
+                            <TableHead className="text-right">Running Balance</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -790,17 +1255,18 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                               return e.description?.toLowerCase().includes(s) || e.party?.toLowerCase().includes(s);
                             })
                             .map((entry, idx) => (
-                            <TableRow key={`${entry.id}-${idx}`}>
+                            <TableRow key={`${entry.id}-${idx}`} className={entry.isOpening ? 'bg-muted/40 italic' : ''}>
                               <TableCell className="text-sm">{new Date(entry.date).toLocaleDateString('en-IN')}</TableCell>
-                              <TableCell className="font-medium">{entry.description}</TableCell>
-                              <TableCell>{entry.party}</TableCell>
+                              <TableCell className="font-medium">{entry.party}</TableCell>
+                              <TableCell>{entry.description}</TableCell>
                               <TableCell>
                                 <Badge variant="outline" className="text-xs">{entry.type}</Badge>
                               </TableCell>
-                              <TableCell className="text-right text-red-600">{entry.debit ? `₹${entry.debit.toLocaleString()}` : ''}</TableCell>
-                              <TableCell className="text-right text-green-600">{entry.credit ? `₹${entry.credit.toLocaleString()}` : ''}</TableCell>
-                              <TableCell className={`text-right font-semibold ${entry.balance >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                ₹{Math.abs(entry.balance).toLocaleString()}{entry.balance < 0 ? ' Dr' : ' Cr'}
+                              <TableCell className="text-right text-red-600">{entry.debit ? inr2(entry.debit) : ''}</TableCell>
+                              <TableCell className="text-right text-green-600">{entry.credit ? inr2(entry.credit) : ''}</TableCell>
+                              <TableCell className={`text-right font-semibold ${entry.balance > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                {inr2(Math.abs(entry.balance))}
+                                {entry.balance > 0 ? ' Payable' : entry.balance < 0 ? ' Credit' : ''}
                               </TableCell>
                             </TableRow>
                           ))}
@@ -876,15 +1342,15 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                             ? <Badge className="bg-red-100 text-red-700 dark:bg-red-900/30">Outward</Badge>
                             : <Badge className="bg-green-100 text-green-700 dark:bg-green-900/30">Inward</Badge>}
                         </TableCell>
-                        <TableCell className="text-right text-red-600">{entry.direction === 'outward' ? `₹${entry.total_amount.toLocaleString()}` : ''}</TableCell>
-                        <TableCell className="text-right text-green-600">{entry.direction === 'inward' ? `₹${entry.total_amount.toLocaleString()}` : ''}</TableCell>
+                        <TableCell className="text-right text-red-600">{entry.direction === 'outward' ? inr2(entry.total_amount) : ''}</TableCell>
+                        <TableCell className="text-right text-green-600">{entry.direction === 'inward' ? inr2(entry.total_amount) : ''}</TableCell>
                         <TableCell>{getStatusBadge(entry.status)}</TableCell>
                       </TableRow>
                     ))}
                     <TableRow className="font-bold bg-gray-50 dark:bg-gray-900">
                       <TableCell colSpan={5}>Totals</TableCell>
-                      <TableCell className="text-right text-red-600">₹{ledgerPayables.reduce((s, e) => s + (e.total_amount || 0), 0).toLocaleString()}</TableCell>
-                      <TableCell className="text-right text-green-600">₹{ledgerReceivables.reduce((s, e) => s + (e.total_amount || 0), 0).toLocaleString()}</TableCell>
+                      <TableCell className="text-right text-red-600">{inr2(ledgerPayables.reduce((s, e) => s + (e.total_amount || 0), 0))}</TableCell>
+                      <TableCell className="text-right text-green-600">{inr2(ledgerReceivables.reduce((s, e) => s + (e.total_amount || 0), 0))}</TableCell>
                       <TableCell />
                     </TableRow>
                   </TableBody>
@@ -955,7 +1421,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                       <TableRow key={entry.id}>
                         <TableCell className="font-medium">{entry.sub_type}</TableCell>
                         <TableCell>{entry.period}</TableCell>
-                        <TableCell className="text-right">₹{entry.amount.toLocaleString()}</TableCell>
+                        <TableCell className="text-right">{inr2(entry.amount)}</TableCell>
                         <TableCell>{entry.due_date ? new Date(entry.due_date).toLocaleDateString('en-IN') : '—'}</TableCell>
                         <TableCell>{entry.filing_date ? new Date(entry.filing_date).toLocaleDateString('en-IN') : '—'}</TableCell>
                         <TableCell>{getStatusBadge(entry.status)}</TableCell>

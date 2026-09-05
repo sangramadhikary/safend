@@ -1103,6 +1103,20 @@ export function WorkorderForm({ isOpen, onClose, onSubmit, editData }: Workorder
                 handleChange={handleChange} 
                 handleSelectChange={handleSelectChange}
                 onGstFetch={(data) => {
+                  // When the lookup returned a structured place of business, use
+                  // its fields directly — no fragile string parsing needed.
+                  if (data.structured) {
+                    setFormData(prev => ({
+                      ...prev,
+                      client: data.client || prev.client,
+                      address: data.structured!.address || prev.address,
+                      city: data.structured!.city || prev.city,
+                      state: data.structured!.state || prev.state,
+                      pincode: data.structured!.pincode || prev.pincode,
+                    }));
+                    return;
+                  }
+
                   // Parse the full address string into separate fields
                   let streetAddress = data.address || '';
                   let city = '';

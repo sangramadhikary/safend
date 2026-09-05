@@ -24,6 +24,17 @@ const NO_GST_REASONS = [
 
 export const NO_GST_PREFIX = 'NO_GST:';
 
+/** A registered place of business returned by the GST lookup. */
+export interface PlaceOfBusiness {
+  type: 'principal' | 'additional';
+  nature: string;
+  address: string;
+  city: string;
+  district: string;
+  state: string;
+  pincode: string;
+}
+
 export function isNoGstValue(value: string) {
   return value?.startsWith(NO_GST_PREFIX);
 }
@@ -48,7 +59,15 @@ interface BasicInfoTabProps {
   };
   handleChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
   handleSelectChange: (value: string, name: string) => void;
-  onGstFetch?: (data: { client: string; address: string; pincode: string; state: string }) => void;
+  onGstFetch?: (data: {
+    client: string;
+    address: string;
+    pincode: string;
+    state: string;
+    /** When present, billing fields are set directly from this structured
+     *  place of business instead of parsing the flat address string. */
+    structured?: { address: string; city: string; state: string; pincode: string };
+  }) => void;
   onClientSelect?: (fields: {
     client: string;
     clientGst: string;
@@ -67,6 +86,10 @@ export function BasicInfoTab({ formData, handleChange, handleSelectChange, onGst
   const [gstFetched, setGstFetched] = useState(false);
   const [gstError, setGstError] = useState("");
   const [gstStatus, setGstStatus] = useState("");
+
+  // Places of business returned by the GST lookup (principal + additional).
+  const [gstAddresses, setGstAddresses] = useState<PlaceOfBusiness[]>([]);
+  const [selectedAddressIdx, setSelectedAddressIdx] = useState(0);
 
   const [noGstOpen, setNoGstOpen] = useState(false);
   const noGstRef = useRef<HTMLDivElement>(null);
@@ -132,6 +155,20 @@ export function BasicInfoTab({ formData, handleChange, handleSelectChange, onGst
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [clientPickerOpen]);
 
+  // When opening an existing work order that already has a GSTIN, preload the
+  // list of registered places of business so the "Place of Business" selector
+  // is available without the user retyping the GSTIN. This does NOT overwrite
+  // the saved billing address (autofill: false).
+  const preloadedGstRef = useRef<string>("");
+  useEffect(() => {
+    const gst = (formData.clientGst || '').trim().toUpperCase();
+    if (gst.length !== 15 || isNoGstValue(gst)) return;
+    if (preloadedGstRef.current === gst) return;
+    preloadedGstRef.current = gst;
+    autoFetchGst(gst, { autofill: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formData.clientGst]);
+
   const applyClient = (c: typeof regularClients[number]) => {
     onClientSelect?.({
       client: c.name,
@@ -148,20 +185,51 @@ export function BasicInfoTab({ formData, handleChange, handleSelectChange, onGst
     setClientSearch("");
     setGstFetched(false);
     setGstError("");
+    setGstAddresses([]);
+    setSelectedAddressIdx(0);
   };
 
   const isNoGst = isNoGstValue(formData.clientGst);
   const noGstReason = getNoGstReason(formData.clientGst);
 
-  const autoFetchGst = async (gstin: string) => {
+  /**
+   * Fetch GSTIN profile + places of business.
+   * @param opts.autofill When true (default) the principal address is pushed
+   *   into the billing fields. Set false when preloading for an existing work
+   *   order so the saved billing address is preserved — we only populate the
+   *   Place of Business dropdown and highlight whichever place currently matches.
+   */
+  const autoFetchGst = async (gstin: string, opts: { autofill?: boolean } = {}) => {
+    const autofill = opts.autofill ?? true;
     if (!gstin || gstin.length < 15) { setGstError("Enter a valid 15-character GSTIN"); return; }
     setGstLoading(true); setGstError(""); setGstFetched(false);
     try {
       const res = await fetch(`/api/gst-lookup?gstin=${gstin}`);
       const json = await res.json();
       if (!res.ok || !json.success) { setGstError(json.error || "GST lookup failed"); return; }
-      const { legalName, tradeName, address, pincode, status } = json.data;
+      const { legalName, tradeName, address, pincode, status, addresses } = json.data;
       setGstStatus(status || '');
+
+      const places: PlaceOfBusiness[] = Array.isArray(addresses) ? addresses : [];
+      setGstAddresses(places);
+
+      // Highlight the place of business that matches the currently saved
+      // billing details (by PIN + address text), so an edited work order shows
+      // the right selection instead of defaulting to the principal.
+      const matchIdx = (() => {
+        if (places.length === 0) return 0;
+        const savedAddr = (formData.address || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const savedPin = (formData.pincode || '').trim();
+        const byExact = places.findIndex(p =>
+          savedPin && p.pincode === savedPin &&
+          savedAddr && p.address.toLowerCase().replace(/\s+/g, ' ').trim() === savedAddr
+        );
+        if (byExact >= 0) return byExact;
+        const byPin = savedPin ? places.findIndex(p => p.pincode === savedPin) : -1;
+        return byPin >= 0 ? byPin : 0;
+      })();
+      setSelectedAddressIdx(matchIdx);
+
       const stateCodeMap: Record<string, string> = {
         '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
         '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
@@ -177,13 +245,40 @@ export function BasicInfoTab({ formData, handleChange, handleSelectChange, onGst
         '36': 'Telangana', '37': 'Andhra Pradesh',
       };
       const stateName = stateCodeMap[gstin.substring(0, 2)] || '';
-      if (onGstFetch) onGstFetch({ client: tradeName || legalName || '', address: address || '', pincode: pincode || '', state: stateName });
+
+      // Prefer the structured principal place of business when available, so
+      // billing fields are filled precisely instead of via string-parsing.
+      const principal = places[0];
+      if (autofill && onGstFetch) {
+        onGstFetch({
+          client: tradeName || legalName || '',
+          address: address || '',
+          pincode: pincode || '',
+          state: stateName,
+          structured: principal
+            ? { address: principal.address, city: principal.city, state: principal.state || stateName, pincode: principal.pincode }
+            : undefined,
+        });
+      }
       setGstFetched(true);
     } catch (err: any) {
       setGstError(err.message || "Network error");
     } finally {
       setGstLoading(false);
     }
+  };
+
+  const applyPlaceOfBusiness = (idx: number) => {
+    const place = gstAddresses[idx];
+    if (!place) return;
+    setSelectedAddressIdx(idx);
+    onGstFetch?.({
+      client: formData.client || '',
+      address: place.address,
+      pincode: place.pincode,
+      state: place.state,
+      structured: { address: place.address, city: place.city, state: place.state, pincode: place.pincode },
+    });
   };
 
   return (
@@ -275,7 +370,14 @@ export function BasicInfoTab({ formData, handleChange, handleSelectChange, onGst
                 handleChange(syntheticEvent);
                 setGstFetched(false);
                 setGstError("");
-                if (upper.trim().length === 15) autoFetchGst(upper.trim());
+                setGstAddresses([]);
+                setSelectedAddressIdx(0);
+                const trimmed = upper.trim();
+                if (trimmed.length === 15) {
+                  // Mark as handled so the edit-preload effect doesn't re-fetch.
+                  preloadedGstRef.current = trimmed;
+                  autoFetchGst(trimmed);
+                }
               }}
               placeholder={isNoGst ? `No GST — ${noGstReason}` : "e.g. 22AAAAA0000A1Z5"}
               className={`flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm font-mono uppercase shadow-xs transition-colors pr-24 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${gstFetched ? 'border-green-500' : ''} ${isNoGst ? 'placeholder:text-orange-500 placeholder:font-sans placeholder:not-italic placeholder:text-xs' : ''}`}
@@ -347,6 +449,38 @@ export function BasicInfoTab({ formData, handleChange, handleSelectChange, onGst
       {/* ─── Section 2: Billing Details ─── */}
       <div className="space-y-4">
         <h4 className="text-sm font-bold text-muted-foreground uppercase tracking-wider border-b pb-2">Billing Details</h4>
+
+        {/* Place of Business selector — shown when the GSTIN has more than one
+            registered place of business (principal + additional). Picking one
+            fills the billing address fields below. */}
+        {gstAddresses.length > 1 && (
+          <div className="space-y-2">
+            <Label htmlFor="placeOfBusiness">
+              Place of Business
+              <span className="text-muted-foreground font-normal"> — this GSTIN has {gstAddresses.length} registered addresses</span>
+            </Label>
+            <Select
+              value={String(selectedAddressIdx)}
+              onValueChange={(v) => applyPlaceOfBusiness(Number(v))}
+            >
+              <SelectTrigger id="placeOfBusiness">
+                <SelectValue placeholder="Select a place of business" />
+              </SelectTrigger>
+              <SelectContent>
+                {gstAddresses.map((p, idx) => (
+                  <SelectItem key={idx} value={String(idx)}>
+                    <span className="mr-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-gray-100 text-gray-600">
+                      {p.type === 'principal' ? 'Principal' : `Additional ${idx}`}
+                    </span>
+                    <span className="text-sm">{[p.city || p.district, p.pincode].filter(Boolean).join(' · ') || p.address.slice(0, 40)}</span>
+                    {p.nature && <span className="ml-1.5 text-[11px] text-muted-foreground">· {p.nature}</span>}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">Selecting an address updates the billing address, city, state and PIN below.</p>
+          </div>
+        )}
 
         <div className="space-y-2">
           <Label htmlFor="address">Billing Address *</Label>
