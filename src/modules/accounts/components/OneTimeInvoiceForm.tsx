@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,6 +17,7 @@ import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
 import { fetchWorkOrderOutstandingInvoices, computeOutstandingFromRows, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
+import { deriveServiceLine, daysInServicePeriod } from '@/lib/invoice/service-line-derivation';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, extractStateCode } from '@/lib/tax/gst';
 import { formatINRShort } from '@/lib/format';
 
@@ -171,6 +172,42 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
 
   // ── Service lines ─────────────────────────────────────────────────────────
   const [lines, setLines] = useState<ServiceLine[]>([newLine()]);
+
+  // Auto-update each line's Days from the selected Service Period (a 30-day
+  // month → 30, February → 28/29, a date range → its inclusive span). Duties are
+  // rescaled ONLY for untouched full-month lines (duties === manpower × oldDays)
+  // so a full month stays a full month across a period change; lines the user
+  // manually customised are left as-is. Skips the first render so restoring an
+  // edited invoice's saved Days/Duties is never clobbered.
+  const periodDays = daysInServicePeriod({
+    mode: servicePeriodMode,
+    month: servicePeriodMonth,
+    start: servicePeriodStart,
+    end: servicePeriodEnd,
+  });
+  const didMountPeriodSync = useRef(false);
+  useEffect(() => {
+    if (!didMountPeriodSync.current) {
+      didMountPeriodSync.current = true;
+      return;
+    }
+    if (!periodDays || periodDays <= 0) return;
+    setLines(prev =>
+      prev.map(l => {
+        const oldDays = parseFloat(l.daysInMonth) || 0;
+        if (oldDays === periodDays) return l;
+        const manpower = parseFloat(l.manpower) || 0;
+        const duties = parseFloat(l.duties) || 0;
+        const next: ServiceLine = { ...l, daysInMonth: String(periodDays) };
+        // Only rescale duties for an untouched full-month line.
+        if (manpower > 0 && oldDays > 0 && duties === manpower * oldDays) {
+          next.duties = String(manpower * periodDays);
+        }
+        return next;
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [periodDays]);
 
   // ── Payment fields ────────────────────────────────────────────────────────
   const [paymentMode,        setPaymentMode]        = useState('Bank Transfer');
@@ -556,26 +593,19 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
             const serviceLabel = INSTANCE_KEY_TO_SERVICE[key];
             if (!serviceLabel) continue;
 
-            // Sum up manpower across all instances and shifts
-            let totalManpower = 0;
-            let lineShiftType: '8H' | '12H' = shiftType;
-            for (const inst of instArray) {
-              lineShiftType = inst.shiftType === '12H' ? '12H' : lineShiftType;
-              const s = inst.shifts || {};
-              if (s.day?.enabled) totalManpower += s.day.quantity || 0;
-              if (s.afternoon?.enabled && lineShiftType === '8H') totalManpower += s.afternoon.quantity || 0;
-              if (s.night?.enabled) totalManpower += s.night.quantity || 0;
-            }
-            if (totalManpower === 0) continue;
+            // Derive WO Price/Month, manpower and duties via the shared,
+            // unit-tested helper. It reads ALL enabled shifts (not just day),
+            // treats the stored rate as the monthly per-personnel price (no ×26),
+            // and returns duties as a full month per guard (headcount × days) —
+            // matching how calculations.ts prices the line.
+            // Use the selected Service Period's day count when set, so lines are
+            // built for the right month from the start; otherwise the current
+            // month's days. The period-sync effect keeps them aligned afterward.
+            const buildDays = periodDays && periodDays > 0 ? periodDays : (parseFloat(defaultDays()) || 30);
+            const derived = deriveServiceLine(instArray, shiftType, buildDays);
+            if (!derived) continue;
 
-            // Derive WO price from rate data if available
-            let woPrice = '';
-            const firstInst = instArray[0];
-            const dayRate = firstInst?.shifts?.day?.rate || 0;
-            if (dayRate > 0) {
-              // daily rate × working days per month ≈ monthly WO price
-              woPrice = String(Math.round(dayRate * 26));
-            }
+            const woPrice = derived.woPricePerMonth > 0 ? String(derived.woPricePerMonth) : '';
 
             const opt = SERVICE_OPTIONS.find(o => o.label === serviceLabel);
             builtLines.push({
@@ -585,13 +615,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
               sac: opt?.sac ?? '998525',
               location: postName,
               hideLocation: false,
-              manpower: String(totalManpower),
+              manpower: String(derived.totalManpower),
               woPricePerMonth: woPrice,
               hideWoPrice: false,
-              daysInMonth: defaultDays(),
-              duties: String(totalManpower),
+              daysInMonth: String(buildDays),
+              duties: String(derived.duties),
               manpowerRole: '',
-              shiftType: lineShiftType,
+              shiftType: derived.shiftType,
               hideShiftType: false,
             });
           }
@@ -603,6 +633,10 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         // vanishing without explanation.
         if (builtLines.length === linesBefore) {
           const totalGuards = post.guards;
+          // No rate data on this path, so WO Price is left blank for the user
+          // to fill. Duties still default to a full month per guard (headcount
+          // × days) to match the per-personnel billing model, not headcount.
+          const fallbackDays = Math.round(periodDays && periodDays > 0 ? periodDays : (parseFloat(defaultDays()) || 30));
           builtLines.push({
             id: crypto.randomUUID(),
             serviceType: 'Unarmed Guards',
@@ -613,8 +647,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
             manpower: String(totalGuards),
             woPricePerMonth: '',
             hideWoPrice: false,
-            daysInMonth: defaultDays(),
-            duties: String(totalGuards),
+            daysInMonth: String(fallbackDays),
+            duties: String(totalGuards * fallbackDays),
             manpowerRole: '',
             shiftType,
             hideShiftType: false,
