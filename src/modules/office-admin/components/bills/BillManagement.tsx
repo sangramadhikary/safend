@@ -19,6 +19,7 @@ import { BillForm } from "./BillForm";
 import { PaymentDialog } from "./PaymentDialog";
 import { RecurringBill, BillPayment } from "./types";
 import { CountUp } from "@/components/dashboard/CountUp";
+import { formatINR, formatINRShort } from "@/lib/format";
 
 export function BillManagement() {
   const { activeBranch, branches, isLoading } = useAppData();
@@ -116,7 +117,7 @@ export function BillManagement() {
             </div>
             <div>
               <p className="text-xs text-muted-foreground">Monthly Avg</p>
-              <p className="text-xl font-bold">₹<CountUp to={Math.round(stats.totalMonthly)} duration={2} separator="," /></p>
+              <p className="text-xl font-bold" title={formatINR(Math.round(stats.totalMonthly))}><CountUp to={Math.round(stats.totalMonthly)} duration={2} formatter={formatINRShort} /></p>
             </div>
           </CardContent>
         </Card>

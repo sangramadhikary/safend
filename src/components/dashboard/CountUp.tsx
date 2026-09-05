@@ -12,6 +12,13 @@ interface CountUpProps {
   className?: string;
   startWhen?: boolean;
   separator?: string;
+  /**
+   * Optional custom formatter applied to the animating value (e.g. an
+   * abbreviated Indian-currency formatter like formatINRShort). When provided
+   * it overrides the built-in grouping/decimals logic entirely, so the counter
+   * can display "₹10.37 L" instead of a plain grouped number.
+   */
+  formatter?: (value: number) => string;
   onStart?: () => void;
   onEnd?: () => void;
 }
@@ -25,6 +32,7 @@ export function CountUp({
   className = '',
   startWhen = true,
   separator = '',
+  formatter,
   onStart,
   onEnd,
 }: CountUpProps) {
@@ -50,16 +58,20 @@ export function CountUp({
 
   const formatValue = useCallback(
     (latest: number) => {
+      // A custom formatter (e.g. abbreviated Indian currency) takes full control.
+      if (formatter) return formatter(latest);
       const hasDecimals = maxDecimals > 0;
       const options: Intl.NumberFormatOptions = {
         useGrouping: !!separator,
         minimumFractionDigits: hasDecimals ? maxDecimals : 0,
         maximumFractionDigits: hasDecimals ? maxDecimals : 0,
       };
-      const formattedNumber = Intl.NumberFormat('en-US', options).format(latest);
+      // Group in the Indian number system (lakh/crore comma placement) so a
+      // separator of "," renders 10,36,870 rather than the US 1,036,870.
+      const formattedNumber = Intl.NumberFormat('en-IN', options).format(latest);
       return separator ? formattedNumber.replace(/,/g, separator) : formattedNumber;
     },
-    [maxDecimals, separator]
+    [maxDecimals, separator, formatter]
   );
 
   useEffect(() => {

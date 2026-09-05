@@ -14,6 +14,7 @@ import { CountUp } from '@/components/dashboard/CountUp';
 import { useQuery } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { applyBranchScope, getBranchScopeFilter } from '@/utils/branchScope';
+import { formatINRShort, formatINR } from '@/lib/format';
 
 export interface AccountsDashboardProps {
   filter: string;
@@ -119,8 +120,8 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
             <div className="flex justify-between items-start">
               <div>
                 <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Receivables</p>
-                <p className="text-2xl font-bold mt-1">
-                  {isLoading ? '—' : <>₹<CountUp to={receivablesStats?.totalOutstanding ?? 0} duration={2} separator="," /></>}
+                <p className="text-2xl font-bold mt-1" title={formatINR(receivablesStats?.totalOutstanding ?? 0)}>
+                  {isLoading ? '—' : <CountUp to={receivablesStats?.totalOutstanding ?? 0} duration={2} formatter={formatINRShort} />}
                 </p>
               </div>
               <div className="rounded-full p-2 bg-green-100 dark:bg-green-900/30">
@@ -136,8 +137,8 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
             <div className="flex justify-between items-start">
               <div>
                 <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Payables</p>
-                <p className="text-2xl font-bold mt-1 text-red-600">
-                  {isLoading ? '—' : <>₹<CountUp to={payablesStats?.totalPending ?? 0} duration={2} separator="," /></>}
+                <p className="text-2xl font-bold mt-1 text-red-600" title={formatINR(payablesStats?.totalPending ?? 0)}>
+                  {isLoading ? '—' : <CountUp to={payablesStats?.totalPending ?? 0} duration={2} formatter={formatINRShort} />}
                 </p>
               </div>
               <div className="rounded-full p-2 bg-red-100 dark:bg-red-900/30">
@@ -153,8 +154,8 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
             <div className="flex justify-between items-start">
               <div>
                 <p className="text-xs text-muted-foreground uppercase tracking-wide">Salary Pending</p>
-                <p className="text-2xl font-bold mt-1">
-                  {isLoading ? '—' : <>₹<CountUp to={totalPendingSalary} duration={2} separator="," /></>}
+                <p className="text-2xl font-bold mt-1" title={formatINR(totalPendingSalary)}>
+                  {isLoading ? '—' : <CountUp to={totalPendingSalary} duration={2} formatter={formatINRShort} />}
                 </p>
               </div>
               <div className="rounded-full p-2 bg-blue-100 dark:bg-blue-900/30">
@@ -208,7 +209,7 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
                           : 'Payroll Run'}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        {run.total_employees} employees · ₹{(run.total_net || 0).toLocaleString()} net payable
+                        {run.total_employees} employees · {formatINR(run.total_net || 0)} net payable
                       </p>
                     </div>
                     <ArrowRight className="h-4 w-4 text-muted-foreground" />
@@ -283,7 +284,7 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
             </div>
             <div className="text-center p-4 bg-amber-50 dark:bg-amber-900/10 rounded-lg">
               <p className="text-xs text-muted-foreground">Salary Pending Approval</p>
-              <p className="text-xl font-bold mt-1">₹{totalPendingSalary.toLocaleString()}</p>
+              <p className="text-xl font-bold mt-1" title={formatINR(totalPendingSalary)}>{formatINRShort(totalPendingSalary)}</p>
               <p className="text-xs text-muted-foreground">{pendingPayrollRuns.length} run{pendingPayrollRuns.length !== 1 ? 's' : ''} pending</p>
             </div>
             <div className="text-center p-4 bg-red-50 dark:bg-red-900/10 rounded-lg">
@@ -332,7 +333,7 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
                       <Badge variant="outline" className="text-xs">{item.status}</Badge>
                     </TableCell>
                     <TableCell className="text-right font-medium text-red-600">
-                      {item.financial_penalty_amount ? `₹${item.financial_penalty_amount.toLocaleString()}` : '—'}
+                      {item.financial_penalty_amount ? formatINR(item.financial_penalty_amount) : '—'}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {new Date(item.created_at).toLocaleDateString()}

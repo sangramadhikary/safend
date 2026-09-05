@@ -3,6 +3,7 @@
 import { Card, CardContent, CardHeader, CardFooter } from "@/components/ui/card";
 import { BadgeDelta, DeltaType } from "@/components/ui/badge-delta";
 import { ArrowTrendingUpIcon, CurrencyRupeeIcon, BanknotesIcon, ChartBarIcon } from "@heroicons/react/24/outline";
+import { formatINR, formatINRShort } from "@/lib/format";
 
 interface InvoiceStatusCardsProps {
   totalOutstanding: number;
@@ -25,9 +26,9 @@ export function InvoiceStatusCards({
           <CurrencyRupeeIcon className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">₹{(totalOutstanding/100000).toFixed(1)}L</div>
+          <div className="text-2xl font-bold" title={formatINR(totalOutstanding)}>{formatINRShort(totalOutstanding)}</div>
           <p className="text-xs text-muted-foreground">
-            From {totalBilled.toLocaleString()} total billed
+            From {formatINR(totalBilled)} total billed
           </p>
         </CardContent>
         <CardFooter className="pb-2">
@@ -44,7 +45,7 @@ export function InvoiceStatusCards({
           <BanknotesIcon className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">₹{(totalCollected/100000).toFixed(1)}L</div>
+          <div className="text-2xl font-bold" title={formatINR(totalCollected)}>{formatINRShort(totalCollected)}</div>
           <p className="text-xs text-muted-foreground">
             In current financial year
           </p>

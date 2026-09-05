@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -40,7 +40,9 @@ import { isEInvoiceRequired } from '@/lib/invoice/calculations';
 import { computeSettlement } from '@/lib/invoice/payment-settlement';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, type GstType } from '@/lib/tax/gst';
 import { auditActions, logAuditEvent, logChange } from '@/utils/auditLog';
-import { formatINRShort } from '@/lib/format';
+import { formatINRShort, formatINR } from '@/lib/format';
+import { getClientByName } from '@/services/supabase/ClientService';
+import { buildInvoiceEmailHtml, buildInvoiceEmailText, buildInvoiceEmailSubject, ENCLOSURE_LABELS, type EnclosureKind } from '@/lib/invoice/invoice-email';
 
 interface ReceivablesProps {
   filter: string;
@@ -162,6 +164,35 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   const [receiveAmountOpen, setReceiveAmountOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [entryToDelete, setEntryToDelete] = useState<ReceivableEntry | null>(null);
+  // Email-invoice flow: Outlook-style compose modal (multi To/CC/BCC, editable
+  // subject + body, multiple attachments) before sending via Resend.
+  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
+  const [emailEntry, setEmailEntry] = useState<ReceivableEntry | null>(null);
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailPreparing, setEmailPreparing] = useState(false);
+  const [emailTo, setEmailTo] = useState('');
+  const [emailCc, setEmailCc] = useState('');
+  const [emailBcc, setEmailBcc] = useState('');
+  const [emailShowCc, setEmailShowCc] = useState(false);
+  const [emailShowBcc, setEmailShowBcc] = useState(false);
+  const [emailSubject, setEmailSubject] = useState('');
+  const [emailBody, setEmailBody] = useState('');
+  const [emailHtml, setEmailHtml] = useState('');
+  /** Body editor mode: rendered preview, raw HTML source, or plain text. */
+  const [emailBodyMode, setEmailBodyMode] = useState<'preview' | 'html' | 'text'>('preview');
+  /**
+   * True once the user hand-edits the HTML/text, which stops the automatic
+   * regeneration that keeps the body in sync with the attachment list (we must
+   * never silently discard someone's edits).
+   */
+  const [emailBodyEdited, setEmailBodyEdited] = useState(false);
+  // Attachments carried as base64 for the Resend payload, tagged with the
+  // document category so the email body can list what is enclosed.
+  const [emailAttachments, setEmailAttachments] = useState<
+    Array<{ filename: string; content: string; size: number; kind: EnclosureKind }>
+  >([]);
+  /** Which category the next picked file(s) will be tagged as. */
+  const [emailPickKind, setEmailPickKind] = useState<EnclosureKind>('other');
   const [deleteReason, setDeleteReason] = useState('');
 
   // New: Status filter, sorting, pagination, bulk selection
@@ -1875,6 +1906,203 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     return result;
   };
 
+  /** Assemble the email-template input for an invoice + its current attachments. */
+  const buildEmailInput = (entry: ReceivableEntry, attachments: Array<{ filename: string; kind: EnclosureKind }>) => {
+    const servicePeriod = entry.service_period_start
+      ? `${new Date(entry.service_period_start).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`
+        + (entry.service_period_end ? ` – ${new Date(entry.service_period_end).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}` : '')
+      : null;
+    return {
+      clientName: entry.client_name,
+      invoiceNo: entry.reference_number || entry.id.slice(0, 8),
+      invoiceValue: entry.total_amount || 0,
+      taxable: entry.amount ?? null,
+      gst: entry.gst_amount ?? null,
+      dueDate: entry.due_date,
+      servicePeriod,
+      enclosures: attachments.map((a) => ({ kind: a.kind, filename: a.filename })),
+    };
+  };
+
+  // Keep the email body in sync with the attachment list: adding an EPF challan
+  // or rota should mention it in the message. Skipped once the user hand-edits
+  // the body so their wording is never overwritten.
+  useEffect(() => {
+    if (!emailDialogOpen || !emailEntry || emailBodyEdited) return;
+    const input = buildEmailInput(emailEntry, emailAttachments);
+    setEmailHtml(buildInvoiceEmailHtml(input));
+    setEmailBody(buildInvoiceEmailText(input));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emailAttachments, emailDialogOpen, emailEntry, emailBodyEdited]);
+
+  /** Read a File/Blob as base64 (without the data: URI prefix). */
+  const fileToBase64 = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(blob);
+    });
+
+  /** Parse a comma/semicolon/newline-separated address string into clean emails. */
+  const parseEmailList = (raw: string): string[] =>
+    raw
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+  /**
+   * Open the Outlook-style compose modal for an invoice.
+   *
+   * Pre-fills To (client email), Subject and Body from the invoice, then
+   * generates the invoice PDF and adds it as the first attachment. The user can
+   * edit every field, add CC/BCC, add more attachments, or remove them before
+   * sending. Sends server-side via Resend (not mailto:) so attachments and HTML
+   * both work.
+   */
+  const handleEmailInvoice = async (entry: ReceivableEntry) => {
+    const invoiceNo = entry.reference_number || entry.id.slice(0, 8);
+    const emailInput = buildEmailInput(entry, []);
+
+    // Reset + prime the compose fields.
+    setEmailEntry(entry);
+    setEmailTo('');
+    setEmailCc('');
+    setEmailBcc('');
+    setEmailShowCc(false);
+    setEmailShowBcc(false);
+    setEmailSubject(buildInvoiceEmailSubject(invoiceNo));
+    setEmailBody(buildInvoiceEmailText(emailInput));
+    setEmailHtml(buildInvoiceEmailHtml(emailInput));
+    setEmailBodyMode('preview');
+    setEmailBodyEdited(false);
+    setEmailPickKind('other');
+    setEmailAttachments([]);
+    setEmailDialogOpen(true);
+    setEmailPreparing(true);
+
+    // Look up the client email (non-blocking for the modal).
+    try {
+      const client = entry.client_name ? await getClientByName(entry.client_name) : null;
+      setEmailTo((client?.contactEmail || '').trim());
+    } catch { /* leave blank — user types it */ }
+
+    // Generate + pre-attach the invoice PDF.
+    try {
+      const { data: sessionData } = await supabaseClient.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) throw new Error('session expired');
+      const pdfRes = await fetch('/api/invoice-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ receivableId: entry.id }),
+      });
+      if (pdfRes.ok) {
+        const pdfBlob = await pdfRes.blob();
+        const content = await fileToBase64(pdfBlob);
+        setEmailAttachments([{ filename: `Invoice_${invoiceNo}.pdf`, content, size: pdfBlob.size, kind: 'invoice' }]);
+      } else {
+        toast({ title: 'Invoice PDF unavailable', description: 'Could not attach the invoice PDF automatically. You can add it manually.', variant: 'destructive' });
+      }
+    } catch { /* attachment optional — user can add files */ } finally {
+      setEmailPreparing(false);
+    }
+  };
+
+  /** Add user-selected files to the attachment list, tagged with a category. */
+  const handleAddEmailAttachments = async (files: FileList | null, kind: EnclosureKind) => {
+    if (!files || files.length === 0) return;
+    const MAX_TOTAL = 20 * 1024 * 1024; // Resend hard limit is ~40MB; stay well under.
+    const additions: Array<{ filename: string; content: string; size: number; kind: EnclosureKind }> = [];
+    for (const file of Array.from(files)) {
+      try {
+        const content = await fileToBase64(file);
+        additions.push({ filename: file.name, content, size: file.size, kind });
+      } catch { /* skip unreadable file */ }
+    }
+    setEmailAttachments((prev) => {
+      const next = [...prev, ...additions];
+      const total = next.reduce((s, a) => s + a.size, 0);
+      if (total > MAX_TOTAL) {
+        toast({ title: 'Attachments too large', description: 'Total attachment size exceeds 20 MB. Remove some files.', variant: 'destructive' });
+        return prev;
+      }
+      return next;
+    });
+  };
+
+  /** Remove an attachment. The invoice PDF is mandatory and cannot be removed. */
+  const removeEmailAttachment = (index: number) =>
+    setEmailAttachments((prev) => prev.filter((a, i) => (i === index ? a.kind === 'invoice' : true)));
+
+  /** Send the composed email (all fields + attachments) via Resend. */
+  const sendInvoiceEmail = async () => {
+    const to = parseEmailList(emailTo);
+    const cc = parseEmailList(emailCc);
+    const bcc = parseEmailList(emailBcc);
+
+    if (to.length === 0) {
+      toast({ title: 'Recipient required', description: 'Add at least one "To" address.', variant: 'destructive' });
+      return;
+    }
+    const invalid = [...to, ...cc, ...bcc].filter((e) => !EMAIL_RE.test(e));
+    if (invalid.length > 0) {
+      toast({ title: 'Invalid email', description: `Check: ${invalid.join(', ')}`, variant: 'destructive' });
+      return;
+    }
+    if (!emailSubject.trim()) {
+      toast({ title: 'Subject required', description: 'Add a subject line.', variant: 'destructive' });
+      return;
+    }
+
+    setEmailSending(true);
+    try {
+      const { data: sessionData } = await supabaseClient.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) throw new Error('Your session has expired. Sign in again to email the invoice.');
+
+      // The HTML tab is directly editable and is the authoritative body — send it
+      // as-is. If the user cleared it, fall back to wrapping the plain text so
+      // the message still has an HTML part.
+      const html = emailHtml.trim()
+        ? emailHtml
+        : `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;white-space:pre-wrap;">${emailBody
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')}</div>`;
+
+      const sendRes = await fetch('/api/email/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          to,
+          cc: cc.length ? cc : undefined,
+          bcc: bcc.length ? bcc : undefined,
+          subject: emailSubject.trim(),
+          html,
+          text: emailBody,
+          replyTo: 'accounts@safends.com',
+          attachments: emailAttachments.map((a) => ({ filename: a.filename, content: a.content })),
+        }),
+      });
+      if (!sendRes.ok) {
+        const err = await sendRes.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to send the email');
+      }
+
+      toast({ title: 'Email sent', description: `Sent to ${to.join(', ')}${emailAttachments.length ? ` with ${emailAttachments.length} attachment${emailAttachments.length > 1 ? 's' : ''}` : ''}.` });
+      setEmailDialogOpen(false);
+      setEmailEntry(null);
+      queryClient.invalidateQueries({ queryKey: ['receivables'] });
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message || 'Failed to send the email', variant: 'destructive' });
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
   const handleDownloadInvoice = async (entry: ReceivableEntry) => {
     try {
       toast({ title: 'Generating PDF...', description: 'Please wait' });
@@ -2251,50 +2479,57 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                               <MoreVertical className="h-4 w-4" />
                             </Button>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-52">
-                            {entry.category === 'Invoices' && (
+                          <DropdownMenuContent align="end" className="w-[264px] p-2">
+                            {/* Primary actions as a 3-wide icon grid (icon on top,
+                                label below). Rows flow naturally 3 per line, so
+                                6 actions read as a 2-row × 3-col grid. */}
+                            {(() => {
+                              const tiles: Array<{ key: string; icon: ReactNode; label: string; onClick: () => void }> = [];
+                              if (entry.category === 'Invoices') {
+                                tiles.push({ key: 'view', icon: <Eye className="h-5 w-5 text-blue-600" />, label: 'View', onClick: () => handleViewInvoice(entry) });
+                                tiles.push({ key: 'download', icon: <Download className="h-5 w-5 text-green-600" />, label: 'Download', onClick: () => handleDownloadInvoice(entry) });
+                                tiles.push({ key: 'edit', icon: <Pencil className="h-5 w-5 text-amber-600" />, label: 'Edit', onClick: () => handleEditInvoice(entry) });
+                              }
+                              if (entry.status !== 'received' && entry.status !== 'cancelled') {
+                                tiles.push({ key: 'pay', icon: <CheckCircle2 className="h-5 w-5 text-green-600" />, label: 'Record Payment', onClick: () => openReceiveAmount(entry) });
+                              }
+                              tiles.push({ key: 'duplicate', icon: <Copy className="h-5 w-5 text-indigo-600" />, label: 'Duplicate', onClick: () => handleDuplicate(entry) });
+                              tiles.push({ key: 'print', icon: <Printer className="h-5 w-5 text-blue-600" />, label: 'Print', onClick: () => handleDownloadInvoice(entry) });
+                              if (entry.category === 'Invoices') {
+                                tiles.push({ key: 'email', icon: <Send className="h-5 w-5 text-teal-600" />, label: 'Send Email', onClick: () => handleEmailInvoice(entry) });
+                              }
+                              tiles.push({ key: 'reminder', icon: <Mail className="h-5 w-5 text-purple-600" />, label: 'Reminder', onClick: () => handleSendByMail(entry) });
+                              return (
+                                <div className="grid grid-cols-3 gap-1">
+                                  {tiles.map((t) => (
+                                    <DropdownMenuItem
+                                      key={t.key}
+                                      onClick={t.onClick}
+                                      className="flex flex-col items-center justify-center gap-1.5 h-16 rounded-md p-1 text-center cursor-pointer focus:bg-muted"
+                                    >
+                                      {t.icon}
+                                      <span className="text-[11px] leading-tight text-foreground">{t.label}</span>
+                                    </DropdownMenuItem>
+                                  ))}
+                                </div>
+                              );
+                            })()}
+
+                            {/* Destructive / state actions stay as clearly-labelled full-width rows. */}
+                            {(entry.status === 'received' || (entry.notes || '').match(/Total Paid:\s*₹/) || (entry.notes || '').match(/Amount:\s*₹/)) && (
                               <>
-                                <DropdownMenuItem onClick={() => handleViewInvoice(entry)}>
-                                  <Eye className="h-4 w-4 mr-2 text-blue-600" /> View Invoice
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handleDownloadInvoice(entry)}>
-                                  <Download className="h-4 w-4 mr-2 text-green-600" /> Download PDF
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handleEditInvoice(entry)}>
-                                  <Pencil className="h-4 w-4 mr-2 text-amber-600" /> Edit
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  className="text-amber-600 focus:text-white focus:bg-amber-600"
+                                  onClick={() => {
+                                    if (window.confirm("Are you sure you want to undo the last payment for this invoice? This will remove the payment record and revert the invoice balance.")) {
+                                      undoLastPayment.mutate(entry);
+                                    }
+                                  }}
+                                >
+                                  <Undo2 className="h-4 w-4 mr-2" /> Undo Last Payment
                                 </DropdownMenuItem>
                               </>
-                            )}
-                            {entry.status !== 'received' && entry.status !== 'cancelled' && (
-                              <DropdownMenuItem onClick={() => openReceiveAmount(entry)}>
-                                <CheckCircle2 className="h-4 w-4 mr-2 text-green-600" /> Record Payment
-                              </DropdownMenuItem>
-                            )}
-                            <DropdownMenuItem onClick={() => handleDuplicate(entry)}>
-                              <Copy className="h-4 w-4 mr-2 text-indigo-600" /> Duplicate
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => handleDownloadInvoice(entry)}>
-                              <Printer className="h-4 w-4 mr-2 text-blue-600" /> Print
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => handleSendByMail(entry)}>
-                              <Mail className="h-4 w-4 mr-2 text-purple-600" /> Send Reminder
-                            </DropdownMenuItem>
-                            {/* A partial payment does NOT produce a 'partial' status — the row
-                                stays 'pending' and the payment is recorded in `notes`, so the
-                                notes markers are what reveal a partially paid invoice. A
-                                `status === 'partial'` test used to sit here and could never
-                                match the four values the column actually holds. */}
-                            {(entry.status === 'received' || (entry.notes || '').match(/Total Paid:\s*₹/) || (entry.notes || '').match(/Amount:\s*₹/)) && (
-                              <DropdownMenuItem 
-                                className="text-amber-600 focus:text-white focus:bg-amber-600" 
-                                onClick={() => {
-                                  if (window.confirm("Are you sure you want to undo the last payment for this invoice? This will remove the payment record and revert the invoice balance.")) {
-                                    undoLastPayment.mutate(entry);
-                                  }
-                                }}
-                              >
-                                <Undo2 className="h-4 w-4 mr-2" /> Undo Last Payment
-                              </DropdownMenuItem>
                             )}
                             {entry.status !== 'cancelled' && (
                               <>
@@ -2304,12 +2539,11 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                                 </DropdownMenuItem>
                               </>
                             )}
-                            {isAdmin && (
+                            {isAdmin ? (
                               <DropdownMenuItem className="text-red-700 focus:text-white focus:bg-red-600 font-medium" onClick={() => { setEntryToDelete(entry); setDeleteConfirmOpen(true); }}>
                                 <Trash2 className="h-4 w-4 mr-2" /> Delete Invoice
                               </DropdownMenuItem>
-                            )}
-                            {!isAdmin && (
+                            ) : (
                               <DropdownMenuItem className="text-red-600 focus:text-white focus:bg-red-600" onClick={() => { setEntryToDelete(entry); setDeleteConfirmOpen(true); }}>
                                 <Trash2 className="h-4 w-4 mr-2" /> Request Delete
                               </DropdownMenuItem>
@@ -2502,6 +2736,207 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           editEntry={selectedInvoiceEntry}
         />
       )}
+
+      {/* Email Invoice — Outlook-style compose modal */}
+      <Dialog open={emailDialogOpen} onOpenChange={(v) => { if (!emailSending) { setEmailDialogOpen(v); if (!v) setEmailEntry(null); } }}>
+        <DialogContent className="sm:max-w-[1280px] w-[95vw] max-h-[92vh] overflow-y-auto p-0 gap-0">
+          <div className="flex items-center gap-2 border-b px-5 py-3.5">
+            <Send className="h-4 w-4 text-teal-600" />
+            <DialogTitle className="text-base font-semibold">New Message</DialogTitle>
+            {emailPreparing && <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Attaching invoice…</span>}
+          </div>
+
+          {emailEntry && (
+            <div className="px-5 py-4 space-y-0 text-sm">
+              {/* To + Cc/Bcc toggles */}
+              <div className="flex items-center gap-2 border-b py-2">
+                <Label className="w-12 shrink-0 text-xs text-muted-foreground">To</Label>
+                <Input
+                  className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1"
+                  placeholder="recipient@example.com, another@example.com"
+                  value={emailTo}
+                  onChange={(e) => setEmailTo(e.target.value)}
+                />
+                <div className="flex gap-1 text-xs">
+                  {!emailShowCc && <button type="button" className="text-muted-foreground hover:text-foreground px-1" onClick={() => setEmailShowCc(true)}>Cc</button>}
+                  {!emailShowBcc && <button type="button" className="text-muted-foreground hover:text-foreground px-1" onClick={() => setEmailShowBcc(true)}>Bcc</button>}
+                </div>
+              </div>
+              {emailShowCc && (
+                <div className="flex items-center gap-2 border-b py-2">
+                  <Label className="w-12 shrink-0 text-xs text-muted-foreground">Cc</Label>
+                  <Input className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1" placeholder="cc@example.com" value={emailCc} onChange={(e) => setEmailCc(e.target.value)} />
+                </div>
+              )}
+              {emailShowBcc && (
+                <div className="flex items-center gap-2 border-b py-2">
+                  <Label className="w-12 shrink-0 text-xs text-muted-foreground">Bcc</Label>
+                  <Input className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1" placeholder="bcc@example.com" value={emailBcc} onChange={(e) => setEmailBcc(e.target.value)} />
+                </div>
+              )}
+              {/* Subject */}
+              <div className="flex items-center gap-2 border-b py-2">
+                <Label className="w-12 shrink-0 text-xs text-muted-foreground">Subject</Label>
+                <Input className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1 font-medium" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} />
+              </div>
+
+              {/* Body — switch between rendered preview, raw HTML source and plain text */}
+              <div className="pt-3">
+                <div className="flex items-center gap-1 mb-2">
+                  {([
+                    { k: 'preview', l: 'Preview' },
+                    { k: 'html', l: 'HTML' },
+                    { k: 'text', l: 'Plain text' },
+                  ] as const).map((t) => (
+                    <button
+                      key={t.k}
+                      type="button"
+                      onClick={() => setEmailBodyMode(t.k)}
+                      className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
+                        emailBodyMode === t.k
+                          ? 'bg-black text-white border-black dark:bg-white dark:text-black'
+                          : 'border-input text-muted-foreground hover:border-black/40'
+                      }`}
+                    >
+                      {t.l}
+                    </button>
+                  ))}
+                  <span className="ml-auto text-[11px] text-muted-foreground">
+                    {emailBodyMode === 'html'
+                      ? 'Editing raw HTML — this exact markup is sent'
+                      : emailBodyMode === 'text'
+                      ? 'Plain-text fallback for non-HTML clients'
+                      : 'Rendered preview of the HTML email'}
+                  </span>
+                </div>
+
+                {emailBodyMode === 'preview' && (
+                  <div className="rounded-md border bg-white overflow-hidden">
+                    <iframe
+                      title="Email preview"
+                      srcDoc={emailHtml}
+                      className="w-full h-[420px] border-0"
+                      sandbox=""
+                    />
+                  </div>
+                )}
+
+                {emailBodyMode === 'html' && (
+                  <Textarea
+                    className="min-h-[420px] font-mono text-[11px] leading-relaxed resize-y"
+                    value={emailHtml}
+                    onChange={(e) => { setEmailHtml(e.target.value); setEmailBodyEdited(true); }}
+                    spellCheck={false}
+                    placeholder="<html>…</html>"
+                  />
+                )}
+
+                {emailBodyMode === 'text' && (
+                  <Textarea
+                    className="min-h-[420px] text-sm leading-relaxed resize-y"
+                    value={emailBody}
+                    onChange={(e) => { setEmailBody(e.target.value); setEmailBodyEdited(true); }}
+                    placeholder="Plain-text version of the message…"
+                  />
+                )}
+
+                <p className="text-[11px] text-muted-foreground mt-2">
+                  The <strong>HTML</strong> tab is what recipients see. Edit it directly to change the email; use{' '}
+                  <strong>Preview</strong> to check the result and <strong>Plain text</strong> for the fallback body.
+                  {emailBodyEdited ? (
+                    <>
+                      {' '}<span className="text-amber-600">Manually edited — it will no longer update automatically when you change attachments.</span>
+                      {emailEntry && (
+                        <button
+                          type="button"
+                          className="ml-1 underline hover:text-foreground"
+                          onClick={() => {
+                            const input = buildEmailInput(emailEntry, emailAttachments);
+                            setEmailHtml(buildInvoiceEmailHtml(input));
+                            setEmailBody(buildInvoiceEmailText(input));
+                            setEmailBodyEdited(false);
+                          }}
+                        >
+                          Reset to template
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <> The message updates automatically as you add attachments.</>
+                  )}
+                </p>
+              </div>
+
+              {/* Attachments — invoice is mandatory, the rest are optional and
+                  each addition is announced in the email body automatically. */}
+              <div className="border-t pt-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Attachments {emailAttachments.length > 0 && `(${emailAttachments.length})`}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">Invoice is mandatory · others optional</span>
+                </div>
+
+                {/* Category pickers */}
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { k: 'rota' as EnclosureKind, l: 'Rota' },
+                    { k: 'epf' as EnclosureKind, l: 'EPF Challan' },
+                    { k: 'esic' as EnclosureKind, l: 'ESIC Challan' },
+                    { k: 'other' as EnclosureKind, l: 'Other Document' },
+                  ]).map((opt) => (
+                    <label
+                      key={opt.k}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-dashed px-2.5 py-1.5 text-xs cursor-pointer hover:border-teal-500 hover:text-teal-700 transition-colors"
+                    >
+                      <Upload className="h-3.5 w-3.5" /> {opt.l}
+                      <input
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => { handleAddEmailAttachments(e.target.files, opt.k); e.target.value = ''; }}
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                {emailAttachments.length === 0 ? (
+                  <p className="text-[11px] text-muted-foreground italic">{emailPreparing ? 'Preparing invoice PDF…' : 'No attachments.'}</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {emailAttachments.map((att, i) => (
+                      <div key={i} className="flex items-center gap-2 rounded-md border bg-muted/30 px-2.5 py-1.5">
+                        <FileText className="h-4 w-4 text-blue-600 shrink-0" />
+                        <span className="shrink-0 rounded bg-teal-50 dark:bg-teal-900/30 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:text-teal-300">
+                          {ENCLOSURE_LABELS[att.kind]?.label || 'Document'}
+                        </span>
+                        <span className="text-xs truncate flex-1">{att.filename}</span>
+                        <span className="text-[10px] text-muted-foreground shrink-0">{att.size < 1024 * 1024 ? `${Math.max(1, Math.round(att.size / 1024))} KB` : `${(att.size / 1024 / 1024).toFixed(1)} MB`}</span>
+                        {att.kind === 'invoice' ? (
+                          <span className="text-[10px] text-muted-foreground shrink-0 italic px-1">required</span>
+                        ) : (
+                          <button type="button" className="text-muted-foreground hover:text-red-600 shrink-0" onClick={() => removeEmailAttachment(i)} title="Remove">
+                            <XCircle className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 border-t px-5 py-3 bg-muted/20">
+            <Button variant="outline" onClick={() => { setEmailDialogOpen(false); setEmailEntry(null); }} disabled={emailSending}>
+              Cancel
+            </Button>
+            <Button className="bg-teal-600 hover:bg-teal-700 text-white" onClick={sendInvoiceEmail} disabled={emailSending || emailPreparing}>
+              {emailSending ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" /> Sending…</> : <><Send className="h-4 w-4 mr-1" /> Send</>}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Receive Amount Dialog */}
       <Dialog open={receiveAmountOpen} onOpenChange={setReceiveAmountOpen}>
