@@ -1165,7 +1165,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                     <TableHead className="w-[90px] text-right">Duties</TableHead>
                     <TableHead className="w-[120px] text-right">Amount (₹)</TableHead>
                     <TableHead className="w-[40px]" />
-                  </TableRow>                </TableHeader>
+                  </TableRow>
+                </TableHeader>
                 <TableBody>
                   {lines.map((line) => (
                     <TableRow key={line.id}>
