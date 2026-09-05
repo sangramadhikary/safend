@@ -51,13 +51,13 @@ export interface ServiceInstanceLike {
 }
 
 export interface DerivedServiceLine {
-  /** Total personnel across all enabled shifts on this line. */
+  /** Total personnel across all enabled shifts on this instance. */
   totalManpower: number;
-  /** Effective shift type for the line ('12H' if any instance is 12H). */
+  /** Shift type for this line ('12H' or '8H'). */
   shiftType: '8H' | '12H';
   /** Monthly price PER PERSONNEL (weighted average when shift rates differ). 0 when no rate data. */
   woPricePerMonth: number;
-  /** Total duties across all personnel for the billing period = manpower × days. */
+  /** Total duties across all personnel for the billing period = manpower × active service-days. */
   duties: number;
 }
 
@@ -66,58 +66,137 @@ function parseRate(r: MonetaryRate): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Weekday keys as used by the stored serviceDays map, indexed by Date.getDay(). */
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
+
 /**
- * Derive the per-line billing figures for one service type from its array of
- * service instances and the number of days in the billing period.
+ * Count how many days in a billing period an instance is actually active,
+ * honouring its `serviceDays` weekday map.
  *
- * Returns null when the line has zero enabled manpower (nothing to bill).
+ *  - An absent/empty map means the service runs EVERY day → returns the full
+ *    period day count (backward compatible with all-days services).
+ *  - Otherwise counts only the dates whose weekday is enabled. e.g. a
+ *    Sunday-only guard over July 2026 → the number of Sundays in July.
+ *
+ * This is exactly how billing already treated it in practice: invoice 26270018
+ * billed the Sunday-only 8H guard 4 duties (÷31 × 4), not a full month, while
+ * the all-days 12H guard got the full 31.
+ *
+ * When no dates are supplied (e.g. the "current month" default before a period
+ * is chosen) we cannot enumerate weekdays, so we fall back to the plain day
+ * count — the period-sync effect recomputes precisely once real dates are set.
  */
-export function deriveServiceLine(
+export function countActiveServiceDays(
+  serviceDays: Record<string, boolean> | undefined | null,
+  periodDays: number,
+  start?: string | null,
+  end?: string | null,
+): number {
+  const fullDays = Math.round(Number(periodDays) > 0 ? Number(periodDays) : 30);
+
+  // No per-weekday restriction → active every day of the period.
+  const hasRestriction =
+    !!serviceDays && Object.values(serviceDays).some((v) => v === false);
+  if (!hasRestriction) return fullDays;
+
+  // Need concrete dates to enumerate weekdays; otherwise fall back.
+  if (!start || !end) return fullDays;
+  const startDate = new Date(`${start}T00:00:00`);
+  const endDate = new Date(`${end}T00:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return fullDays;
+  if (endDate < startDate) return fullDays;
+
+  let count = 0;
+  const cursor = new Date(startDate);
+  // Guard against pathological ranges.
+  let guard = 0;
+  while (cursor <= endDate && guard < 3660) {
+    const key = DAY_KEYS[cursor.getDay()];
+    if (serviceDays![key] !== false) count += 1;
+    cursor.setDate(cursor.getDate() + 1);
+    guard += 1;
+  }
+  return count;
+}
+
+export interface DeriveOptions {
+  /** Total days in the billing period (drives duties for all-day services). */
+  periodDays: number;
+  /** Billing period start ISO date (YYYY-MM-DD), for enumerating active weekdays. */
+  periodStart?: string | null;
+  /** Billing period end ISO date (YYYY-MM-DD). */
+  periodEnd?: string | null;
+}
+
+/**
+ * Derive billing lines for one service TYPE from its service instances.
+ *
+ * Returns ONE line PER instance (not a single merged line), because different
+ * instances can have different shift types, rates and — crucially — different
+ * `serviceDays`, which produce different duty counts. Merging them would lose
+ * that (a Sunday-only guard and an all-days guard bill different duties). This
+ * matches how issued invoices already split the lines.
+ *
+ * For each instance:
+ *   - woPricePerMonth = Σ(quantity × rate) over enabled shifts, ÷ headcount
+ *     (the per-personnel monthly rate; a weighted average if shift rates differ)
+ *   - duties          = headcount × active service-days in the period
+ *
+ * Instances with zero enabled manpower are skipped.
+ */
+export function deriveServiceLines(
   instances: ServiceInstanceLike[],
   fallbackShiftType: '8H' | '12H',
-  days: number,
-): DerivedServiceLine | null {
-  if (!Array.isArray(instances) || instances.length === 0) return null;
+  opts: DeriveOptions,
+): DerivedServiceLine[] {
+  if (!Array.isArray(instances) || instances.length === 0) return [];
 
-  const periodDays = Math.round(Number(days) > 0 ? Number(days) : 30);
-
-  let totalManpower = 0;
-  let monthlyPrice = 0; // summed line price = Σ quantity × rate over enabled shifts
-  let shiftType: '8H' | '12H' = fallbackShiftType;
+  const periodDays = Math.round(Number(opts.periodDays) > 0 ? Number(opts.periodDays) : 30);
+  const out: DerivedServiceLine[] = [];
 
   for (const inst of instances) {
-    // Any 12H instance makes the whole line 12H (day + night, no afternoon).
-    shiftType = inst?.shiftType === '12H' ? '12H' : shiftType;
+    const shiftType: '8H' | '12H' = inst?.shiftType === '12H' ? '12H' : fallbackShiftType;
     const s = inst?.shifts || {};
+
+    let manpower = 0;
+    let monthlyPrice = 0;
 
     if (s.day?.enabled) {
       const q = s.day.quantity || 0;
-      totalManpower += q;
+      manpower += q;
       monthlyPrice += q * parseRate(s.day.rate);
     }
-    // Afternoon shift only applies to 8H rosters.
+    // Afternoon shift only applies to 8H rosters (12H has day + night).
     if (s.afternoon?.enabled && shiftType === '8H') {
       const q = s.afternoon.quantity || 0;
-      totalManpower += q;
+      manpower += q;
       monthlyPrice += q * parseRate(s.afternoon.rate);
     }
     if (s.night?.enabled) {
       const q = s.night.quantity || 0;
-      totalManpower += q;
+      manpower += q;
       monthlyPrice += q * parseRate(s.night.rate);
     }
+
+    if (manpower === 0) continue;
+
+    const perPersonnelMonthly = monthlyPrice > 0 ? monthlyPrice / manpower : 0;
+    const activeDays = countActiveServiceDays(
+      (inst as { serviceDays?: Record<string, boolean> })?.serviceDays,
+      periodDays,
+      opts.periodStart,
+      opts.periodEnd,
+    );
+
+    out.push({
+      totalManpower: manpower,
+      shiftType,
+      woPricePerMonth: perPersonnelMonthly > 0 ? Math.round(perPersonnelMonthly) : 0,
+      duties: manpower * activeDays,
+    });
   }
 
-  if (totalManpower === 0) return null;
-
-  const perPersonnelMonthly = monthlyPrice > 0 ? monthlyPrice / totalManpower : 0;
-
-  return {
-    totalManpower,
-    shiftType,
-    woPricePerMonth: perPersonnelMonthly > 0 ? Math.round(perPersonnelMonthly) : 0,
-    duties: totalManpower * periodDays,
-  };
+  return out;
 }
 
 /**

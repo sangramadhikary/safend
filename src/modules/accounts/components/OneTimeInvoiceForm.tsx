@@ -17,7 +17,7 @@ import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
 import { fetchWorkOrderOutstandingInvoices, computeOutstandingFromRows, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
-import { deriveServiceLine, daysInServicePeriod } from '@/lib/invoice/service-line-derivation';
+import { deriveServiceLines, daysInServicePeriod } from '@/lib/invoice/service-line-derivation';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, extractStateCode } from '@/lib/tax/gst';
 import { formatINRShort } from '@/lib/format';
 
@@ -602,28 +602,37 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
             // built for the right month from the start; otherwise the current
             // month's days. The period-sync effect keeps them aligned afterward.
             const buildDays = periodDays && periodDays > 0 ? periodDays : (parseFloat(defaultDays()) || 30);
-            const derived = deriveServiceLine(instArray, shiftType, buildDays);
-            if (!derived) continue;
 
-            const woPrice = derived.woPricePerMonth > 0 ? String(derived.woPricePerMonth) : '';
+            // One invoice line PER instance: different instances can have
+            // different shift types, rates and serviceDays (a Sunday-only guard
+            // bills fewer duties than an all-days one), so they must not merge.
+            // Duties honour each instance's serviceDays over the billing period.
+            const derivedLines = deriveServiceLines(instArray, shiftType, {
+              periodDays: buildDays,
+              periodStart: resolvedPeriodStart,
+              periodEnd: resolvedPeriodEnd,
+            });
 
             const opt = SERVICE_OPTIONS.find(o => o.label === serviceLabel);
-            builtLines.push({
-              id: crypto.randomUUID(),
-              serviceType: serviceLabel,
-              customService: '',
-              sac: opt?.sac ?? '998525',
-              location: postName,
-              hideLocation: false,
-              manpower: String(derived.totalManpower),
-              woPricePerMonth: woPrice,
-              hideWoPrice: false,
-              daysInMonth: String(buildDays),
-              duties: String(derived.duties),
-              manpowerRole: '',
-              shiftType: derived.shiftType,
-              hideShiftType: false,
-            });
+            for (const derived of derivedLines) {
+              const woPrice = derived.woPricePerMonth > 0 ? String(derived.woPricePerMonth) : '';
+              builtLines.push({
+                id: crypto.randomUUID(),
+                serviceType: serviceLabel,
+                customService: '',
+                sac: opt?.sac ?? '998525',
+                location: postName,
+                hideLocation: false,
+                manpower: String(derived.totalManpower),
+                woPricePerMonth: woPrice,
+                hideWoPrice: false,
+                daysInMonth: String(buildDays),
+                duties: String(derived.duties),
+                manpowerRole: '',
+                shiftType: derived.shiftType,
+                hideShiftType: false,
+              });
+            }
           }
         }
 
