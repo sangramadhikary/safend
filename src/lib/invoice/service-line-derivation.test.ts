@@ -165,3 +165,49 @@ describe('daysInServicePeriod', () => {
     expect(daysInServicePeriod({ mode: 'range', start: '', end: '' })).toBeNull();
   });
 });
+
+/**
+ * Reproduces the effect's line-rescaling reducer to prove the August scenario:
+ * a full-month line built for a 30-day month must become 31 days / rescaled
+ * duties when the Service Period changes to August (31 days).
+ */
+function syncLinesToPeriod(
+  lines: { daysInMonth: string; manpower: string; duties: string }[],
+  periodDays: number | null,
+) {
+  if (!periodDays || periodDays <= 0) return lines;
+  return lines.map(l => {
+    const oldDays = parseFloat(l.daysInMonth) || 0;
+    if (oldDays === periodDays) return l;
+    const manpower = parseFloat(l.manpower) || 0;
+    const duties = parseFloat(l.duties) || 0;
+    const next = { ...l, daysInMonth: String(periodDays) };
+    if (manpower > 0 && oldDays > 0 && duties === manpower * oldDays) {
+      next.duties = String(manpower * periodDays);
+    }
+    return next;
+  });
+}
+
+describe('period sync (August 31-day scenario)', () => {
+  it('updates Days 30 -> 31 and rescales full-month duties for August', () => {
+    const aug = daysInServicePeriod({ mode: 'month', month: '2026-08' });
+    expect(aug).toBe(31);
+
+    const before = [
+      { daysInMonth: '30', manpower: '2', duties: '60' }, // unarmed, full month
+      { daysInMonth: '30', manpower: '1', duties: '30' }, // armed, full month
+    ];
+    const after = syncLinesToPeriod(before, aug);
+    expect(after[0]).toMatchObject({ daysInMonth: '31', duties: '62' });
+    expect(after[1]).toMatchObject({ daysInMonth: '31', duties: '31' });
+  });
+
+  it('leaves a manually customised duties line untouched (only updates Days)', () => {
+    const aug = daysInServicePeriod({ mode: 'month', month: '2026-08' });
+    // duties (45) != manpower(2) × oldDays(30)=60 → user-edited, don't rescale.
+    const before = [{ daysInMonth: '30', manpower: '2', duties: '45' }];
+    const after = syncLinesToPeriod(before, aug);
+    expect(after[0]).toMatchObject({ daysInMonth: '31', duties: '45' });
+  });
+});
