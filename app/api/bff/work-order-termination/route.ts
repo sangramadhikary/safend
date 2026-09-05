@@ -1,18 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { getServerUser, getServerRoles } from '@/lib/auth/server-session';
+import { decideAccess } from '@/lib/security/access-decision';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+/**
+ * Roles permitted to read or mutate work-order termination state. Terminating a
+ * work order deactivates its operational posts (destructive, business-impacting),
+ * so it is restricted to operations/admin staff.
+ */
+const ALLOWED_ROLES = ['admin', 'branch_admin', 'operations', 'office-admin'] as const;
+
+/**
+ * Verify the caller is authenticated and holds a permitted role. Returns a
+ * 401/403 response to short-circuit the handler, or null to proceed. This route
+ * uses the RLS-bypassing service-role client, so it MUST enforce its own
+ * authorization — there is no edge middleware gate in front of it.
+ */
+async function guard(request: NextRequest): Promise<NextResponse | null> {
+  const user = await getServerUser(request);
+  if (!user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const roles = await getServerRoles(user.id);
+  if (decideAccess({ sessionConfirmed: true, resolvedRoles: roles, routeAllowedRoles: ALLOWED_ROLES }) !== 'allow') {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+  return null;
+}
+
+function getServiceClient() {
+  if (!serviceRoleKey) return null;
+  return createClient(supabaseUrl, serviceRoleKey);
+}
 
 export async function POST(request: NextRequest) {
   try {
+    const denied = await guard(request);
+    if (denied) return denied;
+
     const { workOrderId, terminationData, deactivatePosts } = await request.json();
 
     if (!workOrderId) {
       return NextResponse.json({ error: 'workOrderId is required' }, { status: 400 });
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return NextResponse.json({ error: 'Server not configured' }, { status: 500 });
+    }
 
     // Fetch current work order to get existing description
     const { data: current, error: fetchError } = await supabase
@@ -75,6 +113,9 @@ export async function POST(request: NextRequest) {
 // GET endpoint to fetch termination data for a specific work order
 export async function GET(request: NextRequest) {
   try {
+    const denied = await guard(request);
+    if (denied) return denied;
+
     const { searchParams } = new URL(request.url);
     const workOrderId = searchParams.get('workOrderId');
 
@@ -82,7 +123,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'workOrderId is required' }, { status: 400 });
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    const supabase = getServiceClient();
+    if (!supabase) {
+      return NextResponse.json({ error: 'Server not configured' }, { status: 500 });
+    }
 
     const { data, error } = await supabase
       .from('work_orders')

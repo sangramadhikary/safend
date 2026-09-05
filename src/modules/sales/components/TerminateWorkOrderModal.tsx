@@ -34,6 +34,21 @@ import {
 import { useToast } from '@/hooks/use-toast';
 import { updateWorkOrder } from '@/services/supabase/WorkOrderFirebaseService';
 
+/**
+ * Build request headers for the work-order-termination API, attaching the
+ * caller's Supabase access token. The app stores sessions in localStorage (not
+ * cookies), so the token must be sent explicitly via the Authorization header
+ * for the server-side role guard to identify the caller.
+ */
+async function terminationAuthHeaders(): Promise<Record<string, string>> {
+  const { getSupabaseClient } = await import('@/integrations/supabase/client');
+  const { data } = await getSupabaseClient().auth.getSession();
+  const token = data.session?.access_token;
+  return token
+    ? { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+    : { 'Content-Type': 'application/json' };
+}
+
 type TerminationStep = 'initiate' | 'letter_generated' | 'awaiting_client' | 'client_responded' | 'completed';
 
 interface TerminateWorkOrderModalProps {
@@ -253,7 +268,7 @@ export function TerminateWorkOrderModal({ isOpen, onClose, workOrder }: Terminat
       };
       await fetch('/api/bff/work-order-termination', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await terminationAuthHeaders(),
         body: JSON.stringify({
           workOrderId: workOrder.id,
           terminationData: finalData,
@@ -296,7 +311,7 @@ export function TerminateWorkOrderModal({ isOpen, onClose, workOrder }: Terminat
   const saveTerminationData = async (data: any) => {
     const response = await fetch('/api/bff/work-order-termination', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await terminationAuthHeaders(),
       body: JSON.stringify({ workOrderId: workOrder.id, terminationData: data }),
     });
     if (!response.ok) {

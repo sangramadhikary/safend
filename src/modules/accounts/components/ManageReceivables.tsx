@@ -37,6 +37,7 @@ import { addNotification } from '@/services/supabase/NotificationService';
 import { checkAndAssignOverdueCollections } from '@/services/collections/OverdueCollectionService';
 import { isValidGSTIN } from '@/lib/security/lookups';
 import { isEInvoiceRequired } from '@/lib/invoice/calculations';
+import { computeSettlement } from '@/lib/invoice/payment-settlement';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, type GstType } from '@/lib/tax/gst';
 import { auditActions, logAuditEvent, logChange } from '@/utils/auditLog';
 import { formatINRShort } from '@/lib/format';
@@ -76,6 +77,13 @@ interface ReceivableEntry {
   invoice_snapshot?: unknown | null;
   /** DB column for previous outstanding balance */
   previous_balance?: number | null;
+  /** Structured itemisation of the carried-forward previous balance (JSONB). */
+  previous_balance_breakdown?: Array<{
+    referenceNumber?: string;
+    reference_number?: string;
+    date?: string | null;
+    amount?: number;
+  }> | null;
 }
 
 interface InvoiceLineItem {
@@ -591,8 +599,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           previousDue = parseFloat(prevDueMatch[1].replace(/,/g, ''));
         }
       }
-      const totalPayable = entry.total_amount + previousDue;
-      
       // Determine already paid amount
       let alreadyPaid = 0;
       try {
@@ -612,10 +618,18 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                       (entry.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
         alreadyPaid = match ? parseFloat(match[1].replace(/,/g, '')) || 0 : 0;
       }
-      
-      const newTotalPaid = alreadyPaid + amount + tds;
-      const balanceAmount = Math.max(0, totalPayable - newTotalPaid);
-      const fullyPaid = balanceAmount <= 0.01 || payment.paymentType === 'full';
+
+      // Settlement is decided by the money actually collected, NOT by the UI
+      // "full payment" toggle. A short amount left marked "full" must not flip
+      // the invoice to received while a real balance remains. See
+      // computeSettlement (unit-tested in payment-settlement.test.ts).
+      const { totalPayable, newTotalPaid, balanceAmount, fullyPaid } = computeSettlement({
+        totalAmount: entry.total_amount,
+        previousDue,
+        alreadyPaid,
+        amount,
+        tds,
+      });
 
       // Build a notes string capturing all payment metadata for audit
       const displayReceivedBy = payment.receivedBy === '__third_party__'
@@ -1682,19 +1696,58 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     const billingMatch = notes.match(/Billing Period:\s*([^|]+)/);
     const billingPeriod = billingMatch ? billingMatch[1].trim() : '';
 
-    // Parse previous entries breakdown from notes
-    // Format: "Outstanding: INV-001 (₹50,000), INV-002 (₹30,000)"
-    const outstandingMatch = notes.match(/Outstanding:\s*([^|]+)/);
+    // Resolve the itemised previous-outstanding breakdown printed on the payment
+    // advice. There are two possible sources, and they must never contradict the
+    // authoritative previous_balance column:
+    //
+    //  1. previous_balance_breakdown (structured JSONB) — written by the CURRENT,
+    //     work-order-scoped invoice logic. Authoritative when present.
+    //  2. Legacy "Outstanding: <ref> (₹amount)" note — written by OLD logic that
+    //     scoped by client_name across ALL of a client's work orders, so it can
+    //     name invoices from unrelated work orders (e.g. 26270018 listing
+    //     26270001 from a different work order). We only trust it when its total
+    //     reconciles with previous_balance; otherwise it is stale/contaminated
+    //     and we drop the itemisation, falling back to the lump-sum column.
+    //
+    // buildPaymentAdvice trusts the itemised list over the lump sum whenever it
+    // is non-empty, so a contaminated note here silently overrides the correct
+    // column — which is exactly the bug this guard prevents.
     const previousEntries: Array<{ referenceNumber: string; date?: string; amount: number }> = [];
-    if (outstandingMatch) {
-      const entriesStr = outstandingMatch[1].trim();
-      const entryRegex = /([\w-]+)\s*\(₹([\d,]+(?:\.\d+)?)\)/g;
-      let m;
-      while ((m = entryRegex.exec(entriesStr)) !== null) {
-        previousEntries.push({
-          referenceNumber: m[1],
-          amount: parseFloat(m[2].replace(/,/g, '')),
-        });
+
+    const structuredBreakdown = entry.previous_balance_breakdown;
+    if (Array.isArray(structuredBreakdown) && structuredBreakdown.length > 0) {
+      for (const b of structuredBreakdown) {
+        const ref = b?.referenceNumber ?? b?.reference_number;
+        const amt = Number(b?.amount);
+        if (ref && Number.isFinite(amt)) {
+          previousEntries.push({ referenceNumber: String(ref), date: b?.date ?? undefined, amount: amt });
+        }
+      }
+    } else {
+      // Legacy note fallback — parse, then reconcile against previous_balance.
+      // Format: "Outstanding: INV-001 (₹50,000), INV-002 (₹30,000)"
+      const outstandingMatch = notes.match(/Outstanding:\s*([^|]+)/);
+      const noteEntries: Array<{ referenceNumber: string; amount: number }> = [];
+      if (outstandingMatch) {
+        const entriesStr = outstandingMatch[1].trim();
+        const entryRegex = /([\w-]+)\s*\(₹([\d,]+(?:\.\d+)?)\)/g;
+        let m;
+        while ((m = entryRegex.exec(entriesStr)) !== null) {
+          noteEntries.push({
+            referenceNumber: m[1],
+            amount: parseFloat(m[2].replace(/,/g, '')),
+          });
+        }
+      }
+      if (noteEntries.length > 0) {
+        const noteTotal = Math.round(noteEntries.reduce((s, e) => s + e.amount, 0));
+        // Reconcile: the itemised note total must match the trustworthy column
+        // (allow ₹1 rounding slack). If it disagrees, the note is stale/from a
+        // different work order — discard it and let the lump-sum previousBalance
+        // (effectivePrevDue) drive the advice instead.
+        if (entry.previous_balance == null || Math.abs(noteTotal - Number(entry.previous_balance)) <= 1) {
+          previousEntries.push(...noteEntries);
+        }
       }
     }
 

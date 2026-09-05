@@ -17,12 +17,34 @@
 
 import crypto from 'crypto';
 
-const HMAC_SECRET = process.env.ATTENDANCE_QR_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'fallback-secret-change-me';
+/**
+ * Resolve the signing secret, failing CLOSED if none is configured.
+ *
+ * Previously this fell back to a hardcoded literal ('fallback-secret-change-me')
+ * when no env secret was set. That literal is public (it lives in source), so
+ * any deployment that reached the fallback would sign QR codes with a known
+ * key — letting an attacker forge valid attendance codes. Rather than sign with
+ * a guessable secret, we throw: an unconfigured signing key is an operational
+ * error, not something to paper over with a constant.
+ *
+ * Resolved lazily (not at module load) so importing this module never throws;
+ * only actual signing/verification requires the secret to be present.
+ */
+function getHmacSecret(): string {
+  const secret = process.env.ATTENDANCE_QR_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!secret) {
+    throw new Error(
+      'Attendance QR signing secret is not configured. Set ATTENDANCE_QR_SECRET ' +
+        '(preferred) or SUPABASE_SERVICE_ROLE_KEY. Refusing to sign with a default secret.',
+    );
+  }
+  return secret;
+}
 
-/** Sign a post attendance code. Server-only. */
+/** Sign a post attendance code. Server-only. Throws if no secret is configured. */
 export function signAttendanceCode(postId: string, timestamp: number): string {
   const payload = `${postId}:${timestamp}`;
-  const hmac = crypto.createHmac('sha256', HMAC_SECRET).update(payload).digest('hex');
+  const hmac = crypto.createHmac('sha256', getHmacSecret()).update(payload).digest('hex');
   return hmac.slice(0, 16); // 64-bit truncated signature
 }
 
@@ -54,8 +76,15 @@ export function verifyAttendanceCode(
     return { valid: false, reason: 'expired' };
   }
 
-  // Verify HMAC
-  const expectedSig = signAttendanceCode(postId, timestamp);
+  // Verify HMAC. If no signing secret is configured, signAttendanceCode throws;
+  // treat that as a rejection (fail closed) rather than crashing the request —
+  // a misconfigured server must never accept an unverifiable code.
+  let expectedSig: string;
+  try {
+    expectedSig = signAttendanceCode(postId, timestamp);
+  } catch {
+    return { valid: false, reason: 'signing_unavailable' };
+  }
   if (signature !== expectedSig) {
     return { valid: false, reason: 'invalid_signature' };
   }
