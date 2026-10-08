@@ -26,7 +26,8 @@ import { Plus, Search, Download, IndianRupee, Loader2, FileText, AlertTriangle, 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { exportToCSV, exportToJSON, exportToExcel, exportToPDF } from '../utils/complianceExport';
+import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV } from '../utils/complianceExport';
+import { SAFEND_SUPPLIER } from '@/lib/invoice/document';
 import { CountUp } from '@/components/dashboard/CountUp';
 import { formatINRShort } from '@/lib/format';
 import { useGstLiability } from '@/modules/accounts/hooks/useGstLiability';
@@ -192,7 +193,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       // notes a positive one — both must be pulled in so the summed output tax nets correctly.
       const { data, error } = await supabaseClient
         .from('receivables')
-        .select('id, description, client_name, amount, gst_amount, total_amount, status, created_at, gst_treatment, reference_number, line_items')
+        .select('id, description, client_name, client_gstin, amount, gst_amount, total_amount, status, created_at, gst_treatment, gst_type, reference_number, line_items, notes')
         .or('gst_amount.gt.0,gst_amount.lt.0,gst_treatment.eq.rcm')
         // Cancelled invoices create no GST liability, so keep them out of every
         // GST computation (GSTR-1, GSTR-3B, ITC, ledger).
@@ -663,13 +664,123 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
   };
 
   const handleExport = (format: 'csv' | 'xlsx' | 'json' | 'pdf') => {
+    const dateSuffix = new Date().toISOString().slice(0, 10);
+
+    // ── GSTR-1: use portal-compliant export functions ─────────────────────
+    if (activeSection === 'gst' && gstSubTab === 'gstr1' && (format === 'csv' || format === 'json')) {
+      if (gstPeriod === 'all') {
+        toast({
+          title: "Select a Return Period",
+          description: "GSTR-1 files must be for a single filing month. Please select a specific period from the dropdown.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (!gstOutwardScoped.length) {
+        toast({ title: "No Data", description: "No outward supplies for this period.", variant: "destructive" });
+        return;
+      }
+
+      const [y, m] = gstPeriod.split('-');
+      const baseFilename = `GSTR1_${SAFEND_SUPPLIER.gstin}_${m}${y}_${dateSuffix}`;
+
+      if (format === 'json') {
+        exportGSTR1_JSON(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.json`);
+        toast({ title: "GSTR-1 JSON exported", description: "Upload this file at GST Portal → Returns Dashboard → GSTR-1 → Prepare Offline." });
+      } else {
+        exportGSTR1_CSV(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.csv`);
+        toast({ title: "GSTR-1 CSV exported", description: "Use this with the GSTN Offline Tool to review and generate the upload JSON." });
+      }
+      return;
+    }
+
+    // ── GSTR-3B: use portal-compliant export functions ────────────────────
+    if (activeSection === 'gst' && gstSubTab === 'gstr3b' && (format === 'csv' || format === 'json')) {
+      // Block "all periods" — GSTN portal requires one file per return period
+      if (gstPeriod === 'all') {
+        toast({
+          title: "Select a Return Period",
+          description: "GSTR-3B files must be for a single filing month. Please select a specific period from the dropdown.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+      // Output split: use computePeriodLiability which derives CGST/SGST/IGST
+      // from each invoice's persisted gst_type — exact, not assumed.
+      const liab = computePeriodLiability(gstPeriod);
+
+      // ITC split: mirror the same isInterState logic used in useGstLiability
+      const isInterState = (e: any): boolean => {
+        if (e?.gst_type) return e.gst_type === 'igst';
+        return typeof e?.notes === 'string' && e.notes.toLowerCase().includes('igst');
+      };
+      const itcIgst = round2(gstInward.filter(isInterState).reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+      const itcIntra = round2(gstInward.filter((e: any) => !isInterState(e)).reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+      const itcCgst = round2(itcIntra / 2);
+      const itcSgst = round2(itcIntra - itcCgst);
+
+      // RCM taxable value and GST split from period-scoped rcmOutward
+      const rcmTaxableValue = round2(rcmOutward.reduce((s: number, e: any) => s + (e.amount || 0), 0));
+      const rcmGstIgst = round2(rcmOutward.filter(isInterState).reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+      const rcmGstIntra = round2(rcmOutward.filter((e: any) => !isInterState(e)).reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+      const rcmCgst = round2(rcmGstIntra / 2);
+      const rcmSgst = round2(rcmGstIntra - rcmCgst);
+
+      // Taxable value (invoice amount before GST) for forward-charge output
+      const taxableValue = round2(forwardOutward.reduce((s: number, e: any) => s + (e.amount || 0), 0));
+
+      const periodData = {
+        periodKey:       gstPeriod,
+        gstin:           SAFEND_SUPPLIER.gstin,
+        outputGST:       gstr3bSummary.totalOutputGST,
+        taxableValue,
+        rcmTaxableValue,
+        rcmIgst:         rcmGstIgst,
+        rcmCgst,
+        rcmSgst,
+        // Output split from useGstLiability — exact per invoice gst_type
+        outputIgst:      round2(liab.output > 0 ? liab.igst + (liab.remaining > 0 ? 0 : 0) : 0),
+        outputCgst:      round2(liab.output > 0 ? liab.cgst + (liab.remaining > 0 ? 0 : 0) : 0),
+        outputSgst:      round2(liab.output > 0 ? liab.sgst + (liab.remaining > 0 ? 0 : 0) : 0),
+        itc:             gstr3bSummary.totalITC,
+        itcIgst,
+        itcCgst,
+        itcSgst,
+      };
+
+      // Re-derive output IGST/CGST/SGST directly (liab split is on remaining,
+      // not on gross output — compute from raw rows instead)
+      const outputIgst = round2(forwardOutward.filter(isInterState).reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+      const outputIntra = round2(forwardOutward.filter((e: any) => !isInterState(e)).reduce((s: number, e: any) => s + (e.gst_amount || 0), 0));
+      const outputCgst = round2(outputIntra / 2);
+      const outputSgst = round2(outputIntra - outputCgst);
+      periodData.outputIgst = outputIgst;
+      periodData.outputCgst = outputCgst;
+      periodData.outputSgst = outputSgst;
+
+      const [y, m] = gstPeriod.split('-');
+      const baseFilename = `GSTR3B_${SAFEND_SUPPLIER.gstin}_${m}${y}_${dateSuffix}`;
+
+      if (format === 'json') {
+        exportGSTR3B_JSON(periodData, `${baseFilename}.json`);
+        toast({ title: "GSTR-3B JSON exported", description: "Upload this file at GST portal → Returns Dashboard → GSTR-3B → Prepare Offline." });
+      } else {
+        exportGSTR3B_CSV(periodData, `${baseFilename}.csv`);
+        toast({ title: "GSTR-3B CSV exported", description: "Use this with the GSTN Offline Tool (Excel utility) to generate the upload JSON." });
+      }
+      return;
+    }
+
+    // ── All other tabs / formats: generic export ──────────────────────────
     const data = getExportData();
     if (!data.length) {
       toast({ title: "No Data", description: "Nothing to export.", variant: "destructive" });
       return;
     }
 
-    const dateSuffix = new Date().toISOString().slice(0, 10);
     const tabLabel = activeSection === 'gst' ? `GST_${gstSubTab}` : filter.replace(/[\/\s]/g, '_');
     const baseFilename = `compliance_${tabLabel}_${dateSuffix}`;
     const title = `${filter} - ${activeSection === 'gst' ? gstSubTab.toUpperCase() : 'Report'}`;
@@ -812,7 +923,6 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
               </DropdownMenuTrigger>
               <DropdownMenuContent>
                 <DropdownMenuItem onClick={() => handleExport('csv')}>CSV</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => handleExport('xlsx')}>Excel</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('json')}>JSON</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('pdf')}>PDF</DropdownMenuItem>
               </DropdownMenuContent>
@@ -1296,9 +1406,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DropdownMenuItem onClick={() => handleExport('csv')}>CSV</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('xlsx')}>Excel</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => handleExport('json')}>JSON</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('pdf')}>PDF</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1384,9 +1492,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DropdownMenuItem onClick={() => handleExport('csv')}>CSV</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('xlsx')}>Excel</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => handleExport('json')}>JSON</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('pdf')}>PDF</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
