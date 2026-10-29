@@ -267,6 +267,10 @@ DO $$ BEGIN
   IF to_regclass('public.cheque_register') IS NOT NULL THEN
     ALTER TABLE public.cheque_register ADD COLUMN IF NOT EXISTS receipt_id uuid;
   END IF;
+  -- Why a number was retired (cancel / draft delete). Older installs lack it.
+  IF to_regclass('public.deleted_invoice_numbers') IS NOT NULL THEN
+    ALTER TABLE public.deleted_invoice_numbers ADD COLUMN IF NOT EXISTS notes text;
+  END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS public.credit_note_number_counters (
@@ -1822,10 +1826,11 @@ DO $$ BEGIN
   IF to_regclass('public.invoice_delete_requests') IS NOT NULL THEN
     CREATE POLICY invoice_delete_requests_select ON public.invoice_delete_requests
       FOR SELECT TO authenticated
-      USING (requested_by = auth.uid() OR (SELECT public.is_receivables_admin(auth.uid())));
+      -- requested_by is text on some installs and uuid on others.
+      USING (requested_by::text = (SELECT auth.uid())::text OR (SELECT public.is_receivables_admin(auth.uid())));
     CREATE POLICY invoice_delete_requests_insert_own ON public.invoice_delete_requests
       FOR INSERT TO authenticated
-      WITH CHECK (requested_by = auth.uid() AND (SELECT public.app_is_staff(auth.uid())));
+      WITH CHECK (requested_by::text = (SELECT auth.uid())::text AND (SELECT public.app_is_staff(auth.uid())));
     CREATE POLICY invoice_delete_requests_review_admin ON public.invoice_delete_requests
       FOR UPDATE TO authenticated
       USING ((SELECT public.is_receivables_admin(auth.uid())))
