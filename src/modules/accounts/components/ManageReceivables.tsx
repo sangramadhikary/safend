@@ -31,18 +31,19 @@ import { RaiseInvoiceDialog } from './RaiseInvoiceDialog';
 import { OneTimeInvoiceForm } from './OneTimeInvoiceForm';
 import { InvoiceImportDialog } from './InvoiceImportDialog';
 import { PayrollReceivablesSection } from './PayrollReceivablesSection';
-import { recordDeletedInvoiceNumber } from '@/services/invoiceNumberService';
-import { closePendingRequestsForReceivable } from '@/services/supabase/InvoiceDeleteRequestService';
+import { ReceivePaymentDialog } from './ReceivePaymentDialog';
 import { addNotification } from '@/services/supabase/NotificationService';
 import { checkAndAssignOverdueCollections } from '@/services/collections/OverdueCollectionService';
-import { isValidGSTIN } from '@/lib/security/lookups';
-import { isEInvoiceRequired } from '@/lib/invoice/calculations';
-import { computeSettlement } from '@/lib/invoice/payment-settlement';
-import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, type GstType } from '@/lib/tax/gst';
+import { type GstType } from '@/lib/tax/gst';
+import { amountDue, amountReceived, invoiceBalance, isOverpaid, isPartlyPaid, outstandingAmount, sumMoney } from '@/lib/invoice/ledger';
+import { buildInvoiceViewData, carriedReferenceNumbers } from '@/lib/invoice/document-input';
+import {
+  cancelInvoice as cancelInvoiceRpc, deleteDraftInvoice, isDraftInvoice, undoLastReceipt,
+} from '@/services/invoiceLedgerService';
 import { auditActions, logAuditEvent, logChange } from '@/utils/auditLog';
 import { formatINRShort, formatINR } from '@/lib/format';
 import { getClientByName } from '@/services/supabase/ClientService';
-import { buildInvoiceEmailHtml, buildInvoiceEmailText, buildInvoiceEmailSubject, ENCLOSURE_LABELS, type EnclosureKind } from '@/lib/invoice/invoice-email';
+
 
 interface ReceivablesProps {
   filter: string;
@@ -74,6 +75,8 @@ interface ReceivableEntry {
   gst_type?: GstType | null;
   /** Proper DB column — the Place of Supply selected at invoice creation */
   place_of_supply?: string | null;
+  /** Proper DB column — buyer GSTIN (null for unregistered buyers) */
+  client_gstin?: string | null;
   service_period_start?: string | null;
   service_period_end?: string | null;
   invoice_snapshot?: unknown | null;
@@ -81,11 +84,23 @@ interface ReceivableEntry {
   previous_balance?: number | null;
   /** Structured itemisation of the carried-forward previous balance (JSONB). */
   previous_balance_breakdown?: Array<{
+    id?: string;
     referenceNumber?: string;
     reference_number?: string;
     date?: string | null;
     amount?: number;
   }> | null;
+  // Ledger columns, maintained by the database from the payment allocations
+  // (balance = total_amount + opening_balance − paid_amount).
+  paid_amount?: number | null;
+  tds_credited?: number | null;
+  credit_applied?: number | null;
+  opening_balance?: number | null;
+  tds_rate?: number | null;
+  work_order_id?: string | null;
+  source?: string | null;
+  cancel_reason?: string | null;
+  promised_payment_date?: string | null;
 }
 
 interface InvoiceLineItem {
@@ -159,41 +174,17 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   const [invoiceViewOpen, setInvoiceViewOpen] = useState(false);
   const [invoiceEditOpen, setInvoiceEditOpen] = useState(false);
   const [selectedInvoiceEntry, setSelectedInvoiceEntry] = useState<ReceivableEntry | null>(null);
-  const [amountDue, setAmountDue] = useState<number>(0);
   const [invoiceViewData, setInvoiceViewData] = useState<InvoiceData | null>(null);
-  const [receiveAmountOpen, setReceiveAmountOpen] = useState(false);
+  /** Invoice the Record Payment dialog is open for (null = closed). */
+  const [receiveEntry, setReceiveEntry] = useState<ReceivableEntry | null>(null);
+  /** Older invoices to tick in that dialog (bulk selection). */
+  const [receivePreselect, setReceivePreselect] = useState<string[]>([]);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [entryToDelete, setEntryToDelete] = useState<ReceivableEntry | null>(null);
-  // Email-invoice flow: Outlook-style compose modal (multi To/CC/BCC, editable
-  // subject + body, multiple attachments) before sending via Resend.
-  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
-  const [emailEntry, setEmailEntry] = useState<ReceivableEntry | null>(null);
-  const [emailSending, setEmailSending] = useState(false);
-  const [emailPreparing, setEmailPreparing] = useState(false);
-  const [emailTo, setEmailTo] = useState('');
-  const [emailCc, setEmailCc] = useState('');
-  const [emailBcc, setEmailBcc] = useState('');
-  const [emailShowCc, setEmailShowCc] = useState(false);
-  const [emailShowBcc, setEmailShowBcc] = useState(false);
-  const [emailSubject, setEmailSubject] = useState('');
-  const [emailBody, setEmailBody] = useState('');
-  const [emailHtml, setEmailHtml] = useState('');
-  /** Body editor mode: rendered preview, raw HTML source, or plain text. */
-  const [emailBodyMode, setEmailBodyMode] = useState<'preview' | 'html' | 'text'>('preview');
-  /**
-   * True once the user hand-edits the HTML/text, which stops the automatic
-   * regeneration that keeps the body in sync with the attachment list (we must
-   * never silently discard someone's edits).
-   */
-  const [emailBodyEdited, setEmailBodyEdited] = useState(false);
-  // Attachments carried as base64 for the Resend payload, tagged with the
-  // document category so the email body can list what is enclosed.
-  const [emailAttachments, setEmailAttachments] = useState<
-    Array<{ filename: string; content: string; size: number; kind: EnclosureKind }>
-  >([]);
-  /** Which category the next picked file(s) will be tagged as. */
-  const [emailPickKind, setEmailPickKind] = useState<EnclosureKind>('other');
   const [deleteReason, setDeleteReason] = useState('');
+  /** Invoice the Cancel dialog is open for, and the reason being typed. */
+  const [cancelEntry, setCancelEntry] = useState<ReceivableEntry | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
 
   // New: Status filter, sorting, pagination, bulk selection
   const [statusFilter, setStatusFilter] = useState<'all' | 'created' | 'issued' | 'open' | 'overdue' | 'received' | 'cancelled'>('all');
@@ -203,21 +194,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const PAGE_SIZE = 100;
-  const [paymentForm, setPaymentForm] = useState({
-    mode: 'Bank Transfer',          // Cash | Cheque | Bank Transfer
-    receivedBy: '',                 // for Cash/Cheque
-    thirdPartyName: '',             // for Authorized 3rd Person
-    chequeNumber: '',               // for Cheque
-    chequeDate: '',                 // for Cheque
-    bankAccountId: '',              // for Bank Transfer
-    transactionNumber: '',          // for Bank Transfer
-    transactionDateTime: '',        // for Bank Transfer
-    paymentType: 'full',            // full | partial | invoice_only
-    amountReceived: '',
-    tdsDeducted: '',                // TDS withheld by the client on this payment
-    balanceHandling: 'due_date',    // due_date | credit_note (for partial)
-    balanceDueDate: '',
-  });
 
   const { data: receivables = [], isLoading } = useQuery<ReceivableEntry[]>({
     queryKey: ['receivables', filter, getBranchScopeFilter()],
@@ -325,56 +301,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     },
   });
 
-  const markAsReceived = useMutation({
-    mutationFn: async (id: string) => {
-      // The loaded list supplies the before-state, so no extra read is needed here.
-      const entry = receivables.find(r => r.id === id);
-
-      const { error } = await supabaseClient
-        .from('receivables')
-        .update({ status: 'received' })
-        .eq('id', id);
-      if (error) throw new Error(error.message);
-
-      void logChange({
-        action: 'accounts.invoice.update',
-        target: entry?.reference_number || id,
-        entityType: 'receivables',
-        entityId: id,
-        entityLabel: `${entry?.reference_number ?? id} — ${entry?.client_name ?? 'Unknown client'}`,
-        before: { status: entry?.status ?? null },
-        after: { status: 'received' },
-        details: {
-          clientName: entry?.client_name,
-          totalAmount: entry?.total_amount,
-          markedWithoutPaymentRecord: true,
-        },
-        logUnchanged: true,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['receivables'] });
-      toast({ title: "Marked as Received" });
-    },
-  });
-
+  // cancel_invoice refuses an invoice with payments (undo them, or raise a
+  // credit note) and logs the retired number; the row and number stay on file.
   const cancelInvoice = useMutation({
-    mutationFn: async (id: string) => {
-      // Get the invoice reference number before cancelling
+    mutationFn: async ({ id, reason }: { id: string; reason: string }) => {
       const entry = receivables.find(r => r.id === id);
-      const { error } = await supabaseClient
-        .from('receivables')
-        .update({ status: 'cancelled' })
-        .eq('id', id);
-      if (error) throw new Error(error.message);
-
-      // Record the serial as cancelled for audit. The number is not released back
-      // into circulation — reissuing it would put two documents on one serial.
-      if (entry?.reference_number) {
-        try {
-          await recordDeletedInvoiceNumber(entry.reference_number);
-        } catch { /* non-critical */ }
-      }
+      await cancelInvoiceRpc(id, reason);
 
       // Cancelling voids an issued tax invoice, so the amount and client are
       // recorded explicitly — the row itself survives but its commercial meaning
@@ -391,93 +323,61 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           clientName: entry?.client_name,
           totalAmount: entry?.total_amount,
           gstAmount: entry?.gst_amount,
-          invoiceNumberReleasedForReuse: entry?.reference_number ?? null,
+          reason,
+          invoiceNumberRetired: entry?.reference_number ?? null,
         },
         logUnchanged: true,
       });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['receivables'] });
-      toast({ title: "Invoice Cancelled", description: "Invoice number will be available for reuse." });
+      setCancelEntry(null);
+      setCancelReason('');
+      toast({ title: "Invoice Cancelled", description: "The invoice stays on record as cancelled. Its number is retired, not reissued." });
+    },
+    onError: (error: any) => {
+      toast({ title: "Not cancelled", description: error.message, variant: "destructive" });
     },
   });
 
+  // undo_last_receipt reverses the whole latest receipt on this invoice: every
+  // invoice it paid, the exact bank / cash / cheque entry it posted, and any
+  // credit note it raised. Balances and statuses follow from the ledger.
   const undoLastPayment = useMutation({
     mutationFn: async (entry: ReceivableEntry) => {
-      // Find the most recent payment for this invoice
-      const { data: payments } = await supabaseClient
-        .from('receivable_payments')
-        .select('*')
-        .eq('receivable_id', entry.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (payments && payments.length > 0) {
-        const lastPayment = payments[0];
-        
-        // Delete it from receivable_payments
-        await supabaseClient.from('receivable_payments').delete().eq('id', lastPayment.id);
-        
-        // If it was a bank transfer, attempt to delete the corresponding bank_transactions record using reference number
-        if (lastPayment.transaction_number) {
-          await supabaseClient.from('bank_transactions').delete().eq('reference_number', lastPayment.transaction_number);
-        }
-        
-        // Calculate remaining payments to determine new status
-        const { data: remainingPayments } = await supabaseClient
-          .from('receivable_payments')
-          .select('amount')
-          .eq('receivable_id', entry.id);
-          
-        const totalPaidNow = remainingPayments?.reduce((sum, p) => sum + (p.amount || 0), 0) || 0;
-        
-        // Revert to an unpaid stored state; Open/Overdue are derived at display
-        // time from the due date and age, so we just restore 'issued'.
-        const newStatus = 'issued';
-        
-        // Update notes: strip the payment metadata portion but preserve original invoice metadata
-        let updatedNotes = entry.notes || '';
-        if (totalPaidNow === 0) {
-           // Remove all PAYMENT: sections, restoring original invoice notes
-           updatedNotes = updatedNotes.replace(/\s*\|\|\s*PAYMENT:.*$/s, '').trim();
-           // Also handle legacy format where notes were fully overwritten with payment data
-           if (/^Mode:/.test(updatedNotes)) {
-             updatedNotes = '';
-           }
-        } else {
-           updatedNotes = updatedNotes.replace(/Total Paid:\s*₹[\d,]+(?:\.\d+)?/, `Total Paid: ₹${totalPaidNow.toLocaleString('en-IN')}`);
-        }
-
-        const { error } = await supabaseClient
-          .from('receivables')
-          .update({ status: newStatus, notes: updatedNotes })
-          .eq('id', entry.id);
-
-        if (error) throw error;
-      } else {
-        // Fallback: If no payments exist in table but invoice is marked received (legacy)
-        // Preserve original invoice metadata notes, only strip payment sections
-        let restoredNotes = (entry.notes || '').replace(/\s*\|\|\s*PAYMENT:.*$/s, '').trim();
-        if (/^Mode:/.test(restoredNotes)) restoredNotes = '';
-        // Open/Overdue are derived at display time; restore an unpaid stored state.
-        const newStatus = 'issued';
-        const { error } = await supabaseClient
-          .from('receivables')
-          .update({ status: newStatus, notes: restoredNotes })
-          .eq('id', entry.id);
-        if (error) throw error;
-      }
+      const result = await undoLastReceipt(entry.id);
+      void logChange({
+        action: 'accounts.payment.undo',
+        target: entry.reference_number || entry.id,
+        entityType: 'receivables',
+        entityId: entry.id,
+        entityLabel: `${entry.reference_number ?? entry.id} — ${entry.client_name ?? 'Unknown client'}`,
+        severity: 'critical',
+        before: { status: entry.status, amountOutstanding: amountDue(entry) },
+        after: {},
+        details: { clientName: entry.client_name, allocationRowsRemoved: result.removed, warnings: result.warnings },
+        logUnchanged: true,
+      });
+      return result;
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['receivables'] });
-      toast({ title: "Payment Undone", description: "The last payment was successfully reversed.", variant: "default" });
+      toast({
+        title: "Payment Undone",
+        description: [
+          result.removed > 1 ? `The receipt is reversed on all ${result.removed} invoice allocations it made.` : 'The last receipt is reversed.',
+          ...(result.warnings ?? []),
+        ].join(' '),
+        variant: result.warnings?.length ? 'destructive' : 'default',
+      });
     },
     onError: (err: any) => {
       toast({ title: "Error", description: err.message || "Failed to undo payment", variant: "destructive" });
     }
   });
 
-  // Delete invoice (admin only) — permanently removes and recycles the invoice number
+  // Delete a never-issued, unpaid draft (admin only). Anything issued or paid is
+  // cancelled instead; delete_draft_invoice enforces both and retires the number.
   const deleteInvoice = useMutation({
     mutationFn: async (entry: ReceivableEntry) => {
       if (!isAdmin) {
@@ -500,34 +400,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         throw new Error('Only admins can delete invoices directly.');
       }
 
-      // Record the serial as cancelled — audit only. Since the Rule 46(b) work in
-      // 20260802000000 a cancelled number is NOT returned to circulation; the row
-      // exists so the resulting gap in the sequence is explainable to an auditor.
-      if (entry.reference_number) {
-        await recordDeletedInvoiceNumber(entry.reference_number);
-      }
-
-      // Delete associated payments first
-      try {
-        await supabaseClient
-          .from('receivable_payments')
-          .delete()
-          .eq('receivable_id', entry.id);
-      } catch { /* may not have payments */ }
-
-      // Delete the receivable
-      const { error } = await supabaseClient
-        .from('receivables')
-        .delete()
-        .eq('id', entry.id);
-      if (error) throw new Error(error.message);
-
-      // Close any pending delete requests for this invoice rather than deleting
-      // them. The admin has effectively granted the request, and the row is the
-      // only record of who asked and why — discarding it would erase that, and
-      // leaving it pending would point the admin review queue at a receivable
-      // that no longer exists.
-      await closePendingRequestsForReceivable(entry.id, 'Admin (direct delete)');
+      // The database refuses anything issued or paid, logs the retired number
+      // (never reissued) and closes pending delete requests for the row.
+      await deleteDraftInvoice(entry.id, deleteReason.trim() || 'No reason given');
 
       // The whole entry is recorded because the row is now gone: this audit record
       // is the only remaining evidence of the invoice's existence, its value, and
@@ -539,7 +414,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       setDeleteConfirmOpen(false);
       setEntryToDelete(null);
       setDeleteReason('');
-      toast({ title: "Invoice Deleted", description: "Invoice permanently deleted. Its number is retired, not reissued — the gap in the sequence is intentional." });
+      toast({ title: "Draft Deleted", description: "The draft invoice is deleted. Its number is retired, not reissued; the gap in the sequence is intentional." });
     },
     onError: (error: any) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -615,243 +490,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     },
   });
 
-  const recordReceivedAmount = useMutation({
-    mutationFn: async ({ entry, payment }: { entry: ReceivableEntry; payment: typeof paymentForm }) => {
-      const amount = parseFloat(payment.amountReceived) || 0;
-      const tds = parseFloat(payment.tdsDeducted) || 0;
-      
-      // Match openReceiveAmount: DB column is the source of truth, notes are a fallback.
-      let previousDue = 0;
-      if (entry.previous_balance && entry.previous_balance > 0) {
-        previousDue = entry.previous_balance;
-      } else {
-        const prevDueMatch = (entry.notes || '').match(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/);
-        if (prevDueMatch) {
-          previousDue = parseFloat(prevDueMatch[1].replace(/,/g, ''));
-        }
-      }
-      // Determine already paid amount
-      let alreadyPaid = 0;
-      try {
-        const { data: payments } = await supabaseClient
-          .from('receivable_payments')
-          .select('amount')
-          .eq('receivable_id', entry.id);
-        if (payments && payments.length > 0) {
-          alreadyPaid = payments.reduce((s, p) => s + (p.amount || 0), 0);
-        } else {
-          const match = (entry.notes || '').match(/Total Paid:\s*₹([\d,]+(?:\.\d+)?)/) || 
-                        (entry.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
-          alreadyPaid = match ? parseFloat(match[1].replace(/,/g, '')) || 0 : 0;
-        }
-      } catch {
-        const match = (entry.notes || '').match(/Total Paid:\s*₹([\d,]+(?:\.\d+)?)/) || 
-                      (entry.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
-        alreadyPaid = match ? parseFloat(match[1].replace(/,/g, '')) || 0 : 0;
-      }
-
-      // Settlement is decided by the money actually collected, NOT by the UI
-      // "full payment" toggle. A short amount left marked "full" must not flip
-      // the invoice to received while a real balance remains. See
-      // computeSettlement (unit-tested in payment-settlement.test.ts).
-      const { totalPayable, newTotalPaid, balanceAmount, fullyPaid } = computeSettlement({
-        totalAmount: entry.total_amount,
-        previousDue,
-        alreadyPaid,
-        amount,
-        tds,
-      });
-
-      // Build a notes string capturing all payment metadata for audit
-      const displayReceivedBy = payment.receivedBy === '__third_party__'
-        ? payment.thirdPartyName || 'Authorized 3rd Person'
-        : payment.receivedBy;
-      const paymentMeta: string[] = [`Mode: ${payment.mode}`];
-      if (payment.mode === 'Cash') {
-        paymentMeta.push(`Received By: ${displayReceivedBy}`);
-      } else if (payment.mode === 'Cheque') {
-        paymentMeta.push(`Received By: ${displayReceivedBy}`, `Cheque#: ${payment.chequeNumber}`, `Cheque Date: ${payment.chequeDate}`);
-      } else if (payment.mode === 'Bank Transfer') {
-        const acc = bankAccounts.find(b => b.id === payment.bankAccountId);
-        paymentMeta.push(`Bank: ${acc?.account_name || ''} (${acc?.bank_name || ''})`, `Txn#: ${payment.transactionNumber}`, `Txn DateTime: ${payment.transactionDateTime}`);
-      }
-      paymentMeta.push(`Amount: ₹${amount.toLocaleString('en-IN')}`);
-      if (tds > 0) paymentMeta.push(`TDS: ₹${tds.toLocaleString('en-IN')}`);
-      if (!fullyPaid) {
-        paymentMeta.push(`Balance: ₹${balanceAmount.toLocaleString('en-IN')}`,
-          payment.balanceHandling === 'credit_note' ? `Balance → Credit Note` : `Balance Due: ${payment.balanceDueDate}`);
-      }
-      paymentMeta.push(`Total Paid: ₹${newTotalPaid.toLocaleString('en-IN')}`);
-      const noteStr = paymentMeta.join(' | ');
-
-      // Record payment in liability/receivable payment log if table exists
-      try {
-        const resolvedReceivedBy = payment.receivedBy === '__third_party__'
-          ? payment.thirdPartyName || 'Authorized 3rd Person'
-          : payment.receivedBy || null;
-
-        await supabaseClient.from('receivable_payments').insert({
-          receivable_id: entry.id,
-          amount: amount + tds,
-          mode: payment.mode,
-          received_by: resolvedReceivedBy,
-          cheque_number: payment.chequeNumber || null,
-          cheque_date: payment.chequeDate || null,
-          bank_account_id: payment.bankAccountId || null,
-          transaction_number: payment.transactionNumber || null,
-          transaction_datetime: payment.transactionDateTime || null,
-          is_partial: !fullyPaid,
-          balance_amount: balanceAmount,
-          balance_handling: !fullyPaid ? payment.balanceHandling : null,
-          balance_due_date: (!fullyPaid && payment.balanceHandling === 'due_date') ? payment.balanceDueDate : null,
-          created_at: new Date().toISOString(),
-        });
-      } catch (e) { /* table may not exist yet — continue */ }
-
-      // If bank transfer, also record as a bank credit transaction
-      if (payment.mode === 'Bank Transfer' && payment.bankAccountId) {
-        try {
-          await supabaseClient.from('bank_transactions').insert({
-            account_id: payment.bankAccountId,
-            transaction_date: payment.transactionDateTime ? payment.transactionDateTime.split('T')[0] : new Date().toISOString().split('T')[0],
-            type: 'credit',
-            amount,
-            category: 'client_receipt',
-            description: `Receipt: ${entry.description} (${entry.client_name || ''})`,
-            reference_number: payment.transactionNumber || null,
-            payment_mode: 'neft',
-            party_name: entry.client_name || null,
-          });
-        } catch (e) { /* continue */ }
-      }
-
-      // If cheque, auto-create entry in cheque_register for clearance tracking
-      if (payment.mode === 'Cheque' && payment.chequeNumber) {
-        try {
-          const { getBranchScope } = await import('@/utils/branchScope');
-          const scope = getBranchScope();
-          await supabaseClient.from('cheque_register').insert({
-            cheque_number: payment.chequeNumber,
-            type: 'received',
-            amount,
-            issue_date: payment.chequeDate || new Date().toISOString().split('T')[0],
-            party_name: entry.client_name || 'Unknown',
-            purpose: `Receipt: ${entry.description}`,
-            status: 'pending',
-            branch_id: scope.id || null,
-          });
-        } catch (e) { /* cheque_register table may not exist — continue */ }
-      }
-
-      // If cash, auto-create entry in cash_register for petty cash tracking
-      if (payment.mode === 'Cash') {
-        try {
-          const { getBranchScope } = await import('@/utils/branchScope');
-          const scope = getBranchScope();
-          const resolvedReceivedBy = payment.receivedBy === '__third_party__'
-            ? payment.thirdPartyName || 'Authorized 3rd Person'
-            : payment.receivedBy || null;
-          await supabaseClient.from('cash_register').insert({
-            transaction_date: new Date().toISOString().split('T')[0],
-            type: 'cash_in',
-            amount,
-            category: 'client_receipt',
-            description: `Receipt: ${entry.description} (${entry.client_name || ''})`,
-            received_from: entry.client_name || 'Client',
-            voucher_number: null,
-            branch_id: scope.id || null,
-          });
-        } catch (e) { /* cash_register table may not exist — continue */ }
-      }
-
-      // If partial + credit note, create a credit note receivable for the balance
-      if (!fullyPaid && payment.balanceHandling === 'credit_note' && balanceAmount > 0) {
-        try {
-          await supabaseClient.from('receivables').insert({
-            category: 'Invoice Adjustments',
-            adjustment_type: 'credit',
-            description: `Credit Note for ${entry.description}`,
-            client_name: entry.client_name,
-            amount: -balanceAmount,
-            gst_amount: 0,
-            total_amount: -balanceAmount, // contra — reduces net receivables
-            status: 'pending',
-            notes: `Auto-generated credit note from partial payment of ${entry.description}`,
-          });
-        } catch (e) { /* continue */ }
-      }
-
-      // Update the original receivable
-      // IMPORTANT: Preserve original invoice metadata notes (GSTIN, Address, TDS, Previous Due, etc.)
-      // Payment metadata is appended with a separator so it can be cleanly stripped on undo.
-      const originalNotes = (entry.notes || '').replace(/\s*\|\|\s*PAYMENT:.*$/s, '').trim();
-      const fullNotes = originalNotes ? `${originalNotes} || PAYMENT: ${noteStr}` : `PAYMENT: ${noteStr}`;
-      const updateData: any = {
-        status: fullyPaid ? 'received' : 'pending',
-        notes: fullNotes,
-      };
-      if (!fullyPaid && payment.balanceHandling === 'due_date' && payment.balanceDueDate) {
-        updateData.due_date = payment.balanceDueDate;
-      }
-      const { error } = await supabaseClient.from('receivables').update(updateData).eq('id', entry.id);
-      if (error) throw new Error(error.message);
-
-      // Money movement, so the payment instrument is recorded in full: which bank
-      // account, which cheque number, which transaction reference, and who took
-      // custody of cash. `receivable_payments` may not exist in every environment
-      // (the insert above is wrapped in a try), which makes the audit trail the
-      // only guaranteed record of the receipt.
-      void logChange({
-        action: 'accounts.payment.receive',
-        target: entry.reference_number || entry.id,
-        entityType: 'receivables',
-        entityId: entry.id,
-        entityLabel: `${entry.reference_number ?? entry.id} — ${entry.client_name ?? 'Unknown client'}`,
-        // Partial payments leave a balance outstanding and are the more common
-        // source of later disputes, so they are escalated above a clean settlement.
-        severity: fullyPaid ? 'notice' : 'critical',
-        before: { status: entry.status, dueDate: entry.due_date, amountOutstanding: entry.total_amount },
-        after: {
-          status: updateData.status,
-          dueDate: updateData.due_date ?? entry.due_date,
-          amountOutstanding: balanceAmount,
-        },
-        details: {
-          clientName: entry.client_name,
-          invoiceTotal: entry.total_amount,
-          amountReceived: amount,
-          balanceAmount,
-          fullyPaid,
-          paymentMode: payment.mode,
-          receivedBy: displayReceivedBy || null,
-          chequeNumber: payment.chequeNumber || null,
-          chequeDate: payment.chequeDate || null,
-          bankAccount: payment.mode === 'Bank Transfer'
-            ? bankAccounts.find(b => b.id === payment.bankAccountId)?.account_name ?? null
-            : null,
-          transactionNumber: payment.transactionNumber || null,
-          transactionDateTime: payment.transactionDateTime || null,
-          balanceHandling: fullyPaid ? null : payment.balanceHandling,
-          creditNoteRaised: !fullyPaid && payment.balanceHandling === 'credit_note' && balanceAmount > 0,
-        },
-        logUnchanged: true,
-      });
-
-      return { fullyPaid, amount };
-    },
-    onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: ['receivables'] });
-      toast({
-        title: res.fullyPaid ? "Payment Received in Full" : "Partial Payment Recorded",
-        description: `₹${res.amount.toLocaleString('en-IN')} recorded successfully`
-      });
-      setReceiveAmountOpen(false);
-    },
-    onError: (err: any) => {
-      toast({ title: "Error", description: err.message || "Failed to record payment", variant: "destructive" });
-    },
-  });
-
   const handleSendByMail = (entry: ReceivableEntry) => {
     const subject = encodeURIComponent(`Invoice ${entry.reference_number || entry.id.slice(0, 8)} - Safend Secure Solutions`);
     const body = encodeURIComponent(
@@ -861,6 +499,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       `Amount: ₹${entry.amount.toLocaleString('en-IN')}\n` +
       `GST: ₹${(entry.gst_amount || (entry.total_amount - entry.amount)).toLocaleString('en-IN')}\n` +
       `Total Amount: ₹${entry.total_amount.toLocaleString('en-IN')}\n` +
+      (amountReceived(entry) > 0 ? `Received so far: ₹${amountReceived(entry).toLocaleString('en-IN')}\n` : '') +
+      `Balance Due: ₹${amountDue(entry).toLocaleString('en-IN')}\n` +
       `Due Date: ${entry.due_date ? new Date(entry.due_date).toLocaleDateString('en-IN') : 'N/A'}\n\n` +
       `Kindly arrange the payment at your earliest convenience.\n\n` +
       `Bank Details:\n` +
@@ -875,77 +515,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     window.location.href = `mailto:?subject=${subject}&body=${body}`;
   };
 
-  const openReceiveAmount = async (entry: ReceivableEntry) => {
-    setSelectedInvoiceEntry(entry);
-    
-    let currentDue = entry.total_amount;
-    let alreadyPaid = 0;
-    
-    // Fetch actual paid amount from receivable_payments
-    try {
-      const { data: payments } = await supabaseClient
-        .from('receivable_payments')
-        .select('amount')
-        .eq('receivable_id', entry.id);
-        
-      if (payments && payments.length > 0) {
-        alreadyPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
-        currentDue = Math.max(0, entry.total_amount - alreadyPaid);
-      } else {
-        const match = (entry.notes || '').match(/Total Paid:\s*₹([\d,]+(?:\.\d+)?)/) || 
-                      (entry.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
-        alreadyPaid = match ? parseFloat(match[1].replace(/,/g, '')) || 0 : 0;
-      }
-    } catch {
-      const match = (entry.notes || '').match(/Total Paid:\s*₹([\d,]+(?:\.\d+)?)/) || 
-                    (entry.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
-      alreadyPaid = match ? parseFloat(match[1].replace(/,/g, '')) || 0 : 0;
-    }
-
-    let previousDue = 0;
-    // Use DB column as primary source, fall back to notes
-    if (entry.previous_balance && entry.previous_balance > 0) {
-      previousDue = entry.previous_balance;
-    } else {
-      const prevDueMatch = (entry.notes || '').match(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/);
-      if (prevDueMatch) {
-        previousDue = parseFloat(prevDueMatch[1].replace(/,/g, ''));
-      }
-    }
-    // Extract TDS rate from invoice notes (e.g. "TDS: 2%"), or from snapshot
-    const tdsRateMatch = (entry.notes || '').match(/TDS:\s*([\d.]+)%/);
-    let tdsRate = tdsRateMatch ? parseFloat(tdsRateMatch[1]) : 0;
-    if (tdsRate === 0 && entry.invoice_snapshot) {
-      const snap = entry.invoice_snapshot as any;
-      if (snap?.advice?.tdsRate) tdsRate = snap.advice.tdsRate;
-    }
-    // TDS is deducted on the taxable value (pre-GST base amount), not the total
-    const taxableBase = entry.amount && entry.amount > 0 ? entry.amount : entry.total_amount;
-    const tdsAmount = tdsRate > 0 ? Math.round(taxableBase * tdsRate / 100 * 100) / 100 : 0;
-
-    // Net receivable (the actual cash to collect) = invoice total − TDS + previous
-    // outstanding − amounts already paid. This mirrors the invoice Payment Advice
-    // (buildPaymentAdvice) so "Total Due" here matches "Total Payable Now" there.
-    const totalPayable = Math.max(0, entry.total_amount - tdsAmount + previousDue);
-    currentDue = Math.max(0, totalPayable - alreadyPaid);
-
-    setAmountDue(currentDue);
-    setPaymentForm({
-      mode: 'Bank Transfer',
-      receivedBy: '',
-      thirdPartyName: '',
-      chequeNumber: '',
-      chequeDate: '',
-      bankAccountId: '',
-      transactionNumber: '',
-      transactionDateTime: new Date().toISOString().slice(0, 16),
-      paymentType: currentDue >= Math.max(0, entry.total_amount - tdsAmount) ? 'full' : 'partial',
-      amountReceived: String(currentDue),
-      tdsDeducted: tdsAmount > 0 ? String(tdsAmount) : '',
-      balanceHandling: 'due_date',
-      balanceDueDate: '',
-    });
-    setReceiveAmountOpen(true);
+  const openReceiveAmount = (entry: ReceivableEntry) => {
+    setReceivePreselect([]);
+    setReceiveEntry(entry);
   };
 
   const updateField = (key: string, value: string) => {
@@ -953,52 +525,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   };
 
   // ─── FORM SUBMISSIONS ─────────────────────────────────────────────
-
-  const handleInvoiceSubmit = () => {
-    const { client_name, invoice_number, description, amount, gst_percent, due_date, client_gstin, place_of_supply } = formData;
-    if (!client_name || !invoice_number || !amount) {
-      toast({ title: "Validation Error", description: "Client, Invoice Number and Amount required.", variant: "destructive" });
-      return;
-    }
-    // Validate client GSTIN format if provided (GST invoices to registered clients
-    // must carry a valid recipient GSTIN — Rule 46(f) CGST Rules).
-    const gstin = (client_gstin || '').trim().toUpperCase();
-    if (gstin && !isValidGSTIN(gstin)) {
-      toast({ title: "Invalid GSTIN", description: "Client GSTIN must be a valid 15-character GSTIN (e.g. 21ABDCS8727K1Z4).", variant: "destructive" });
-      return;
-    }
-    // Safend is a body corporate → outward supplies are Forward Charge (or Exempt). RCM never applies here.
-    const treatment = (formData.gst_treatment === 'exempt' ? 'exempt' : 'forward') as 'forward' | 'rcm' | 'exempt';
-    const amt = parseFloat(amount);
-    const gstPct = gst_percent ? parseFloat(gst_percent) : 0;
-    const resolvedPos = (place_of_supply || DEFAULT_PLACE_OF_SUPPLY).trim();
-
-    // ── GST engine: determine CGST+SGST vs IGST based on Place of Supply ──
-    const { gstType } = resolveGstConfig(resolvedPos, treatment === 'exempt' ? 0 : gstPct);
-    const gstAmt = treatment === 'forward' ? amt * (gstPct / 100) : 0;
-
-    const noteBits: string[] = [];
-    if (treatment === 'forward' && gst_percent) noteBits.push(`GST: ${gst_percent}%`);
-    if (treatment === 'exempt') noteBits.push('Exempt / nil-rated supply');
-    if (gstin) noteBits.push(`Client GSTIN: ${gstin}`);
-    // e-Invoice IRN (mandatory for B2B once AATO > ₹5 Cr). Recorded when supplied.
-    if (formData.irn && formData.irn.trim()) noteBits.push(`IRN: ${formData.irn.trim()}`);
-    createReceivable.mutate({
-      category: 'Invoices',
-      gst_treatment: treatment,
-      description: `${description || 'Service Invoice'} | Inv#: ${invoice_number}`,
-      client_name,
-      amount: amt,
-      gst_amount: gstAmt || null,
-      total_amount: amt + gstAmt,
-      due_date: due_date || null,
-      reference_number: invoice_number,
-      // Persist as proper DB columns — no more notes string-sniffing
-      place_of_supply: resolvedPos,
-      gst_type: treatment === 'exempt' ? 'exempt' : gstType,
-      notes: noteBits.join(' | ') || null,
-    });
-  };
 
   const handleAdjustmentSubmit = () => {
     const { adjustment_type, client_name, adj_number, reason, amount, gst_amount, date } = formData;
@@ -1116,7 +642,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
 
   const handleSubmit = () => {
     switch (filter) {
-      case 'Invoices': return handleInvoiceSubmit();
+      // Tax invoices are raised only through the invoice forms, which let the
+      // database allocate the number (create_invoice).
+      case 'Invoices': setShowAddForm(false); setRaiseInvoiceOpen(true); return;
       case 'Invoice Adjustments': return handleAdjustmentSubmit();
       case 'Event Letters': return handleEventLetterSubmit();
       case 'Taxes (ITC/TDS)': return handleTaxesSubmit();
@@ -1126,118 +654,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   };
 
   // ─── FORM RENDERERS ──────────────────────────────────────────────────
-
-  const renderInvoiceForm = () => {
-    const treatment = formData.gst_treatment || 'forward';
-    const amt = formData.amount ? parseFloat(formData.amount) : 0;
-    const gstPct = formData.gst_percent ? parseFloat(formData.gst_percent) : 0;
-    // GST is added to the invoice total only for forward-charge supplies.
-    const gstAmt = treatment === 'forward' ? amt * (gstPct / 100) : 0;
-    const total = amt + gstAmt;
-    return (
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-1"><Label>Client Name*</Label><Input value={formData.client_name || ''} onChange={(e) => updateField('client_name', e.target.value)} placeholder="Client/Company name" /></div>
-          <div className="space-y-1"><Label>Invoice Number*</Label><Input value={formData.invoice_number || ''} onChange={(e) => updateField('invoice_number', e.target.value)} placeholder="INV-2026-001" /></div>
-        </div>
-
-        {/* GST treatment — Safend is a Private Limited Company (body corporate),
-            so security-service supplies are ALWAYS Forward Charge. Per Notification
-            13/2017-CT(Rate), RCM applies only when the supplier is NOT a body
-            corporate — hence RCM is intentionally not offered on outward invoices. */}
-        <div className="space-y-1">
-          <Label>GST Treatment</Label>
-          <div className="grid grid-cols-2 gap-2">
-            {([
-              { key: 'forward', label: 'Forward Charge', hint: 'Company collects & remits GST' },
-              { key: 'exempt', label: 'Exempt', hint: 'No GST (nil-rated / exempt supply)' },
-            ] as const).map(t => (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => updateField('gst_treatment', t.key)}
-                className={`flex flex-col items-start px-3 py-2 rounded-lg border text-left transition-all ${treatment === t.key ? 'border-[#D71920] bg-[#D71920]/5' : 'border-gray-200 dark:border-white/10'}`}
-              >
-                <span className="text-xs font-semibold">{t.label}</span>
-                <span className="text-[10px] text-muted-foreground">{t.hint}</span>
-              </button>
-            ))}
-          </div>
-          <p className="text-[10px] text-muted-foreground mt-1">
-            As a Private Limited Company (body corporate), Safend charges GST under Forward Charge on all security services. Reverse Charge (RCM) does not apply to these outward supplies.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <Label>Client GSTIN</Label>
-            <Input
-              value={formData.client_gstin || ''}
-              onChange={(e) => updateField('client_gstin', e.target.value.toUpperCase())}
-              placeholder="21ABDCS8727K1Z4"
-              maxLength={15}
-              className={formData.client_gstin && !isValidGSTIN(formData.client_gstin) ? 'border-red-400 focus-visible:ring-red-400' : ''}
-            />
-            {formData.client_gstin && !isValidGSTIN(formData.client_gstin) && (
-              <p className="text-[10px] text-red-500">Invalid GSTIN format (15 chars, e.g. 21ABDCS8727K1Z4)</p>
-            )}
-          </div>
-          <div className="space-y-1">
-            <Label>Place of Supply</Label>
-            <Select value={formData.place_of_supply || DEFAULT_PLACE_OF_SUPPLY} onValueChange={(v) => updateField('place_of_supply', v)}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select state" />
-              </SelectTrigger>
-              <SelectContent className="max-h-60">
-                {INDIAN_STATES.map(s => (
-                  <SelectItem key={s.code} value={s.label}>{s.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {(() => {
-              const pos = formData.place_of_supply || DEFAULT_PLACE_OF_SUPPLY;
-              const gstPct = parseFloat(formData.gst_percent || '0') || 0;
-              const { gstType } = resolveGstConfig(pos, gstPct);
-              return gstPct > 0 ? (
-                <p className={`text-[10px] mt-1 font-medium ${gstType === 'igst' ? 'text-blue-600' : 'text-green-600'}`}>
-                  {gstType === 'igst'
-                    ? `Inter-State → IGST ${gstPct}%`
-                    : `Intra-State (Odisha) → CGST ${gstPct / 2}% + SGST ${gstPct / 2}%`}
-                </p>
-              ) : null;
-            })()}
-          </div>
-        </div>
-
-        {/* e-Invoice IRN — required for B2B once AATO > ₹5 Cr */}
-        {isEInvoiceRequired(formData.client_gstin) && (
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Label>IRN (e-Invoice Reference)</Label>
-              <Badge variant="outline" className="text-[10px] border-amber-400 text-amber-600">e-Invoice required (B2B)</Badge>
-            </div>
-            <Input
-              value={formData.irn || ''}
-              onChange={(e) => updateField('irn', e.target.value)}
-              placeholder="64-char IRN from the IRP portal"
-              maxLength={64}
-            />
-            <p className="text-[10px] text-muted-foreground">
-              Generate the IRN + signed QR on the government IRP (or your GSP) and paste the IRN here. B2B invoices without an IRN are not valid tax invoices.
-            </p>
-          </div>
-        )}
-
-        <div className="space-y-1"><Label>Description</Label><Input value={formData.description || ''} onChange={(e) => updateField('description', e.target.value)} placeholder="Service description" /></div>
-        <div className="grid grid-cols-3 gap-4">
-          <div className="space-y-1"><Label>{treatment === 'forward' ? 'Amount (₹)*' : 'Taxable Value (₹)*'}</Label><Input type="number" min="0" value={formData.amount || ''} onChange={(e) => updateField('amount', e.target.value)} /></div>
-          <div className="space-y-1"><Label>GST (%){treatment !== 'forward' ? ' (info)' : ''}</Label><Input type="number" min="0" max="28" value={formData.gst_percent || ''} onChange={(e) => updateField('gst_percent', e.target.value)} placeholder="18" /></div>
-          <div className="space-y-1"><Label>{treatment === 'forward' ? 'Total (₹)' : 'Invoice Total (₹)'}</Label><Input readOnly value={total ? total.toFixed(2) : ''} className="bg-muted" /></div>
-        </div>
-        <div className="space-y-1"><Label>Due Date</Label><Input type="date" value={formData.due_date || ''} onChange={(e) => updateField('due_date', e.target.value)} /></div>
-      </div>
-    );
-  };
 
   const renderAdjustmentForm = () => {
     const type = formData.adjustment_type === 'credit' ? 'credit' : 'debit';
@@ -1350,7 +766,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           <Select value={formData.category || ''} onValueChange={(v) => updateField('category', v)}>
             <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
             <SelectContent>
-              {RECEIVABLE_CATEGORIES.map(c => (<SelectItem key={c} value={c}>{c}</SelectItem>))}
+              {RECEIVABLE_CATEGORIES.filter(c => c !== 'Invoices').map(c => (<SelectItem key={c} value={c}>{c}</SelectItem>))}
             </SelectContent>
           </Select>
         </div>
@@ -1370,7 +786,11 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
 
   const renderAddForm = () => {
     switch (filter) {
-      case 'Invoices': return renderInvoiceForm();
+      case 'Invoices': return (
+        <p className="text-sm text-muted-foreground">
+          Tax invoices are raised with New Invoice, so each one gets the next number in sequence.
+        </p>
+      );
       case 'Invoice Adjustments': return renderAdjustmentForm();
       case 'Event Letters': return renderEventLetterForm();
       case 'Taxes (ITC/TDS)': return renderTaxesForm();
@@ -1541,41 +961,35 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   // Reset page when filters change
   useEffect(() => { setCurrentPage(1); }, [searchTerm, statusFilter, periodFilter, filter]);
 
-  // Calculate summary totals accounting for partial payments
+  // Summary totals from the ledger columns (paid_amount etc.), never from notes.
+  // Outstanding nets open credit notes off; received counts cash + TDS.
   const {
     totalPending, totalOverdue, totalReceived,
     overdueCount, unpaidCount, receivedCount, collectionRate,
   } = useMemo(() => {
-    let pending = 0;
-    let overdue = 0;
-    let received = 0;
-    let oCount = 0;   // overdue invoices
-    let uCount = 0;   // unpaid (not fully received / cancelled) invoices
-    let rCount = 0;   // fully received invoices
+    const outstanding: number[] = [];
+    const overdueDue: number[] = [];
+    const receivedAmounts: number[] = [];
+    let oCount = 0;   // overdue items still owing
+    let uCount = 0;   // items still owing
+    let rCount = 0;   // settled items
 
     receivables.forEach(r => {
-      const effective = getEffectiveStatus(r);
-      if (r.status === 'received') {
-        received += r.total_amount;
-        rCount += 1;
-      } else if (effective !== 'cancelled') {
-        // Check if partial payment was recorded
-        const amountMatch = (r.notes || '').match(/Total Paid:\s*₹([\d,]+(?:\.\d+)?)/) || 
-                            (r.notes || '').match(/Amount:\s*₹([\d,]+(?:\.\d+)?)/);
-        const partialReceived = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) || 0 : 0;
-        if (partialReceived > 0) {
-          received += partialReceived;
-          pending += r.total_amount - partialReceived;
-        } else {
-          pending += r.total_amount;
-        }
+      if (r.status === 'cancelled') return;
+      receivedAmounts.push(amountReceived(r));
+      if (r.status === 'received') { rCount += 1; return; }
+      outstanding.push(outstandingAmount(r));
+      if (amountDue(r) > 0.01) {
         uCount += 1;
-        if (effective === 'overdue') {
-          overdue += r.total_amount - partialReceived;
+        if (getEffectiveStatus(r) === 'overdue') {
+          overdueDue.push(amountDue(r));
           oCount += 1;
         }
       }
     });
+    const pending = sumMoney(outstanding);
+    const overdue = sumMoney(overdueDue);
+    const received = sumMoney(receivedAmounts);
 
     // Collected as a share of everything billed (received + still owed).
     const billed = received + pending;
@@ -1663,9 +1077,13 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
 
   const handleViewInvoice = async (entry: ReceivableEntry) => {
     setSelectedInvoiceEntry(entry);
-    const data = await buildInvoiceData(entry);
-    setInvoiceViewData(data);
-    setInvoiceViewOpen(true);
+    try {
+      const data = await buildInvoiceData(entry);
+      setInvoiceViewData(data);
+      setInvoiceViewOpen(true);
+    } catch (err: any) {
+      toast({ title: 'Could not open the invoice', description: err?.message, variant: 'destructive' });
+    }
   };
 
   const handleEditInvoice = (entry: ReceivableEntry) => {
@@ -1673,434 +1091,110 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     setInvoiceEditOpen(true);
   };
 
-  // Build invoice data from a receivable entry to feed the InvoiceGenerator template
+  // The View renders through the same builder as the PDF route, so both show
+  // the stored figures and the same live statement of account.
   const buildInvoiceData = async (entry: ReceivableEntry): Promise<InvoiceData> => {
-    // Base (pre-GST) amount: prefer the stored base, else derive from total − GST.
-    const gst = entry.gst_amount ?? 0;
-    const base = entry.amount && entry.amount > 0 ? entry.amount : Math.max((entry.total_amount || 0) - gst, 0);
-    const effectiveGst = gst || Math.max((entry.total_amount || 0) - base, 0);
-    const gstRate = base > 0 ? Math.round((effectiveGst / base) * 100) : 18;
-
-    // The description holds the POST/site name with an appended "| Inv#: …".
-    // Strip the invoice-number suffix so only the post name remains.
-    // Guard against the auto-generated "N services" label that appears when
-    // there are multiple service lines — it is not a post name.
-    const rawPostName = (entry.description || '')
-      .replace(/\s*\|\s*Inv#:.*$/i, '')
-      .trim();
-    const postName = /^\d+\s+services?$/i.test(rawPostName) ? '' : rawPostName;
-
-    // Extract client GSTIN and address from notes
-    // Supports both formats: "Client GSTIN: ..." (generated invoices) and "GSTIN: ..." (one-time invoices)
-    const notes = entry.notes || '';
-    const gstinMatch = notes.match(/(?:Client )?GSTIN:\s*([^\s|]+)/);
-    const addressMatch = notes.match(/(?:Client )?(?:Address|Addr):\s*([^|]+)/);
-    const workOrderMatch = notes.match(/Work Order No:\s*([^|]+)/);
-    const workOrderDateMatch = notes.match(/Work Order Date:\s*([^|]+)/);
-    const posMatch = notes.match(/Place of Supply:\s*([^|]+)/);
-    const irnMatch = notes.match(/IRN:\s*([^\s|]+)/);
-    const tdsMatch = notes.match(/TDS:\s*([\d.]+)%/);
-    const prevDueMatch = notes.match(/Previous Due:\s*₹?([\d,]+)/);
-    const gstPctMatch = notes.match(/GST:\s*([\d.]+)%/);
-    const clientGstin = gstinMatch ? gstinMatch[1].trim().toUpperCase() : '';
-    const clientAddress = addressMatch ? addressMatch[1].trim() : '';
-    const workOrderNo = workOrderMatch ? workOrderMatch[1].trim() : '';
-    const workOrderDate = workOrderDateMatch ? workOrderDateMatch[1].trim() : '';
-    const placeOfSupply = posMatch ? posMatch[1].trim() : '';
-    const irn = irnMatch ? irnMatch[1].trim() : '';
-    const notesGstPct = gstPctMatch ? parseFloat(gstPctMatch[1]) : null;
-    const notesTdsRate = tdsMatch ? parseFloat(tdsMatch[1]) : null;
-    const notesPrevDue = prevDueMatch ? parseFloat(prevDueMatch[1].replace(/,/g, '')) : 0;
-    // Use DB column as primary source for previous balance, fall back to notes
-    const effectivePrevDue = entry.previous_balance ?? notesPrevDue;
-    // For TDS: try notes first, then try extracting from snapshot
-    let effectiveTdsRate = notesTdsRate;
-    if (effectiveTdsRate === null && entry.invoice_snapshot) {
-      const snap = entry.invoice_snapshot as any;
-      if (snap?.advice?.tdsRate) effectiveTdsRate = snap.advice.tdsRate;
-      else if (snap?.taxInvoice?.tds !== undefined && snap?.taxInvoice?.taxableValue) {
-        const snapTaxable = snap.taxInvoice.taxableValue;
-        const snapTds = snap.advice?.tds;
-        if (snapTds > 0 && snapTaxable > 0) effectiveTdsRate = Math.round(snapTds / snapTaxable * 10000) / 100;
-      }
-    }
-    const billingMatch = notes.match(/Billing Period:\s*([^|]+)/);
-    const billingPeriod = billingMatch ? billingMatch[1].trim() : '';
-
-    // Resolve the itemised previous-outstanding breakdown printed on the payment
-    // advice. There are two possible sources, and they must never contradict the
-    // authoritative previous_balance column:
-    //
-    //  1. previous_balance_breakdown (structured JSONB) — written by the CURRENT,
-    //     work-order-scoped invoice logic. Authoritative when present.
-    //  2. Legacy "Outstanding: <ref> (₹amount)" note — written by OLD logic that
-    //     scoped by client_name across ALL of a client's work orders, so it can
-    //     name invoices from unrelated work orders (e.g. 26270018 listing
-    //     26270001 from a different work order). We only trust it when its total
-    //     reconciles with previous_balance; otherwise it is stale/contaminated
-    //     and we drop the itemisation, falling back to the lump-sum column.
-    //
-    // buildPaymentAdvice trusts the itemised list over the lump sum whenever it
-    // is non-empty, so a contaminated note here silently overrides the correct
-    // column — which is exactly the bug this guard prevents.
-    const previousEntries: Array<{ referenceNumber: string; date?: string; amount: number }> = [];
-
-    const structuredBreakdown = entry.previous_balance_breakdown;
-    if (Array.isArray(structuredBreakdown) && structuredBreakdown.length > 0) {
-      for (const b of structuredBreakdown) {
-        const ref = b?.referenceNumber ?? b?.reference_number;
-        const amt = Number(b?.amount);
-        if (ref && Number.isFinite(amt)) {
-          previousEntries.push({ referenceNumber: String(ref), date: b?.date ?? undefined, amount: amt });
-        }
-      }
-    } else {
-      // Legacy note fallback — parse, then reconcile against previous_balance.
-      // Format: "Outstanding: INV-001 (₹50,000), INV-002 (₹30,000)"
-      const outstandingMatch = notes.match(/Outstanding:\s*([^|]+)/);
-      const noteEntries: Array<{ referenceNumber: string; amount: number }> = [];
-      if (outstandingMatch) {
-        const entriesStr = outstandingMatch[1].trim();
-        const entryRegex = /([\w-]+)\s*\(₹([\d,]+(?:\.\d+)?)\)/g;
-        let m;
-        while ((m = entryRegex.exec(entriesStr)) !== null) {
-          noteEntries.push({
-            referenceNumber: m[1],
-            amount: parseFloat(m[2].replace(/,/g, '')),
-          });
-        }
-      }
-      if (noteEntries.length > 0) {
-        const noteTotal = Math.round(noteEntries.reduce((s, e) => s + e.amount, 0));
-        // Reconcile: the itemised note total must match the trustworthy column
-        // (allow ₹1 rounding slack). If it disagrees, the note is stale/from a
-        // different work order — discard it and let the lump-sum previousBalance
-        // (effectivePrevDue) drive the advice instead.
-        if (entry.previous_balance == null || Math.abs(noteTotal - Number(entry.previous_balance)) <= 1) {
-          previousEntries.push(...noteEntries);
-        }
-      }
-    }
-
-    // A consolidated receivable has no day/duty breakdown, so represent it as a
-    // single personnel serving every day of the invoice month at the monthly
-    // rate: (base ÷ days) × days = base — reproducing the stored amount exactly.
-    const invDate = new Date(entry.created_at);
-    const daysInMonth = new Date(invDate.getFullYear(), invDate.getMonth() + 1, 0).getDate();
-
-    const result: InvoiceData = {
-      invoiceDetails: {
-        invoiceNo: entry.reference_number || entry.id.slice(0, 8),
-        date: invDate.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-        dueDate: entry.due_date ? new Date(entry.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '',
-        workOrderNo,
-        workOrderDate,
-        // Service period — DB columns first, then notes fallback
-        servicePeriodStart: entry.service_period_start ||
-          (billingPeriod ? billingPeriod.split(/\s+(?:to|–|-)\s+/)[0]?.trim() : null) || null,
-        servicePeriodEnd: entry.service_period_end ||
-          (billingPeriod ? billingPeriod.split(/\s+(?:to|–|-)\s+/)[1]?.trim() : null) || null,
-        ...(placeOfSupply ? { placeOfSupply } : {}),
-        ...(irn ? { irn } : {}),
-      },
-      clientInfo: {
-        name: entry.client_name || '',
-        address: clientAddress,
-        gstin: clientGstin,
-        // Derive client state from their GSTIN (first 2 digits = state code).
-        // Fall back to the invoice's place_of_supply when no GSTIN is available.
-        state: (() => {
-          if (clientGstin && clientGstin.length >= 2) {
-            const code = clientGstin.slice(0, 2);
-            const found = INDIAN_STATES.find(s => s.code === code);
-            if (found) return found.label;
-          }
-          // placeOfSupply is stored as "21-Odisha"; map back via state code prefix
-          const pos = entry.place_of_supply || placeOfSupply || DEFAULT_PLACE_OF_SUPPLY;
-          const posCode = pos.split('-')[0]?.trim();
-          const posState = INDIAN_STATES.find(s => s.code === posCode);
-          return posState ? posState.label : pos;
-        })(),
-      },
-      // Prefer the stored structured breakdown (real per-designation service
-      // lines from the work order + attendance). Fall back to a single line
-      // only for legacy/imported receivables that have no breakdown.
-      items: (entry.line_items && entry.line_items.length > 0)
-        ? entry.line_items.map((li: any, i) => ({
-            id: i + 1,
-            // Clean any accumulated duplicate shift suffixes from old data
-            service: (li.service || '')
-              .replace(/(\s*\(12-Hour\))+/g, ' (12-Hour)')
-              .replace(/(\s*\(8-Hour\))+/g, ' (8-Hour)')
-              .trim(),
-            post: li.post || postName,
-            sac: li.sac || '998525',
-            personnel: li.personnel || 0,
-            // Handle both field names: woPrice (OneTimeInvoiceForm) and monthlyRate (GenerateInvoice)
-            woPrice: li.woPrice || li.monthlyRate || 0,
-            hideWoPrice: !!li.hideWoPrice,
-            days: li.days || daysInMonth,
-            duties: li.duties || 0,
-            gstRate: li.gstRate ?? (gstRate > 0 ? gstRate : 18),
-          }))
-        : [{
-            id: 1,
-            service: '',
-            post: postName,
-            sac: '998525',
-            personnel: 1,
-            woPrice: base,
-            days: daysInMonth,
-            duties: daysInMonth,
-            gstRate: gstRate > 0 ? gstRate : 18,
-          }],
-      paymentDetails: {},
-      invoiceStatus: entry.status || 'pending',
-      receivableId: entry.id,
-      taxConfig: (() => {
-        const totalGstPct = (notesGstPct ?? gstRate) > 0 ? (notesGstPct ?? gstRate) : 18;
-        // Use the proper DB column first; fall back to resolving from place_of_supply
-        const resolvedPos = entry.place_of_supply || placeOfSupply || DEFAULT_PLACE_OF_SUPPLY;
-        const dbGstType = entry.gst_type;
-        const { sgstRate, cgstRate, igstRate } = resolveGstConfig(resolvedPos, totalGstPct);
-        // If DB column exists, it overrides the resolved value (handles back-filled rows correctly)
-        const finalIgst = dbGstType === 'igst'     ? totalGstPct : (dbGstType === 'cgst_sgst' ? 0 : igstRate);
-        const finalSgst = dbGstType === 'cgst_sgst' ? totalGstPct / 2 : (dbGstType === 'igst' ? 0 : sgstRate);
-        const finalCgst = dbGstType === 'cgst_sgst' ? totalGstPct / 2 : (dbGstType === 'igst' ? 0 : cgstRate);
-        const isExempt  = dbGstType === 'exempt' || totalGstPct === 0;
-        return {
-          sgstRate: isExempt ? 0 : finalSgst,
-          cgstRate: isExempt ? 0 : finalCgst,
-          igstRate: isExempt ? 0 : finalIgst,
-          tdsRate: effectiveTdsRate ?? 0,
-          received: 0,
-          previousBalance: effectivePrevDue,
-        };
-      })(),
-      gstTreatment: entry.gst_treatment || null,
-      previousEntries: previousEntries.length > 0 ? previousEntries : undefined,
-      snapshot: entry.invoice_snapshot ?? undefined,
-    };
-
-    // Fetch payment records and update received amount
-    try {
-      const { data: payments } = await supabaseClient
-        .from('receivable_payments')
+    const { data: payments, error: payErr } = await supabaseClient
+      .from('receivable_payments')
+      .select('*')
+      .eq('receivable_id', entry.id)
+      .order('created_at', { ascending: true });
+    if (payErr) throw new Error(`Could not load the payments of this invoice: ${payErr.message}`);
+    // Older invoices this one lists as previous dues, at their live balances.
+    const refs = carriedReferenceNumbers(entry);
+    let carried: Record<string, any>[] = [];
+    if (refs.length > 0 && entry.work_order_id) {
+      const { data, error } = await supabaseClient
+        .from('receivables')
         .select('*')
-        .eq('receivable_id', entry.id)
-        .order('created_at', { ascending: true });
-      if (payments && payments.length > 0) {
-        result.payments = payments as any;
-        // receivable_payments.amount is stored as (cash + TDS) — see the record
-        // mutation. The Payment Advice already shows TDS on its own line, so the
-        // "Payments received" line must be pure cash; otherwise TDS is subtracted
-        // twice. Strip the invoice-level TDS back out of the summed payments.
-        const paidWithTds = payments.reduce((sum: number, p: any) => sum + (p.amount || 0), 0);
-        const invoiceTds = (effectiveTdsRate ?? 0) > 0
-          ? Math.round(base * (effectiveTdsRate ?? 0) / 100 * 100) / 100
-          : 0;
-        result.taxConfig!.received = Math.max(0, paidWithTds - invoiceTds);
-      }
-    } catch {}
-
-    return result;
+        .eq('category', 'Invoices')
+        .eq('work_order_id', entry.work_order_id)
+        .in('reference_number', refs);
+      if (error) throw new Error(`Could not load the earlier invoices: ${error.message}`);
+      carried = data ?? [];
+    }
+    return buildInvoiceViewData(entry, payments ?? [], carried);
   };
-
-  /** Assemble the email-template input for an invoice + its current attachments. */
-  const buildEmailInput = (entry: ReceivableEntry, attachments: Array<{ filename: string; kind: EnclosureKind }>) => {
-    const servicePeriod = entry.service_period_start
-      ? `${new Date(entry.service_period_start).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`
-        + (entry.service_period_end ? ` – ${new Date(entry.service_period_end).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}` : '')
-      : null;
-    return {
-      clientName: entry.client_name,
-      invoiceNo: entry.reference_number || entry.id.slice(0, 8),
-      invoiceValue: entry.total_amount || 0,
-      taxable: entry.amount ?? null,
-      gst: entry.gst_amount ?? null,
-      dueDate: entry.due_date,
-      servicePeriod,
-      enclosures: attachments.map((a) => ({ kind: a.kind, filename: a.filename })),
-    };
-  };
-
-  // Keep the email body in sync with the attachment list: adding an EPF challan
-  // or rota should mention it in the message. Skipped once the user hand-edits
-  // the body so their wording is never overwritten.
-  useEffect(() => {
-    if (!emailDialogOpen || !emailEntry || emailBodyEdited) return;
-    const input = buildEmailInput(emailEntry, emailAttachments);
-    setEmailHtml(buildInvoiceEmailHtml(input));
-    setEmailBody(buildInvoiceEmailText(input));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [emailAttachments, emailDialogOpen, emailEntry, emailBodyEdited]);
-
-  /** Read a File/Blob as base64 (without the data: URI prefix). */
-  const fileToBase64 = (blob: Blob): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
-      reader.onerror = () => reject(new Error('Failed to read file'));
-      reader.readAsDataURL(blob);
-    });
-
-  /** Parse a comma/semicolon/newline-separated address string into clean emails. */
-  const parseEmailList = (raw: string): string[] =>
-    raw
-      .split(/[,;\n]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
   /**
-   * Open the Outlook-style compose modal for an invoice.
-   *
-   * Pre-fills To (client email), Subject and Body from the invoice, then
-   * generates the invoice PDF and adds it as the first attachment. The user can
-   * edit every field, add CC/BCC, add more attachments, or remove them before
-   * sending. Sends server-side via Resend (not mailto:) so attachments and HTML
-   * both work.
+   * Open Outlook (or the system default mail client) with the invoice details
+   * pre-filled: To (client contact email), Subject, and a detailed plain-text body.
+   * The invoice PDF must be downloaded separately via "Download" and attached
+   * manually — browsers cannot attach files to mailto: links.
    */
   const handleEmailInvoice = async (entry: ReceivableEntry) => {
     const invoiceNo = entry.reference_number || entry.id.slice(0, 8);
-    const emailInput = buildEmailInput(entry, []);
 
-    // Reset + prime the compose fields.
-    setEmailEntry(entry);
-    setEmailTo('');
-    setEmailCc('');
-    setEmailBcc('');
-    setEmailShowCc(false);
-    setEmailShowBcc(false);
-    setEmailSubject(buildInvoiceEmailSubject(invoiceNo));
-    setEmailBody(buildInvoiceEmailText(emailInput));
-    setEmailHtml(buildInvoiceEmailHtml(emailInput));
-    setEmailBodyMode('preview');
-    setEmailBodyEdited(false);
-    setEmailPickKind('other');
-    setEmailAttachments([]);
-    setEmailDialogOpen(true);
-    setEmailPreparing(true);
+    // ── Amounts ────────────────────────────────────────────────────────────
+    const fmt = (n: number | null | undefined) =>
+      n != null ? `Rs. ${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : null;
 
-    // Look up the client email (non-blocking for the modal).
+    const taxableAmt  = fmt(entry.amount);
+    const gstAmt      = fmt(entry.gst_amount);
+    const totalAmt    = fmt(entry.total_amount);
+
+    // ── Dates ──────────────────────────────────────────────────────────────
+    const fmtDate = (d: string | null | undefined) =>
+      d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) : null;
+
+    const invoiceDate = fmtDate(entry.created_at);
+    const dueDate     = fmtDate(entry.due_date);
+
+    // ── Service period ─────────────────────────────────────────────────────
+    let servicePeriod: string | null = null;
+    if (entry.service_period_start) {
+      servicePeriod = fmtDate(entry.service_period_start) ?? '';
+      if (entry.service_period_end) servicePeriod += ` to ${fmtDate(entry.service_period_end) ?? ''}`;
+    }
+
+    // ── Look up contact email (non-blocking) ───────────────────────────────
+    let toEmail = '';
     try {
       const client = entry.client_name ? await getClientByName(entry.client_name) : null;
-      setEmailTo((client?.contactEmail || '').trim());
-    } catch { /* leave blank — user types it */ }
+      toEmail = (client?.contactEmail || '').trim();
+    } catch { /* leave blank */ }
 
-    // Generate + pre-attach the invoice PDF.
-    try {
-      const { data: sessionData } = await supabaseClient.auth.getSession();
-      const accessToken = sessionData?.session?.access_token;
-      if (!accessToken) throw new Error('session expired');
-      const pdfRes = await fetch('/api/invoice-pdf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({ receivableId: entry.id }),
-      });
-      if (pdfRes.ok) {
-        const pdfBlob = await pdfRes.blob();
-        const content = await fileToBase64(pdfBlob);
-        setEmailAttachments([{ filename: `Invoice_${invoiceNo}.pdf`, content, size: pdfBlob.size, kind: 'invoice' }]);
-      } else {
-        toast({ title: 'Invoice PDF unavailable', description: 'Could not attach the invoice PDF automatically. You can add it manually.', variant: 'destructive' });
-      }
-    } catch { /* attachment optional — user can add files */ } finally {
-      setEmailPreparing(false);
-    }
-  };
+    // ── Subject ────────────────────────────────────────────────────────────
+    const subject = `Invoice No. ${invoiceNo} | ${entry.client_name || 'Client'} | ${totalAmt ?? ''} | Safend Secure Solutions Pvt. Ltd.`;
 
-  /** Add user-selected files to the attachment list, tagged with a category. */
-  const handleAddEmailAttachments = async (files: FileList | null, kind: EnclosureKind) => {
-    if (!files || files.length === 0) return;
-    const MAX_TOTAL = 20 * 1024 * 1024; // Resend hard limit is ~40MB; stay well under.
-    const additions: Array<{ filename: string; content: string; size: number; kind: EnclosureKind }> = [];
-    for (const file of Array.from(files)) {
-      try {
-        const content = await fileToBase64(file);
-        additions.push({ filename: file.name, content, size: file.size, kind });
-      } catch { /* skip unreadable file */ }
-    }
-    setEmailAttachments((prev) => {
-      const next = [...prev, ...additions];
-      const total = next.reduce((s, a) => s + a.size, 0);
-      if (total > MAX_TOTAL) {
-        toast({ title: 'Attachments too large', description: 'Total attachment size exceeds 20 MB. Remove some files.', variant: 'destructive' });
-        return prev;
-      }
-      return next;
-    });
-  };
+    // ── Body ───────────────────────────────────────────────────────────────
+    const lines = [
+      `Dear Sir / Madam,`,
+      ``,
+      `Please find attached Invoice No. ${invoiceNo}${servicePeriod ? ` for the service period ${servicePeriod}` : ''}.`,
+      ``,
+      `  Invoice No.   : ${invoiceNo}`,
+      invoiceDate   ? `  Invoice Date  : ${invoiceDate}` : null,
+      dueDate       ? `  Due Date      : ${dueDate}` : null,
+      servicePeriod ? `  Period        : ${servicePeriod}` : null,
+      taxableAmt    ? `  Taxable Value : ${taxableAmt}` : null,
+      gstAmt        ? `  GST           : ${gstAmt}` : null,
+      totalAmt      ? `  Total Amount  : ${totalAmt}` : null,
+      amountReceived(entry) > 0 ? `  Received      : ${fmt(amountReceived(entry))}` : null,
+      amountReceived(entry) > 0 ? `  Balance Due   : ${fmt(amountDue(entry))}` : null,
+      ``,
+      dueDate
+        ? `Kindly arrange payment of ${fmt(amountDue(entry)) ?? 'the invoice amount'} on or before ${dueDate}.`
+        : `Kindly arrange payment at the earliest.`,
+      `Please share the UTR / transaction reference to accounts@safends.com after payment.`,
+      `TDS deducted (if any) under Section 194C should be deposited against PAN ABDCS8727K.`,
+      ``,
+      `PAYMENT DETAILS`,
+      `  Bank: Axis Bank  |  A/C: 921020000544081  |  IFSC: UTIB0000091`,
+      `  Beneficiary: Safend Secure Solutions Private Limited`,
+      ``,
+      `MSME NOTICE — Udyam Reg. No. UDYAM-OD-07-0000118 (MSMED Act, 2006)`,
+      `Payment must be made within 45 days of acceptance (Section 15). Delayed payment`,
+      `attracts compound interest at 3× RBI Bank Rate (Section 16) and may result in a`,
+      `complaint on the MSME Samadhaan portal (samadhaan.msme.gov.in).`,
+      ``,
+      `Regards,`,
+      `Accounts Department — Safend Secure Solutions Private Limited`,
+      `accounts@safends.com  |  GSTIN: 21ABDCS8727K1Z4  |  PAN: ABDCS8727K`,
+    ].filter((l): l is string => l !== null);
 
-  /** Remove an attachment. The invoice PDF is mandatory and cannot be removed. */
-  const removeEmailAttachment = (index: number) =>
-    setEmailAttachments((prev) => prev.filter((a, i) => (i === index ? a.kind === 'invoice' : true)));
-
-  /** Send the composed email (all fields + attachments) via Resend. */
-  const sendInvoiceEmail = async () => {
-    const to = parseEmailList(emailTo);
-    const cc = parseEmailList(emailCc);
-    const bcc = parseEmailList(emailBcc);
-
-    if (to.length === 0) {
-      toast({ title: 'Recipient required', description: 'Add at least one "To" address.', variant: 'destructive' });
-      return;
-    }
-    const invalid = [...to, ...cc, ...bcc].filter((e) => !EMAIL_RE.test(e));
-    if (invalid.length > 0) {
-      toast({ title: 'Invalid email', description: `Check: ${invalid.join(', ')}`, variant: 'destructive' });
-      return;
-    }
-    if (!emailSubject.trim()) {
-      toast({ title: 'Subject required', description: 'Add a subject line.', variant: 'destructive' });
-      return;
-    }
-
-    setEmailSending(true);
-    try {
-      const { data: sessionData } = await supabaseClient.auth.getSession();
-      const accessToken = sessionData?.session?.access_token;
-      if (!accessToken) throw new Error('Your session has expired. Sign in again to email the invoice.');
-
-      // The HTML tab is directly editable and is the authoritative body — send it
-      // as-is. If the user cleared it, fall back to wrapping the plain text so
-      // the message still has an HTML part.
-      const html = emailHtml.trim()
-        ? emailHtml
-        : `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;white-space:pre-wrap;">${emailBody
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')}</div>`;
-
-      const sendRes = await fetch('/api/email/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({
-          to,
-          cc: cc.length ? cc : undefined,
-          bcc: bcc.length ? bcc : undefined,
-          subject: emailSubject.trim(),
-          html,
-          text: emailBody,
-          replyTo: 'accounts@safends.com',
-          attachments: emailAttachments.map((a) => ({ filename: a.filename, content: a.content })),
-        }),
-      });
-      if (!sendRes.ok) {
-        const err = await sendRes.json().catch(() => ({}));
-        throw new Error(err.error || 'Failed to send the email');
-      }
-
-      toast({ title: 'Email sent', description: `Sent to ${to.join(', ')}${emailAttachments.length ? ` with ${emailAttachments.length} attachment${emailAttachments.length > 1 ? 's' : ''}` : ''}.` });
-      setEmailDialogOpen(false);
-      setEmailEntry(null);
-      queryClient.invalidateQueries({ queryKey: ['receivables'] });
-    } catch (err: any) {
-      toast({ title: 'Error', description: err.message || 'Failed to send the email', variant: 'destructive' });
-    } finally {
-      setEmailSending(false);
-    }
+    const mailto = `mailto:${encodeURIComponent(toEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join('\n'))}`;
+    window.open(mailto, '_blank');
   };
 
   const handleDownloadInvoice = async (entry: ReceivableEntry) => {
@@ -2156,16 +1250,27 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
     const dueToday = isDueToday(entry);
 
     // Detect partial payment from notes (contains "Mode:" when payment was recorded)
-    const isUnpaid = (UNPAID_STATUSES as readonly string[]).includes(effective);
-    const hasPartialPayment = isUnpaid && entry.notes && /Mode:/.test(entry.notes) && /Balance:/.test(entry.notes);
-
     // Shared badge styling: pill-shaped, no text wrap, consistent padding and
     // icon spacing so every status reads clean and roomy (no cramped two-line wrap).
     const base = 'inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium border';
 
-    // Partial payment overrides the lifecycle label for any unpaid invoice.
-    if (hasPartialPayment) {
-      return <Badge className={`${base} bg-blue-500 hover:bg-blue-500 text-white border-transparent`}>Partial</Badge>;
+    // A legacy receipt that paid older invoices through this one shows as an
+    // overpayment until supabase/scripts/20261029_reallocate_legacy_carry_forward.sql re-attributes it.
+    if (isOverpaid(entry)) {
+      return (
+        <Badge className={`${base} bg-amber-100 hover:bg-amber-100 text-amber-800 border-amber-300`}
+          title="More was recorded on this invoice than it owes. Accounts should re-attribute the receipt to the older invoices it paid.">
+          <AlertTriangle className="h-3 w-3 shrink-0" />Overpaid ₹{Math.abs(invoiceBalance(entry)).toLocaleString('en-IN')}
+        </Badge>
+      );
+    }
+    // Part payment (from the ledger) overrides the lifecycle label of an unpaid invoice.
+    if (isPartlyPaid(entry) && entry.status !== 'cancelled') {
+      return (
+        <Badge className={`${base} bg-blue-500 hover:bg-blue-500 text-white border-transparent`} title={`₹${amountDue(entry).toLocaleString('en-IN')} still due`}>
+          Part paid{effective === 'overdue' && daysOver > 0 ? ` · ${daysOver}d overdue` : ''}
+        </Badge>
+      );
     }
 
     switch (effective) {
@@ -2269,7 +1374,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <p className="text-lg font-bold text-red-600 leading-tight" title={`₹${totalOverdue.toLocaleString('en-IN')}`}>{formatINRShort(totalOverdue)}</p>
             <p className="text-[11px] text-muted-foreground">
               {overdueCount} of {unpaidCount} unpaid
-              {unpaidCount > 0 && <span> · {Math.round((overdueCount / unpaidCount) * 100)}%</span>}
+              {/* Share of the outstanding amount (₹) that is overdue, not of the invoice count. */}
+              {totalPending > 0 && <span> · {Math.round((totalOverdue / totalPending) * 100)}% of outstanding</span>}
             </p>
           </CardContent>
         </Card>
@@ -2339,11 +1445,21 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <div className="flex items-center gap-2 ml-auto">
               <span className="text-xs text-muted-foreground">{selectedIds.size} selected</span>
               <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => {
-                const entries = receivables.filter(r => selectedIds.has(r.id) && r.status !== 'received' && r.status !== 'cancelled');
-                if (entries.length === 0) { toast({ title: 'No eligible entries', variant: 'destructive' }); return; }
-                openReceiveAmount(entries[0]);
+                // One receipt for several invoices of ONE client: recorded against
+                // the newest, with the others ticked so they are paid first.
+                const entries = receivables
+                  .filter(r => selectedIds.has(r.id) && r.category === 'Invoices' && amountDue(r) > 0.01)
+                  .sort((a, b) => a.created_at.localeCompare(b.created_at));
+                if (entries.length === 0) { toast({ title: 'No selected invoice still owes money', variant: 'destructive' }); return; }
+                if (new Set(entries.map(r => (r.client_name || '').trim().toLowerCase())).size > 1) {
+                  toast({ title: 'Select invoices of one client', description: 'A receipt can only pay invoices of the client who paid it.', variant: 'destructive' });
+                  return;
+                }
+                const target = entries[entries.length - 1];
+                setReceivePreselect(entries.slice(0, -1).map(r => r.id));
+                setReceiveEntry(target);
               }}>
-                <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Mark Paid
+                <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Record Payment
               </Button>
               <Button size="sm" variant="outline" className="h-8 text-xs text-red-600" onClick={() => setSelectedIds(new Set())}>
                 Clear
@@ -2384,6 +1500,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                   <TableHead className="text-right cursor-pointer select-none whitespace-nowrap" onClick={() => handleSort('total_amount')}>
                     <span className="inline-flex items-center">Invoice Amount{getSortIcon('total_amount')}</span>
                   </TableHead>
+                  <TableHead className="text-right whitespace-nowrap">Balance Due</TableHead>
                   <TableHead className="text-right whitespace-nowrap">GST</TableHead>
                   <TableHead className="text-right cursor-pointer select-none whitespace-nowrap" onClick={() => handleSort('due_date')}>
                     <span className="inline-flex items-center">Due Date{getSortIcon('due_date')}</span>
@@ -2442,6 +1559,20 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                       <TableCell>{postName}</TableCell>
                       {filter === 'All Receivables' && <TableCell><Badge variant="outline" className="text-xs">{entry.category}</Badge></TableCell>}
                       <TableCell className="text-right font-medium tabular-nums">₹{entry.total_amount.toLocaleString('en-IN')}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {(() => {
+                          // Live balance from the ledger: total + opening balance − paid.
+                          const due = amountDue(entry);
+                          if (entry.status === 'cancelled') return <span className="text-muted-foreground">—</span>;
+                          if (due <= 0.01) return <span className="text-muted-foreground">₹0</span>;
+                          return (
+                            <span className={amountReceived(entry) > 0 ? 'font-medium text-blue-700' : ''}
+                              title={amountReceived(entry) > 0 ? `₹${amountReceived(entry).toLocaleString('en-IN')} received so far` : undefined}>
+                              ₹{due.toLocaleString('en-IN')}
+                            </span>
+                          );
+                        })()}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums text-xs">
                         {(() => {
                           const gst = entry.gst_amount || (entry.total_amount - entry.amount);
@@ -2488,9 +1619,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                               if (entry.category === 'Invoices') {
                                 tiles.push({ key: 'view', icon: <Eye className="h-5 w-5 text-blue-600" />, label: 'View', onClick: () => handleViewInvoice(entry) });
                                 tiles.push({ key: 'download', icon: <Download className="h-5 w-5 text-green-600" />, label: 'Download', onClick: () => handleDownloadInvoice(entry) });
-                                tiles.push({ key: 'edit', icon: <Pencil className="h-5 w-5 text-amber-600" />, label: 'Edit', onClick: () => handleEditInvoice(entry) });
+                                // Issued or paid invoices are frozen; corrections go by cancellation or credit/debit note.
+                                if (isDraftInvoice(entry)) {
+                                  tiles.push({ key: 'edit', icon: <Pencil className="h-5 w-5 text-amber-600" />, label: 'Edit Draft', onClick: () => handleEditInvoice(entry) });
+                                }
                               }
-                              if (entry.status !== 'received' && entry.status !== 'cancelled') {
+                              if (entry.status !== 'received' && entry.status !== 'cancelled' && amountDue(entry) > 0.01) {
                                 tiles.push({ key: 'pay', icon: <CheckCircle2 className="h-5 w-5 text-green-600" />, label: 'Record Payment', onClick: () => openReceiveAmount(entry) });
                               }
                               tiles.push({ key: 'duplicate', icon: <Copy className="h-5 w-5 text-indigo-600" />, label: 'Duplicate', onClick: () => handleDuplicate(entry) });
@@ -2516,13 +1650,13 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                             })()}
 
                             {/* Destructive / state actions stay as clearly-labelled full-width rows. */}
-                            {(entry.status === 'received' || (entry.notes || '').match(/Total Paid:\s*₹/) || (entry.notes || '').match(/Amount:\s*₹/)) && (
+                            {Number(entry.paid_amount) > 0 && (
                               <>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem
                                   className="text-amber-600 focus:text-white focus:bg-amber-600"
                                   onClick={() => {
-                                    if (window.confirm("Are you sure you want to undo the last payment for this invoice? This will remove the payment record and revert the invoice balance.")) {
+                                    if (window.confirm("Undo the last receipt on this invoice? The whole receipt is reversed: every invoice it paid, its bank, cheque or cash entry, and any credit note it raised.")) {
                                       undoLastPayment.mutate(entry);
                                     }
                                   }}
@@ -2531,23 +1665,26 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                                 </DropdownMenuItem>
                               </>
                             )}
-                            {entry.status !== 'cancelled' && (
+                            {/* Cancel needs no payments on record (undo them, or write the balance off by credit note). */}
+                            {entry.status !== 'cancelled' && !(Number(entry.paid_amount) > 0) && (
                               <>
                                 <DropdownMenuSeparator />
-                                <DropdownMenuItem className="text-red-600 focus:text-white focus:bg-red-600" onClick={() => cancelInvoice.mutate(entry.id)}>
+                                <DropdownMenuItem className="text-red-600 focus:text-white focus:bg-red-600" onClick={() => { setCancelReason(''); setCancelEntry(entry); }}>
                                   <XCircle className="h-4 w-4 mr-2" /> Cancel
                                 </DropdownMenuItem>
                               </>
                             )}
-                            {isAdmin ? (
+                            {/* Only a never-issued, unpaid draft can be deleted; everything else is cancelled. */}
+                            {(isDraftInvoice(entry) || !['Invoices', 'Invoice Adjustments'].includes(entry.category))
+                              && !(Number(entry.paid_amount) > 0) && entry.status !== 'cancelled' && (isAdmin ? (
                               <DropdownMenuItem className="text-red-700 focus:text-white focus:bg-red-600 font-medium" onClick={() => { setEntryToDelete(entry); setDeleteConfirmOpen(true); }}>
-                                <Trash2 className="h-4 w-4 mr-2" /> Delete Invoice
+                                <Trash2 className="h-4 w-4 mr-2" /> {entry.category === 'Invoices' ? 'Delete Draft' : 'Delete Entry'}
                               </DropdownMenuItem>
                             ) : (
                               <DropdownMenuItem className="text-red-600 focus:text-white focus:bg-red-600" onClick={() => { setEntryToDelete(entry); setDeleteConfirmOpen(true); }}>
                                 <Trash2 className="h-4 w-4 mr-2" /> Request Delete
                               </DropdownMenuItem>
-                            )}
+                            ))}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </TableCell>
@@ -2641,8 +1778,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <div className="space-y-4 py-2">
               <p className="text-sm text-muted-foreground">
                 {isAdmin
-                  ? <>This will <span className="font-semibold text-red-600">permanently delete</span> the following invoice. This action cannot be undone.</>
-                  : <>Your delete request will be sent to an admin for approval.</>
+                  ? <>This will <span className="font-semibold text-red-600">permanently delete</span> this draft. Only drafts that were never issued or paid can be deleted; anything else must be cancelled.</>
+                  : <>Your delete request will be sent to an admin. A draft is deleted on approval; an issued invoice is cancelled instead and keeps its number.</>
                 }
               </p>
               <div className="p-3 rounded-lg border bg-muted/30 space-y-1 text-sm">
@@ -2737,602 +1874,46 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         />
       )}
 
-      {/* Email Invoice — Outlook-style compose modal */}
-      <Dialog open={emailDialogOpen} onOpenChange={(v) => { if (!emailSending) { setEmailDialogOpen(v); if (!v) setEmailEntry(null); } }}>
-        <DialogContent className="sm:max-w-[1280px] w-[95vw] max-h-[92vh] overflow-y-auto p-0 gap-0">
-          <div className="flex items-center gap-2 border-b px-5 py-3.5">
-            <Send className="h-4 w-4 text-teal-600" />
-            <DialogTitle className="text-base font-semibold">New Message</DialogTitle>
-            {emailPreparing && <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Attaching invoice…</span>}
+
+      {/* Record Payment: one receipt, allocated oldest invoice first (record_receipt) */}
+      <ReceivePaymentDialog
+        key={receiveEntry?.id ?? 'closed'}
+        entry={receiveEntry}
+        preselectIds={receivePreselect}
+        bankAccounts={bankAccounts}
+        staffUsers={staffUsers}
+        onClose={() => setReceiveEntry(null)}
+        onRecorded={() => {
+          setReceiveEntry(null);
+          setSelectedIds(new Set());
+          queryClient.invalidateQueries({ queryKey: ['receivables'] });
+        }}
+      />
+
+      {/* Cancel Invoice: reason required; the row and its number stay on file */}
+      <Dialog open={!!cancelEntry} onOpenChange={(v) => { if (!v) { setCancelEntry(null); setCancelReason(''); } }}>
+        <DialogContent className="sm:max-w-[450px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700">
+              <XCircle className="h-5 w-5" /> Cancel {cancelEntry ? getInvoiceLabel(cancelEntry) : ''}
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            The invoice stays on record as cancelled and its number is not reused. To correct an invoice that was
+            sent to the client, cancel it and raise a new one, or raise a credit or debit note.
+          </p>
+          <div className="space-y-1">
+            <Label className="text-sm">Reason for cancelling *</Label>
+            <Textarea value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} rows={2} placeholder="e.g. Raised twice by mistake" />
           </div>
-
-          {emailEntry && (
-            <div className="px-5 py-4 space-y-0 text-sm">
-              {/* To + Cc/Bcc toggles */}
-              <div className="flex items-center gap-2 border-b py-2">
-                <Label className="w-12 shrink-0 text-xs text-muted-foreground">To</Label>
-                <Input
-                  className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1"
-                  placeholder="recipient@example.com, another@example.com"
-                  value={emailTo}
-                  onChange={(e) => setEmailTo(e.target.value)}
-                />
-                <div className="flex gap-1 text-xs">
-                  {!emailShowCc && <button type="button" className="text-muted-foreground hover:text-foreground px-1" onClick={() => setEmailShowCc(true)}>Cc</button>}
-                  {!emailShowBcc && <button type="button" className="text-muted-foreground hover:text-foreground px-1" onClick={() => setEmailShowBcc(true)}>Bcc</button>}
-                </div>
-              </div>
-              {emailShowCc && (
-                <div className="flex items-center gap-2 border-b py-2">
-                  <Label className="w-12 shrink-0 text-xs text-muted-foreground">Cc</Label>
-                  <Input className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1" placeholder="cc@example.com" value={emailCc} onChange={(e) => setEmailCc(e.target.value)} />
-                </div>
-              )}
-              {emailShowBcc && (
-                <div className="flex items-center gap-2 border-b py-2">
-                  <Label className="w-12 shrink-0 text-xs text-muted-foreground">Bcc</Label>
-                  <Input className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1" placeholder="bcc@example.com" value={emailBcc} onChange={(e) => setEmailBcc(e.target.value)} />
-                </div>
-              )}
-              {/* Subject */}
-              <div className="flex items-center gap-2 border-b py-2">
-                <Label className="w-12 shrink-0 text-xs text-muted-foreground">Subject</Label>
-                <Input className="h-8 border-0 shadow-none focus-visible:ring-0 px-1 flex-1 font-medium" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} />
-              </div>
-
-              {/* Body — switch between rendered preview, raw HTML source and plain text */}
-              <div className="pt-3">
-                <div className="flex items-center gap-1 mb-2">
-                  {([
-                    { k: 'preview', l: 'Preview' },
-                    { k: 'html', l: 'HTML' },
-                    { k: 'text', l: 'Plain text' },
-                  ] as const).map((t) => (
-                    <button
-                      key={t.k}
-                      type="button"
-                      onClick={() => setEmailBodyMode(t.k)}
-                      className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
-                        emailBodyMode === t.k
-                          ? 'bg-black text-white border-black dark:bg-white dark:text-black'
-                          : 'border-input text-muted-foreground hover:border-black/40'
-                      }`}
-                    >
-                      {t.l}
-                    </button>
-                  ))}
-                  <span className="ml-auto text-[11px] text-muted-foreground">
-                    {emailBodyMode === 'html'
-                      ? 'Editing raw HTML — this exact markup is sent'
-                      : emailBodyMode === 'text'
-                      ? 'Plain-text fallback for non-HTML clients'
-                      : 'Rendered preview of the HTML email'}
-                  </span>
-                </div>
-
-                {emailBodyMode === 'preview' && (
-                  <div className="rounded-md border bg-white overflow-hidden">
-                    <iframe
-                      title="Email preview"
-                      srcDoc={emailHtml}
-                      className="w-full h-[420px] border-0"
-                      sandbox=""
-                    />
-                  </div>
-                )}
-
-                {emailBodyMode === 'html' && (
-                  <Textarea
-                    className="min-h-[420px] font-mono text-[11px] leading-relaxed resize-y"
-                    value={emailHtml}
-                    onChange={(e) => { setEmailHtml(e.target.value); setEmailBodyEdited(true); }}
-                    spellCheck={false}
-                    placeholder="<html>…</html>"
-                  />
-                )}
-
-                {emailBodyMode === 'text' && (
-                  <Textarea
-                    className="min-h-[420px] text-sm leading-relaxed resize-y"
-                    value={emailBody}
-                    onChange={(e) => { setEmailBody(e.target.value); setEmailBodyEdited(true); }}
-                    placeholder="Plain-text version of the message…"
-                  />
-                )}
-
-                <p className="text-[11px] text-muted-foreground mt-2">
-                  The <strong>HTML</strong> tab is what recipients see. Edit it directly to change the email; use{' '}
-                  <strong>Preview</strong> to check the result and <strong>Plain text</strong> for the fallback body.
-                  {emailBodyEdited ? (
-                    <>
-                      {' '}<span className="text-amber-600">Manually edited — it will no longer update automatically when you change attachments.</span>
-                      {emailEntry && (
-                        <button
-                          type="button"
-                          className="ml-1 underline hover:text-foreground"
-                          onClick={() => {
-                            const input = buildEmailInput(emailEntry, emailAttachments);
-                            setEmailHtml(buildInvoiceEmailHtml(input));
-                            setEmailBody(buildInvoiceEmailText(input));
-                            setEmailBodyEdited(false);
-                          }}
-                        >
-                          Reset to template
-                        </button>
-                      )}
-                    </>
-                  ) : (
-                    <> The message updates automatically as you add attachments.</>
-                  )}
-                </p>
-              </div>
-
-              {/* Attachments — invoice is mandatory, the rest are optional and
-                  each addition is announced in the email body automatically. */}
-              <div className="border-t pt-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Attachments {emailAttachments.length > 0 && `(${emailAttachments.length})`}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">Invoice is mandatory · others optional</span>
-                </div>
-
-                {/* Category pickers */}
-                <div className="flex flex-wrap gap-2">
-                  {([
-                    { k: 'rota' as EnclosureKind, l: 'Rota' },
-                    { k: 'epf' as EnclosureKind, l: 'EPF Challan' },
-                    { k: 'esic' as EnclosureKind, l: 'ESIC Challan' },
-                    { k: 'other' as EnclosureKind, l: 'Other Document' },
-                  ]).map((opt) => (
-                    <label
-                      key={opt.k}
-                      className="inline-flex items-center gap-1.5 rounded-md border border-dashed px-2.5 py-1.5 text-xs cursor-pointer hover:border-teal-500 hover:text-teal-700 transition-colors"
-                    >
-                      <Upload className="h-3.5 w-3.5" /> {opt.l}
-                      <input
-                        type="file"
-                        multiple
-                        className="hidden"
-                        onChange={(e) => { handleAddEmailAttachments(e.target.files, opt.k); e.target.value = ''; }}
-                      />
-                    </label>
-                  ))}
-                </div>
-
-                {emailAttachments.length === 0 ? (
-                  <p className="text-[11px] text-muted-foreground italic">{emailPreparing ? 'Preparing invoice PDF…' : 'No attachments.'}</p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {emailAttachments.map((att, i) => (
-                      <div key={i} className="flex items-center gap-2 rounded-md border bg-muted/30 px-2.5 py-1.5">
-                        <FileText className="h-4 w-4 text-blue-600 shrink-0" />
-                        <span className="shrink-0 rounded bg-teal-50 dark:bg-teal-900/30 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:text-teal-300">
-                          {ENCLOSURE_LABELS[att.kind]?.label || 'Document'}
-                        </span>
-                        <span className="text-xs truncate flex-1">{att.filename}</span>
-                        <span className="text-[10px] text-muted-foreground shrink-0">{att.size < 1024 * 1024 ? `${Math.max(1, Math.round(att.size / 1024))} KB` : `${(att.size / 1024 / 1024).toFixed(1)} MB`}</span>
-                        {att.kind === 'invoice' ? (
-                          <span className="text-[10px] text-muted-foreground shrink-0 italic px-1">required</span>
-                        ) : (
-                          <button type="button" className="text-muted-foreground hover:text-red-600 shrink-0" onClick={() => removeEmailAttachment(i)} title="Remove">
-                            <XCircle className="h-4 w-4" />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 border-t px-5 py-3 bg-muted/20">
-            <Button variant="outline" onClick={() => { setEmailDialogOpen(false); setEmailEntry(null); }} disabled={emailSending}>
-              Cancel
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setCancelEntry(null); setCancelReason(''); }}>Keep Invoice</Button>
+            <Button variant="destructive" disabled={!cancelReason.trim() || cancelInvoice.isPending}
+              onClick={() => cancelEntry && cancelInvoice.mutate({ id: cancelEntry.id, reason: cancelReason.trim() })}>
+              {cancelInvoice.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <XCircle className="h-4 w-4 mr-2" />}
+              Cancel Invoice
             </Button>
-            <Button className="bg-teal-600 hover:bg-teal-700 text-white" onClick={sendInvoiceEmail} disabled={emailSending || emailPreparing}>
-              {emailSending ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" /> Sending…</> : <><Send className="h-4 w-4 mr-1" /> Send</>}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Receive Amount Dialog */}
-      <Dialog open={receiveAmountOpen} onOpenChange={setReceiveAmountOpen}>
-        <DialogContent className="sm:max-w-[900px] max-h-[90vh] overflow-y-auto p-0 gap-0">
-          {selectedInvoiceEntry && (
-            <>
-              {/* Header band */}
-              <div className="bg-safend-red/5 dark:bg-safend-red/10 border-b px-6 py-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-safend-red/10">
-                    <IndianRupee className="h-5 w-5 text-safend-red" />
-                  </div>
-                  <div>
-                    <DialogTitle className="text-lg font-bold">Receive Payment</DialogTitle>
-                    <p className="text-sm text-muted-foreground">{selectedInvoiceEntry.description} · {selectedInvoiceEntry.client_name || '—'}</p>
-                  </div>
-                  <div className="ml-auto text-right">
-                    <p className="text-xs text-muted-foreground">Total Due</p>
-                    <p className="text-xl font-bold text-safend-red">₹{amountDue.toLocaleString('en-IN')}</p>
-                  </div>
-                </div>
-                {/* Invoice breakdown summary */}
-                {(() => {
-                  const notes = selectedInvoiceEntry.notes || '';
-                  const tdsRateMatch = notes.match(/TDS:\s*([\d.]+)%/);
-                  const tdsRate = tdsRateMatch ? parseFloat(tdsRateMatch[1]) : 0;
-                  const notesPrevDueMatch = notes.match(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/);
-                  const prevDue = selectedInvoiceEntry.previous_balance ?? (notesPrevDueMatch ? parseFloat(notesPrevDueMatch[1].replace(/,/g, '')) : 0);
-                  const taxableBase = selectedInvoiceEntry.amount && selectedInvoiceEntry.amount > 0 ? selectedInvoiceEntry.amount : selectedInvoiceEntry.total_amount;
-                  const tdsAmt = tdsRate > 0 ? Math.round(taxableBase * tdsRate / 100 * 100) / 100 : 0;
-                  
-                  if (tdsRate > 0 || prevDue > 0) {
-                    return (
-                      <div className="mt-3 p-2.5 rounded-lg bg-white/60 dark:bg-neutral-900/40 border border-neutral-200 dark:border-neutral-700 text-xs space-y-1">
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Invoice Amount</span>
-                          <span className="font-medium">₹{selectedInvoiceEntry.total_amount.toLocaleString('en-IN')}</span>
-                        </div>
-                        {tdsRate > 0 && (
-                          <div className="flex justify-between text-amber-700 dark:text-amber-400">
-                            <span>Less: TDS @ {tdsRate}% (Sec 194C)</span>
-                            <span className="font-medium">− ₹{tdsAmt.toLocaleString('en-IN')}</span>
-                          </div>
-                        )}
-                        {prevDue > 0 && (
-                          <div className="flex justify-between">
-                            <span className="text-muted-foreground">Previous Outstanding</span>
-                            <span className="font-medium">₹{prevDue.toLocaleString('en-IN')}</span>
-                          </div>
-                        )}
-                        <div className="flex justify-between pt-1 border-t border-neutral-200 dark:border-neutral-600 font-semibold">
-                          <span>Net Receivable</span>
-                          <span className="text-safend-red">₹{Math.max(0, selectedInvoiceEntry.total_amount - tdsAmt + prevDue).toLocaleString('en-IN')}</span>
-                        </div>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-              </div>
-
-              {/* Two-column body */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6">
-                {/* LEFT: Collection details */}
-                <div className="space-y-4">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Collection Details</h3>
-
-                  {/* Mode as segmented buttons */}
-                  <div>
-                    <Label className="text-xs">Mode of Collection</Label>
-                    <div className="grid grid-cols-3 gap-2 mt-1.5">
-                      {['Cash', 'Cheque', 'Bank Transfer'].map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setPaymentForm({ ...paymentForm, mode: m })}
-                          className={`px-3 py-2 rounded-lg text-sm font-medium border transition-all ${
-                            paymentForm.mode === m
-                              ? 'bg-safend-red text-white border-safend-red shadow-xs'
-                              : 'bg-background border-input hover:border-safend-red/40 hover:bg-muted/50'
-                          }`}
-                        >
-                          {m}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Cash */}
-                  {paymentForm.mode === 'Cash' && (
-                    <div className="space-y-3">
-                      <div>
-                        <Label className="text-xs">Received By</Label>
-                        <Select value={paymentForm.receivedBy} onValueChange={(v) => setPaymentForm({ ...paymentForm, receivedBy: v })}>
-                          <SelectTrigger className="mt-1.5"><SelectValue placeholder="Select person" /></SelectTrigger>
-                          <SelectContent>
-                            {staffUsers.filter(u => u.role === 'sales').length > 0 && (
-                              <>
-                                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Sales</div>
-                                {staffUsers.filter(u => u.role === 'sales').map((u) => (
-                                  <SelectItem key={u.id} value={u.name}>{u.name}</SelectItem>
-                                ))}
-                              </>
-                            )}
-                            {staffUsers.filter(u => u.role === 'operations').length > 0 && (
-                              <>
-                                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Operations</div>
-                                {staffUsers.filter(u => u.role === 'operations').map((u) => (
-                                  <SelectItem key={u.id} value={u.name}>{u.name}</SelectItem>
-                                ))}
-                              </>
-                            )}
-                            <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Other</div>
-                            <SelectItem value="__third_party__">Authorized 3rd Person</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      {paymentForm.receivedBy === '__third_party__' && (
-                        <div>
-                          <Label className="text-xs">Authorized Person Name</Label>
-                          <Input className="mt-1.5" placeholder="Enter authorized person's name" value={paymentForm.thirdPartyName} onChange={(e) => setPaymentForm({ ...paymentForm, thirdPartyName: e.target.value })} />
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Cheque */}
-                  {paymentForm.mode === 'Cheque' && (
-                    <div className="space-y-3">
-                      <div>
-                        <Label className="text-xs">Received By</Label>
-                        <Select value={paymentForm.receivedBy} onValueChange={(v) => setPaymentForm({ ...paymentForm, receivedBy: v })}>
-                          <SelectTrigger className="mt-1.5"><SelectValue placeholder="Select person" /></SelectTrigger>
-                          <SelectContent>
-                            {staffUsers.filter(u => u.role === 'sales').length > 0 && (
-                              <>
-                                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Sales</div>
-                                {staffUsers.filter(u => u.role === 'sales').map((u) => (
-                                  <SelectItem key={u.id} value={u.name}>{u.name}</SelectItem>
-                                ))}
-                              </>
-                            )}
-                            {staffUsers.filter(u => u.role === 'operations').length > 0 && (
-                              <>
-                                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Operations</div>
-                                {staffUsers.filter(u => u.role === 'operations').map((u) => (
-                                  <SelectItem key={u.id} value={u.name}>{u.name}</SelectItem>
-                                ))}
-                              </>
-                            )}
-                            <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Other</div>
-                            <SelectItem value="__third_party__">Authorized 3rd Person</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      {paymentForm.receivedBy === '__third_party__' && (
-                        <div>
-                          <Label className="text-xs">Authorized Person Name</Label>
-                          <Input className="mt-1.5" placeholder="Enter authorized person's name" value={paymentForm.thirdPartyName} onChange={(e) => setPaymentForm({ ...paymentForm, thirdPartyName: e.target.value })} />
-                        </div>
-                      )}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <Label className="text-xs">Cheque Number</Label>
-                          <Input className="mt-1.5" placeholder="e.g. 000456" value={paymentForm.chequeNumber} onChange={(e) => setPaymentForm({ ...paymentForm, chequeNumber: e.target.value })} />
-                        </div>
-                        <div>
-                          <Label className="text-xs">Cheque Date</Label>
-                          <Input type="date" className="mt-1.5" value={paymentForm.chequeDate} onChange={(e) => setPaymentForm({ ...paymentForm, chequeDate: e.target.value })} />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Bank Transfer */}
-                  {paymentForm.mode === 'Bank Transfer' && (
-                    <div className="space-y-3">
-                      <div>
-                        <Label className="text-xs">Received in Bank Account</Label>
-                        <Select value={paymentForm.bankAccountId} onValueChange={(v) => setPaymentForm({ ...paymentForm, bankAccountId: v })}>
-                          <SelectTrigger className="mt-1.5"><SelectValue placeholder="Select bank account" /></SelectTrigger>
-                          <SelectContent>
-                            {bankAccounts.length === 0 ? (
-                              <div className="px-2 py-2 text-xs text-muted-foreground">No bank accounts found. Add one in Banking.</div>
-                            ) : bankAccounts.map((b) => (
-                              <SelectItem key={b.id} value={b.id}>{b.account_name} — {b.bank_name}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div>
-                        <Label className="text-xs">Transaction Number (UTR / Ref)</Label>
-                        <Input className="mt-1.5" placeholder="Transaction reference" value={paymentForm.transactionNumber} onChange={(e) => setPaymentForm({ ...paymentForm, transactionNumber: e.target.value })} />
-                      </div>
-                      <div>
-                        <Label className="text-xs">Transaction Date & Time</Label>
-                        <Input type="datetime-local" className="mt-1.5" value={paymentForm.transactionDateTime} onChange={(e) => setPaymentForm({ ...paymentForm, transactionDateTime: e.target.value })} />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* RIGHT: Amount details */}
-                <div className="space-y-4 md:border-l md:pl-6">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Amount Details</h3>
-
-                  {/* Payment type toggle */}
-                  <div>
-                    <Label className="text-xs">Payment Type</Label>
-                    {(() => {
-                      const notesPrevDueMatch = (selectedInvoiceEntry?.notes || '').match(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/);
-                      const previousDue = selectedInvoiceEntry?.previous_balance ?? (notesPrevDueMatch ? parseFloat(notesPrevDueMatch[1].replace(/,/g, '')) : 0);
-                      const invoiceNo = selectedInvoiceEntry?.reference_number || selectedInvoiceEntry?.id.slice(0, 8) || '';
-                      const options: {v: string, l: string, sub?: string}[] = previousDue > 0 
-                        ? [{ v: 'full', l: 'Full Amount' }, { v: 'invoice_only', l: 'Invoice Only', sub: `#${invoiceNo}` }, { v: 'partial', l: 'Partial Amount' }]
-                        : [{ v: 'full', l: 'Full Amount' }, { v: 'partial', l: 'Partial Amount' }];
-                      
-                      return (
-                        <div className={`grid gap-2 mt-1.5 ${previousDue > 0 ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                          {options.map((opt) => (
-                            <button
-                              key={opt.v}
-                              type="button"
-                              onClick={() => {
-                                const tds = parseFloat(paymentForm.tdsDeducted) || 0;
-                                // amountDue is already net of TDS, so "Full Amount" is
-                                // exactly amountDue. "Invoice Only" is this invoice's own
-                                // net (total − TDS), excluding previous outstanding.
-                                setPaymentForm({ 
-                                  ...paymentForm, 
-                                  paymentType: opt.v, 
-                                  amountReceived: opt.v === 'full' ? String(amountDue) 
-                                                : opt.v === 'invoice_only' ? String(Math.max(0, (selectedInvoiceEntry?.total_amount || 0) - tds))
-                                                : '' 
-                                });
-                              }}
-                              className={`px-3 py-2 rounded-lg text-sm font-medium border transition-all flex flex-col items-center justify-center ${
-                                paymentForm.paymentType === opt.v
-                                  ? 'bg-safend-red text-white border-safend-red shadow-xs'
-                                  : 'bg-background border-input hover:border-safend-red/40 hover:bg-muted/50'
-                              }`}
-                            >
-                              <span>{opt.l}</span>
-                              {opt.sub && <span className="text-[10px] opacity-80 mt-0.5 font-normal tracking-wide">{opt.sub}</span>}
-                            </button>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                  </div>
-
-                  {/* Amount input */}
-                  <div>
-                    <Label className="text-xs">Amount Received (₹)</Label>
-                    <div className="relative mt-1.5">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">₹</span>
-                      <Input
-                        type="number"
-                        className="pl-7 text-lg font-semibold h-11"
-                        value={paymentForm.amountReceived}
-                        onChange={(e) => setPaymentForm({ ...paymentForm, amountReceived: e.target.value })}
-                        disabled={paymentForm.paymentType === 'full' || paymentForm.paymentType === 'invoice_only'}
-                        placeholder="0"
-                      />
-                    </div>
-                  </div>
-
-                  {/* TDS input */}
-                  <div>
-                    <Label className="text-xs">
-                      {(() => {
-                        const tdsRateMatch = (selectedInvoiceEntry?.notes || '').match(/TDS:\s*([\d.]+)%/);
-                        return tdsRateMatch ? `TDS Deducted @ ${tdsRateMatch[1]}% (₹)` : 'TDS Deducted (₹)';
-                      })()}
-                    </Label>
-                    <div className="relative mt-1.5">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">₹</span>
-                      <Input
-                        type="number"
-                        className="pl-7 h-10"
-                        value={paymentForm.tdsDeducted}
-                        onChange={(e) => {
-                          const newTds = e.target.value;
-                          const tds = parseFloat(newTds) || 0;
-                          setPaymentForm(prev => {
-                            // amountDue was computed net of the TDS currently in the form.
-                            // Re-apply the delta so "Full Amount" stays net of the new TDS
-                            // without double-counting. "Invoice Only" is total − new TDS.
-                            const prevTds = parseFloat(prev.tdsDeducted) || 0;
-                            const fullNet = Math.max(0, amountDue + prevTds - tds);
-                            return {
-                              ...prev,
-                              tdsDeducted: newTds,
-                              ...(prev.paymentType === 'full' ? { amountReceived: String(fullNet) } :
-                                  prev.paymentType === 'invoice_only' ? { amountReceived: String(Math.max(0, (selectedInvoiceEntry?.total_amount || 0) - tds)) } : {})
-                            };
-                          });
-                        }}
-                        placeholder="0"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Partial balance handling */}
-                  {paymentForm.paymentType !== 'full' && (
-                    <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 space-y-3">
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-amber-700 dark:text-amber-300">Balance Remaining</span>
-                        <span className="text-lg font-bold text-amber-800 dark:text-amber-200">
-                          ₹{Math.max(0, amountDue - (parseFloat(paymentForm.amountReceived) || 0)).toLocaleString('en-IN')}
-                        </span>
-                      </div>
-                      <div>
-                        <Label className="text-xs">How to handle the balance?</Label>
-                        <div className="grid grid-cols-2 gap-2 mt-1.5">
-                          {[{ v: 'due_date', l: 'Set Due Date' }, { v: 'credit_note', l: 'Credit Note' }].map((opt) => (
-                            <button
-                              key={opt.v}
-                              type="button"
-                              onClick={() => setPaymentForm({ ...paymentForm, balanceHandling: opt.v })}
-                              className={`px-2 py-1.5 rounded-md text-xs font-medium border transition-all ${
-                                paymentForm.balanceHandling === opt.v
-                                  ? 'bg-amber-600 text-white border-amber-600'
-                                  : 'bg-white dark:bg-gray-900 border-amber-300 dark:border-amber-700 hover:bg-amber-100'
-                              }`}
-                            >
-                              {opt.l}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      {paymentForm.balanceHandling === 'due_date' && (
-                        <div>
-                          <Label className="text-xs">Balance Due Date</Label>
-                          <Input type="date" className="mt-1.5 bg-white dark:bg-gray-900" value={paymentForm.balanceDueDate} onChange={(e) => setPaymentForm({ ...paymentForm, balanceDueDate: e.target.value })} />
-                        </div>
-                      )}
-                      {paymentForm.balanceHandling === 'credit_note' && (
-                        <p className="text-xs text-amber-700 dark:text-amber-300">A credit note for the balance will be auto-created under Credit Notes.</p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Quick summary */}
-                  <div className="rounded-lg border bg-muted/30 divide-y text-sm">
-                    <div className="flex justify-between px-3 py-2">
-                      <span className="text-muted-foreground">Receiving Now</span>
-                      <span className="font-semibold text-green-700">₹{(parseFloat(paymentForm.amountReceived) || 0).toLocaleString('en-IN')}</span>
-                    </div>
-                    <div className="flex justify-between px-3 py-2">
-                      <span className="text-muted-foreground">Via</span>
-                      <span className="font-medium">{paymentForm.mode}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Footer */}
-              <div className="flex justify-end gap-2 border-t px-6 py-4 bg-muted/20">
-                <Button variant="outline" onClick={() => setReceiveAmountOpen(false)}>Cancel</Button>
-                <Button
-                  className="bg-safend-red hover:bg-safend-red/90 text-white"
-                  onClick={() => {
-                    if (!selectedInvoiceEntry) return;
-                    const amt = parseFloat(paymentForm.amountReceived);
-                    if (isNaN(amt) || amt <= 0) {
-                      toast({ title: "Invalid Amount", description: "Enter a valid amount", variant: "destructive" });
-                      return;
-                    }
-                    if (paymentForm.mode === 'Cash' && !paymentForm.receivedBy) {
-                      toast({ title: "Missing", description: "Select who received the cash", variant: "destructive" }); return;
-                    }
-                    if (paymentForm.mode === 'Cash' && paymentForm.receivedBy === '__third_party__' && !paymentForm.thirdPartyName) {
-                      toast({ title: "Missing", description: "Enter the authorized person's name", variant: "destructive" }); return;
-                    }
-                    if (paymentForm.mode === 'Cheque' && (!paymentForm.receivedBy || !paymentForm.chequeNumber || !paymentForm.chequeDate)) {
-                      toast({ title: "Missing", description: "Fill received by, cheque number and date", variant: "destructive" }); return;
-                    }
-                    if (paymentForm.mode === 'Cheque' && paymentForm.receivedBy === '__third_party__' && !paymentForm.thirdPartyName) {
-                      toast({ title: "Missing", description: "Enter the authorized person's name", variant: "destructive" }); return;
-                    }
-                    if (paymentForm.mode === 'Bank Transfer' && (!paymentForm.bankAccountId || !paymentForm.transactionNumber)) {
-                      toast({ title: "Missing", description: "Select bank account and enter transaction number", variant: "destructive" }); return;
-                    }
-                    if (paymentForm.paymentType !== 'full' && paymentForm.balanceHandling === 'due_date' && !paymentForm.balanceDueDate) {
-                      toast({ title: "Missing", description: "Set the balance due date", variant: "destructive" }); return;
-                    }
-                    recordReceivedAmount.mutate({ entry: selectedInvoiceEntry, payment: paymentForm });
-                  }}
-                  disabled={recordReceivedAmount.isPending}
-                >
-                  <CheckCircle2 className="h-4 w-4 mr-1" /> {recordReceivedAmount.isPending ? 'Recording...' : 'Record Payment'}
-                </Button>
-              </div>
-            </>
-          )}
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

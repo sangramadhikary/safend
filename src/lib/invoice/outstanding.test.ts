@@ -20,116 +20,108 @@ function mockClient(rows: any[]) {
 }
 
 const WO = 'wo-123';
+const row = (over: Record<string, any>) => ({
+  category: 'Invoices', status: 'issued', total_amount: 0, opening_balance: 0, paid_amount: 0,
+  due_date: null, created_at: '2026-08-01T00:00:00+00:00', notes: null, ...over,
+});
 
-describe('computeOutstandingFromRows (batch / dropdown due totals)', () => {
-  it('does not double-count a rolled-forward chain (WO-2026-6689 scenario)', () => {
-    // Older invoice fully rolled into a newer one via breakdown + Outstanding note.
+describe('computeOutstandingFromRows (live balances)', () => {
+  it('counts each invoice once at its own balance (WO-2026-6689 chain)', () => {
+    // 26270008 carries ₹34,500 with no invoice on file (opening balance); the
+    // newer invoice lists 26270008 but does not take over its debt.
     const rows = [
-      { reference_number: '26270008', status: 'overdue', total_amount: 52500, previous_balance: 34500,
-        previous_balance_breakdown: null,
-        notes: 'GST: 18% | Previous Due: ₹34,500', due_date: '2026-08-12' },
-      { reference_number: '26270038', status: 'issued', total_amount: 52500, previous_balance: 87000,
-        previous_balance_breakdown: [{ referenceNumber: '26270008', amount: 87000 }],
-        notes: 'GST: 18% | Previous Due: ₹87,000 | Outstanding: 26270008 (₹87,000)', due_date: '2026-09-12' },
+      row({ reference_number: '26270008', status: 'overdue', total_amount: 52500, opening_balance: 34500,
+        due_date: '2026-08-12', created_at: '2026-07-12T00:00:00+00:00' }),
+      row({ reference_number: '26270038', total_amount: 52500, previous_balance: 87000,
+        previous_balance_breakdown: [{ referenceNumber: '26270008', amount: 87000 }], due_date: '2026-09-12' }),
     ];
 
     const result = computeOutstandingFromRows(rows);
 
-    // Only the newer invoice counts: 52,500 + 87,000 = 1,39,500 (not 2,26,500).
-    expect(result.map((r) => r.ref)).toEqual(['26270038']);
+    expect(result.map((r) => r.ref)).toEqual(['26270008', '26270038']);
     expect(sumOutstanding(result)).toBe(139500);
   });
 
-  it('nets a partial-payment balance without re-adding previous_balance (WO-2026-2512)', () => {
+  it('nets payments from paid_amount and ignores balances written in notes', () => {
     const rows = [
-      { reference_number: '26270004', status: 'pending', total_amount: 37760, previous_balance: 0,
-        notes: 'Balance: ₹6,430 | Total Paid: ₹34,000', due_date: '2026-09-10' },
-      { reference_number: '26270040', status: 'created', total_amount: 37760, previous_balance: 6430,
-        previous_balance_breakdown: [{ referenceNumber: '26270004', amount: 6430 }],
-        notes: 'Outstanding: 26270004 (₹6,430)', due_date: '2026-09-10' },
+      row({ reference_number: '26270004', status: 'pending', total_amount: 37760, paid_amount: 31330,
+        notes: 'Balance: ₹1 | Total Paid: ₹99', created_at: '2026-08-10T00:00:00+00:00' }),
+      row({ reference_number: '26270040', status: 'created', total_amount: 37760, previous_balance: 6430,
+        previous_balance_breakdown: [{ referenceNumber: '26270004', amount: 6430 }], created_at: '2026-09-10T00:00:00+00:00' }),
     ];
 
     const result = computeOutstandingFromRows(rows);
 
-    // 26270004 rolled forward -> dropped; only 26270040 = 37,760 + 6,430.
-    expect(result.map((r) => r.ref)).toEqual(['26270040']);
+    expect(result.map((r) => [r.ref, r.amount])).toEqual([['26270004', 6430], ['26270040', 37760]]);
     expect(sumOutstanding(result)).toBe(44190);
+  });
+
+  it('splits what is owed into the opening balance (paid first) and own charges', () => {
+    const [r] = computeOutstandingFromRows([
+      row({ reference_number: 'A', total_amount: 52500, opening_balance: 34500, paid_amount: 10000 }),
+    ]);
+
+    expect(r.amount).toBe(77000);
+    expect(r.previousBalance).toBe(24500);
+    expect(r.ownAmount).toBe(52500);
+  });
+
+  it('drops settled, cancelled and non-invoice rows', () => {
+    const result = computeOutstandingFromRows([
+      row({ reference_number: 'PAID', status: 'received', total_amount: 1000, paid_amount: 1000 }),
+      row({ reference_number: 'GONE', status: 'cancelled', total_amount: 1000 }),
+      row({ reference_number: 'ZERO', total_amount: 500, paid_amount: 500 }),
+      row({ reference_number: 'CN', category: 'Invoice Adjustments', total_amount: -500 }),
+      row({ reference_number: 'OPEN', total_amount: 700 }),
+    ]);
+
+    expect(result.map((r) => r.ref)).toEqual(['OPEN']);
+  });
+
+  it('sums to the paisa', () => {
+    const result = computeOutstandingFromRows([
+      row({ reference_number: 'A', total_amount: 100.1 }),
+      row({ reference_number: 'B', total_amount: 200.2 }),
+    ]);
+
+    expect(sumOutstanding(result)).toBe(300.3);
   });
 });
 
 describe('fetchWorkOrderOutstandingInvoices', () => {
-  it('scopes strictly to the work order and returns [] when no work order given', async () => {
-    const { client, calls } = mockClient([
-      { reference_number: 'A', total_amount: 1000, due_date: null, status: 'open', notes: null },
-    ]);
+  it('scopes strictly to the work order', async () => {
+    const { client, calls } = mockClient([row({ reference_number: 'A', total_amount: 1000 })]);
 
     const result = await fetchWorkOrderOutstandingInvoices(client, WO);
-    expect(calls['eq:work_order_id']).toBe(WO);
-    expect(result).toHaveLength(1);
 
-    // No work order → no scope → nothing carried forward.
+    expect(calls['eq:work_order_id']).toBe(WO);
+    expect(calls['eq:category']).toBe('Invoices');
+    expect(result).toHaveLength(1);
+  });
+
+  it('carries nothing forward and does not query when there is no work order', async () => {
+    const { client } = mockClient([row({ reference_number: 'A', total_amount: 1000 })]);
+
     expect(await fetchWorkOrderOutstandingInvoices(client, null)).toEqual([]);
     expect(await fetchWorkOrderOutstandingInvoices(client, '   ')).toEqual([]);
+    expect(client.from).not.toHaveBeenCalled();
   });
 
-  it('sums the work order\'s unpaid invoices', async () => {
+  it("sums the work order's unpaid invoices", async () => {
     const { client } = mockClient([
-      { reference_number: '26270008', total_amount: 52500, previous_balance: 0, due_date: '2026-08-12', status: 'overdue', notes: null },
-      { reference_number: '26270005', total_amount: 34500, previous_balance: 0, due_date: '2026-07-01', status: 'open', notes: null },
+      row({ reference_number: '26270005', status: 'overdue', total_amount: 34500, due_date: '2026-07-01' }),
+      row({ reference_number: '26270008', total_amount: 52500, paid_amount: 2500, due_date: '2026-08-12' }),
     ]);
 
     const result = await fetchWorkOrderOutstandingInvoices(client, WO);
 
-    expect(result).toHaveLength(2);
-    expect(sumOutstanding(result)).toBe(87000);
-  });
-
-  it("includes an invoice's carried-forward previous_balance in its owed amount", async () => {
-    const { client } = mockClient([
-      { reference_number: '26270008', total_amount: 52500, previous_balance: 34500, due_date: '2026-08-12', status: 'overdue', notes: null },
-    ]);
-
-    const result = await fetchWorkOrderOutstandingInvoices(client, WO);
-
-    expect(result[0].ownAmount).toBe(52500);
-    expect(result[0].previousBalance).toBe(34500);
-    expect(result[0].amount).toBe(87000);
-    expect(sumOutstanding(result)).toBe(87000);
-  });
-
-  it('nets out a recorded partial payment from the invoice balance', async () => {
-    const { client } = mockClient([
-      { reference_number: 'A', total_amount: 10000, previous_balance: 0, due_date: null, status: 'pending', notes: 'Mode: Cash | Amount: ₹4,000 | Balance: ₹6,000' },
-    ]);
-
-    const result = await fetchWorkOrderOutstandingInvoices(client, WO);
-
-    expect(result[0].amount).toBe(6000);
-  });
-
-  it('does not add previous_balance again when a partial-payment Balance note exists', async () => {
-    // Real case (26270001): total 37,760, previous_balance 2,060, paid down to a
-    // "Balance: ₹2,180" note. The 2,180 already includes the 2,060, so the owed
-    // amount must be exactly 2,180 — not 2,180 + 2,060.
-    const { client } = mockClient([
-      {
-        reference_number: '26270001', total_amount: 37760, previous_balance: 2060,
-        due_date: '2026-10-03', status: 'pending',
-        notes: 'GST: 18% | Previous Due: ₹2,060 || PAYMENT: Amount: ₹37,000 | Balance: ₹2,180 | Total Paid: ₹37,640',
-      },
-    ]);
-
-    const result = await fetchWorkOrderOutstandingInvoices(client, WO);
-
-    expect(result[0].amount).toBe(2180);
-    expect(result[0].previousBalance).toBe(0); // folded into the balance, not shown separately
-    expect(sumOutstanding(result)).toBe(2180);
+    expect(sumOutstanding(result)).toBe(84500);
   });
 
   it('excludes the invoice currently being edited', async () => {
     const { client } = mockClient([
-      { reference_number: 'SELF', total_amount: 5000, previous_balance: 0, due_date: null, status: 'created', notes: null },
-      { reference_number: 'OTHER', total_amount: 7000, previous_balance: 0, due_date: null, status: 'created', notes: null },
+      row({ reference_number: 'SELF', status: 'created', total_amount: 5000 }),
+      row({ reference_number: 'OTHER', status: 'created', total_amount: 7000 }),
     ]);
 
     const result = await fetchWorkOrderOutstandingInvoices(client, WO, 'SELF');
@@ -137,51 +129,10 @@ describe('fetchWorkOrderOutstandingInvoices', () => {
     expect(result.map((r) => r.ref)).toEqual(['OTHER']);
   });
 
-  it('drops an older invoice referenced via a legacy "Outstanding:" note (no double count)', async () => {
-    const { client } = mockClient([
-      { reference_number: '26270001', total_amount: 37760, previous_balance: 0, due_date: '2026-10-03', status: 'pending', notes: null },
-      {
-        reference_number: '26270015', total_amount: 20060, previous_balance: 6766,
-        previous_balance_breakdown: null,
-        due_date: '2026-09-10', status: 'pending',
-        notes: 'GST: 18% | Previous Due: ₹6,766 | Outstanding: 26270001 (₹37,760)',
-      },
-    ]);
-
-    const result = await fetchWorkOrderOutstandingInvoices(client, WO);
-
-    expect(result.map((r) => r.ref)).toEqual(['26270015']);
-    expect(sumOutstanding(result)).toBe(26826); // 20060 + 6766
-  });
-
-  it('drops an older invoice already rolled into a newer one via structured breakdown', async () => {
-    const { client } = mockClient([
-      { reference_number: 'A', total_amount: 10000, previous_balance: 0, due_date: '2026-01-01', status: 'overdue', notes: null },
-      {
-        reference_number: 'B', total_amount: 5000, previous_balance: 10000,
-        previous_balance_breakdown: [{ referenceNumber: 'A', amount: 10000 }],
-        due_date: '2026-02-01', status: 'open', notes: null,
-      },
-    ]);
-
-    const result = await fetchWorkOrderOutstandingInvoices(client, WO);
-
-    expect(result.map((r) => r.ref)).toEqual(['B']);
-    expect(sumOutstanding(result)).toBe(15000);
-  });
-
-  it('drops zero-balance rows', async () => {
-    const { client } = mockClient([
-      { reference_number: 'Z', total_amount: 0, previous_balance: 0, due_date: null, status: 'open', notes: null },
-    ]);
-
-    expect(await fetchWorkOrderOutstandingInvoices(client, WO)).toHaveLength(0);
-  });
-
   it('marks a past-due invoice overdue and a future one open', async () => {
     const { client } = mockClient([
-      { reference_number: 'P', total_amount: 100, previous_balance: 0, due_date: '2000-01-01', status: 'issued', notes: null },
-      { reference_number: 'F', total_amount: 100, previous_balance: 0, due_date: '2999-01-01', status: 'issued', notes: null },
+      row({ reference_number: 'P', total_amount: 100, due_date: '2000-01-01' }),
+      row({ reference_number: 'F', total_amount: 100, due_date: '2999-01-01' }),
     ]);
 
     const result = await fetchWorkOrderOutstandingInvoices(client, WO);

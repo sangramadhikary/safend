@@ -15,12 +15,15 @@ import { deleteWorkOrder } from './WorkOrderFirebaseService';
  * - Penalties linked to those posts
  * - Mess management records linked to those posts
  * - Client portal incidents linked to those posts
- * - Receivables (invoices) for that client (only if no other active work orders)
- * - Collection tasks (via DB CASCADE on receivables)
- * - Invoice delete requests (via DB CASCADE on receivables)
  * - Client portal user cleanup (post_ids/agreement_ids updated or user deactivated)
  * - Deletion request document from Firebase
  * - The work order itself
+ *
+ * Invoices are NOT deleted. Tax invoices are statutory records and the database
+ * refuses to delete them; deleting the work order detaches its invoices instead
+ * (receivables.work_order_id is ON DELETE SET NULL). They stay on record with
+ * their payments and collection tasks. `deletedCounts.invoices_retained` is the
+ * number of invoices that were linked to the work order.
  */
 export const cascadeDeleteWorkOrder = async (workOrderId: string): Promise<{ success: boolean; error?: string; deletedCounts?: Record<string, number> }> => {
   try {
@@ -185,21 +188,17 @@ export const cascadeDeleteWorkOrder = async (workOrderId: string): Promise<{ suc
       deletedCounts.operational_posts = postCount || 0;
     }
 
-    // Step 11: Delete receivables (invoices) for this client
-    // Only delete if the client has NO other active work orders
-    if (clientName) {
-      const hasOtherWorkOrders = await clientHasOtherActiveWorkOrders(clientName, workOrderId);
-      if (!hasOtherWorkOrders) {
-        const { count: receivableCount, error: recErr } = await supabaseClient
-          .from('receivables')
-          .delete({ count: 'exact' })
-          .eq('client_name', clientName);
-        if (recErr) console.error('[CascadeDelete] receivables error:', recErr);
-        deletedCounts.receivables = receivableCount || 0;
-      } else {
-        console.info('[CascadeDelete] Skipping receivables deletion — client has other active work orders.');
-        deletedCounts.receivables_skipped = 1;
-      }
+    // Step 11: Invoices are retained. Count the ones linked to this work order;
+    // deleting the work order (step 16) detaches them via ON DELETE SET NULL.
+    try {
+      const { count: invoiceCount, error: invErr } = await supabaseClient
+        .from('receivables')
+        .select('id', { count: 'exact', head: true })
+        .eq('work_order_id', workOrderId);
+      if (invErr) console.warn('[CascadeDelete] Could not count linked invoices:', invErr.message);
+      deletedCounts.invoices_retained = invoiceCount || 0;
+    } catch (e) {
+      console.warn('[CascadeDelete] Could not count linked invoices:', e);
     }
 
     // Step 12: Delete linked agreement(s)
@@ -331,47 +330,3 @@ export const cascadeDeleteWorkOrder = async (workOrderId: string): Promise<{ suc
     return { success: false, error: (error as Error).message };
   }
 };
-
-/**
- * Helper: Check if a client has other active work orders besides the one being deleted.
- * Used to determine if receivables should be deleted (only when no other WOs exist).
- */
-async function clientHasOtherActiveWorkOrders(clientName: string, excludeWorkOrderId: string): Promise<boolean> {
-  try {
-    // Check operational_posts for this client that belong to other work orders
-    const { data: otherPosts } = await supabaseClient
-      .from('operational_posts')
-      .select('id, work_order_id')
-      .eq('client_name', clientName)
-      .neq('work_order_id', excludeWorkOrderId)
-      .limit(1);
-
-    if (otherPosts && otherPosts.length > 0) return true;
-
-    // Also check work_orders table directly via description JSON (client info stored there)
-    const { data: otherWOs } = await supabaseClient
-      .from('work_orders')
-      .select('id')
-      .neq('id', excludeWorkOrderId)
-      .limit(50);
-
-    if (otherWOs) {
-      for (const wo of otherWOs) {
-        // Quick check — if any other work order's posts reference this client
-        const { data: woPosts } = await supabaseClient
-          .from('operational_posts')
-          .select('id')
-          .eq('work_order_id', wo.id)
-          .eq('client_name', clientName)
-          .limit(1);
-        if (woPosts && woPosts.length > 0) return true;
-      }
-    }
-
-    return false;
-  } catch (e) {
-    console.warn('[CascadeDelete] Error checking other work orders:', e);
-    // Default to safe behavior — don't delete receivables if unsure
-    return true;
-  }
-}

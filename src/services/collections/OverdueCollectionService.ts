@@ -2,6 +2,21 @@
 
 import { supabaseClient } from '@/integrations/supabase/client';
 import { addNotification } from '@/services/supabase/NotificationService';
+import { markOverdueReceivables, refreshCollectionTasks } from '@/services/invoiceLedgerService';
+import { amountDue, type LedgerRow } from '@/lib/invoice/ledger';
+
+/**
+ * Collections for overdue invoices.
+ *
+ * The overdue rules live in the database (supabase/migrations/
+ * 20261029000000_invoice_ledger_integrity.sql). mark_overdue_receivables()
+ * flags invoices and debit notes that are past due and still owe money, and
+ * opens one task per item for the amount still owed. refresh_collection_tasks()
+ * keeps each open task's amount and age in step with its invoice and closes
+ * tasks whose invoice is settled or cancelled. This module calls those and reads
+ * the tasks back. Resolving a task never touches the invoice: the invoice is
+ * settled only by recording the payment in Accounts → Receivables.
+ */
 
 export interface CollectionTask {
   id: string;
@@ -9,6 +24,7 @@ export interface CollectionTask {
   assigned_to: string | null;
   client_name: string | null;
   invoice_description: string | null;
+  /** What the invoice still owes. fetchCollectionTasks reads it from the invoice's ledger columns. */
   amount: number;
   due_date: string | null;
   days_overdue: number;
@@ -20,40 +36,32 @@ export interface CollectionTask {
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
+  /** The invoice behind the task, set by fetchCollectionTasks; null when it could not be read. */
+  invoice?: CollectionInvoice | null;
 }
 
-/**
- * Calculate priority based on days overdue
- */
-function getPriority(daysOverdue: number): CollectionTask['priority'] {
-  if (daysOverdue <= 7) return 'low';
-  if (daysOverdue <= 30) return 'medium';
-  if (daysOverdue <= 60) return 'high';
-  return 'critical';
-}
+/** The invoice columns a collection task needs to show a live balance. */
+export type CollectionInvoice = LedgerRow & { id: string; due_date?: string | null };
+
+const INVOICE_COLUMNS =
+  'id, category, status, reference_number, created_at, due_date, amount, total_amount, '
+  + 'opening_balance, paid_amount, tds_credited, credit_applied';
+
+/** Invoice ids per request, so the query string stays short. */
+const ID_BATCH = 100;
 
 /**
- * Get all users with the 'sales' role to assign collection tasks
- */
-async function getSalesUsers(): Promise<{ user_id: string; email: string }[]> {
-  const { data, error } = await supabaseClient
-    .from('user_roles')
-    .select('user_id, email')
-    .eq('role', 'sales');
-
-  if (error || !data) return [];
-  return data;
-}
-
-/**
- * Check for overdue receivables and create collection tasks for the sales team.
- * This should be called periodically (e.g., on page load of accounts or sales module).
- * 
- * Flow:
- * 1. Find all receivables where due_date < today AND status = 'pending'
- * 2. Update their status to 'overdue'
- * 3. Create a collection_task for each (if one doesn't already exist)
- * 4. Notify sales team users
+ * Flag overdue invoices, open collection tasks for them and notify the sales
+ * users they were assigned to. Called when the accounts or sales screens open;
+ * the database also runs the sweep nightly when pg_cron is available.
+ *
+ * 1. mark_overdue_receivables(): past-due invoices that still owe money become
+ *    'overdue', and each one without an open task gets a task for the amount
+ *    still owed, assigned round-robin to the sales team.
+ * 2. refresh_collection_tasks(): open tasks take their invoice's current balance
+ *    and age; tasks whose invoice is settled or cancelled are closed.
+ *
+ * Never throws: failures are returned in `errors`.
  */
 export async function checkAndAssignOverdueCollections(): Promise<{
   overdueCount: number;
@@ -63,102 +71,41 @@ export async function checkAndAssignOverdueCollections(): Promise<{
   const result = { overdueCount: 0, tasksCreated: 0, errors: [] as string[] };
 
   try {
-    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const sweep = await markOverdueReceivables();
+    const tasks = sweep?.tasks ?? [];
+    result.overdueCount = sweep?.overdue_marked ?? 0;
+    result.tasksCreated = tasks.length;
 
-    // 1. Find unpaid receivables that are past their due date. Unpaid stored
-    //    states span the lifecycle before payment: 'created', 'issued' and the
-    //    legacy 'pending'.
-    const { data: overdueReceivables, error: fetchError } = await supabaseClient
-      .from('receivables')
-      .select('*')
-      .in('status', ['created', 'issued', 'pending'])
-      .lt('due_date', today)
-      .not('due_date', 'is', null);
-
-    if (fetchError) {
-      result.errors.push(`Failed to fetch overdue receivables: ${fetchError.message}`);
-      return result;
-    }
-
-    if (!overdueReceivables || overdueReceivables.length === 0) {
-      return result;
-    }
-
-    result.overdueCount = overdueReceivables.length;
-
-    // 2. Update status to 'overdue' in bulk
-    const overdueIds = overdueReceivables.map(r => r.id);
-    const { error: updateError } = await supabaseClient
-      .from('receivables')
-      .update({ status: 'overdue' })
-      .in('id', overdueIds);
-
-    if (updateError) {
-      result.errors.push(`Failed to update overdue status: ${updateError.message}`);
-    }
-
-    // 3. Get sales users for assignment (round-robin)
-    const salesUsers = await getSalesUsers();
-
-    // 4. Create collection tasks for each overdue receivable
-    for (let i = 0; i < overdueReceivables.length; i++) {
-      const receivable = overdueReceivables[i];
-      const daysOverdue = Math.ceil(
-        (new Date().getTime() - new Date(receivable.due_date).getTime()) / (1000 * 60 * 60 * 24)
-      );
-
-      // Assign round-robin to sales users, or null if no sales users exist
-      const assignedUser = salesUsers.length > 0
-        ? salesUsers[i % salesUsers.length]
-        : null;
-
-      const { error: insertError } = await supabaseClient
-        .from('collection_tasks')
-        .insert({
-          receivable_id: receivable.id,
-          assigned_to: assignedUser?.user_id || null,
-          client_name: receivable.client_name,
-          invoice_description: receivable.description,
-          amount: receivable.total_amount,
-          due_date: receivable.due_date,
-          days_overdue: daysOverdue,
-          priority: getPriority(daysOverdue),
-          status: 'pending',
-        })
-        .select()
-        .single();
-
-      if (insertError) {
-        // Likely already exists (unique constraint) — skip
-        if (!insertError.message.includes('duplicate') && !insertError.message.includes('unique')) {
-          result.errors.push(`Task creation failed for ${receivable.id}: ${insertError.message}`);
-        }
-        continue;
-      }
-
-      result.tasksCreated++;
-
-      // 5. Send notification to assigned sales user
-      if (assignedUser) {
-        await addNotification({
-          userId: assignedUser.user_id,
-          title: '🔴 New Collection Task Assigned',
-          message: `Overdue invoice from "${receivable.client_name || 'Unknown'}" — ₹${receivable.total_amount.toLocaleString('en-IN')} (${daysOverdue} days overdue). Please follow up.`,
-          type: 'warning',
-          relatedItemType: 'collections',
-          relatedItemId: receivable.id,
-        });
-      }
+    for (const task of tasks) {
+      if (!task.assigned_to) continue;
+      const ref = task.reference_number ? ` ${task.reference_number}` : '';
+      await addNotification({
+        userId: task.assigned_to,
+        title: '🔴 New Collection Task Assigned',
+        message: `Overdue invoice${ref} from "${task.client_name || 'Unknown'}": ₹${Number(task.amount).toLocaleString('en-IN')} still due (${task.days_overdue} days overdue). Please follow up.`,
+        type: 'warning',
+        relatedItemType: 'collections',
+        relatedItemId: task.receivable_id,
+      });
     }
   } catch (err: any) {
-    result.errors.push(`Unexpected error: ${err.message}`);
+    result.errors.push(`Overdue check failed: ${err?.message || String(err)}`);
+  }
+
+  try {
+    await refreshCollectionTasks();
+  } catch (err: any) {
+    result.errors.push(`Collection task refresh failed: ${err?.message || String(err)}`);
   }
 
   return result;
 }
 
 /**
- * Fetch all active collection tasks (for the sales collections tab)
+ * Fetch collection tasks (for the sales collections tab). The amount of each
+ * open task is what its invoice still owes, worked out from the invoice's
+ * ledger columns, so totals never rely on a stale task amount. Resolved tasks
+ * keep the amount they were closed at.
  */
 export async function fetchCollectionTasks(filters?: {
   status?: string;
@@ -185,18 +132,41 @@ export async function fetchCollectionTasks(filters?: {
     console.error('Error fetching collection tasks:', error);
     return [];
   }
-  return (data ?? []) as CollectionTask[];
+  return attachInvoices((data ?? []) as CollectionTask[]);
+}
+
+async function attachInvoices(tasks: CollectionTask[]): Promise<CollectionTask[]> {
+  const ids = [...new Set(tasks.map((t) => t.receivable_id).filter(Boolean))];
+  const byId = new Map<string, CollectionInvoice>();
+  for (let i = 0; i < ids.length; i += ID_BATCH) {
+    const { data, error } = await supabaseClient
+      .from('receivables')
+      .select(INVOICE_COLUMNS)
+      .in('id', ids.slice(i, i + ID_BATCH));
+    if (error) {
+      console.error('Error fetching the invoices of collection tasks:', error);
+      return tasks;
+    }
+    for (const row of (data ?? []) as unknown as CollectionInvoice[]) byId.set(row.id, row);
+  }
+  return tasks.map((task) => {
+    const invoice = byId.get(task.receivable_id) ?? null;
+    if (!invoice || task.status === 'resolved') return { ...task, invoice };
+    return { ...task, invoice, amount: amountDue(invoice) };
+  });
 }
 
 /**
- * Update a collection task status
+ * Update a collection task's status. Resolving closes the task only. The
+ * invoice is not marked paid: the payment is recorded in Accounts →
+ * Receivables, which settles the invoice and closes its open tasks itself.
  */
 export async function updateCollectionTaskStatus(
   taskId: string,
   status: CollectionTask['status'],
   notes?: string
 ): Promise<boolean> {
-  const updateData: any = { status };
+  const updateData: Record<string, unknown> = { status };
   if (notes) updateData.notes = notes;
   if (status === 'resolved') updateData.resolved_at = new Date().toISOString();
 
@@ -209,46 +179,18 @@ export async function updateCollectionTaskStatus(
     console.error('Error updating collection task:', error);
     return false;
   }
-
-  // If resolved, also mark the receivable as received
-  if (status === 'resolved') {
-    const { data: task } = await supabaseClient
-      .from('collection_tasks')
-      .select('receivable_id')
-      .eq('id', taskId)
-      .single();
-
-    if (task) {
-      await supabaseClient
-        .from('receivables')
-        .update({ status: 'received' })
-        .eq('id', task.receivable_id);
-    }
-  }
-
   return true;
 }
 
 /**
- * Update days_overdue for all active collection tasks (call periodically)
+ * Bring every open task's amount, days overdue and priority up to date from its
+ * invoice, and close tasks whose invoice is settled or cancelled. Best effort:
+ * a failure is logged, never thrown.
  */
 export async function refreshOverdueDays(): Promise<void> {
-  const { data: tasks } = await supabaseClient
-    .from('collection_tasks')
-    .select('id, due_date')
-    .neq('status', 'resolved');
-
-  if (!tasks) return;
-
-  const today = new Date();
-  for (const task of tasks) {
-    if (!task.due_date) continue;
-    const daysOverdue = Math.ceil(
-      (today.getTime() - new Date(task.due_date).getTime()) / (1000 * 60 * 60 * 24)
-    );
-    await supabaseClient
-      .from('collection_tasks')
-      .update({ days_overdue: daysOverdue, priority: getPriority(daysOverdue) })
-      .eq('id', task.id);
+  try {
+    await refreshCollectionTasks();
+  } catch (err) {
+    console.warn('Collection task refresh failed:', err);
   }
 }

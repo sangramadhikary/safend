@@ -6,27 +6,27 @@ import { getSupabaseServiceClient } from '@/lib/supabase/server';
 import { authenticateActor, canReadInvoice, isInvoiceStaff, type Actor } from '@/lib/supabase/auth';
 import { Document, Page, Text, View, Image, StyleSheet, Font, pdf } from '@react-pdf/renderer';
 import {
-  computeInvoiceTotals,
-  buildPaymentAdvice,
-  amountInWords,
   formatNumber as num,
-  formatWholeNumber as numInt,
-  formatRate,
   formatMoney as money,
   INVOICE_LABELS as L,
-  formatPaymentLine,
-  getInvoiceDeclaration,
   invoiceCopyLabel,
-  DEFAULT_SAC_SECURITY,
-  type InvoiceLineItem,
 } from '@/lib/invoice/calculations';
 import {
+  DOCUMENT_LABELS as D,
   formatServicePeriod,
   panFromGstin,
-  withCurrentSupplierLetterhead,
+  snapshotOf,
+  type BankDetails,
+  type InvoiceDocumentModel,
 } from '@/lib/invoice/document';
+import {
+  buildInvoiceViewData,
+  carriedReferenceNumbers,
+  documentFromViewData,
+  issuePatch,
+  shouldFreezeOnDownload,
+} from '@/lib/invoice/document-input';
 import { showSacSummary } from '@/lib/invoice/pdfPagination';
-import { INDIAN_STATES } from '@/lib/tax/gst';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Font registration — NotoSans supports the ₹ (rupee) glyph. Only 400 & 700
@@ -175,6 +175,8 @@ const S = StyleSheet.create({
   pageNum: { position: 'absolute', bottom: 16, right: 28, textAlign: 'right', fontSize: 7, fontWeight: 700, color: INK },
 
   copyMark: { fontSize: 6.5, fontWeight: 700, color: FAINT, letterSpacing: 1.4, marginBottom: 3 },
+  cancelBanner: { fontSize: 14, fontWeight: 700, color: RED, letterSpacing: 5, textAlign: 'center', borderWidth: 1.5, borderColor: RED, borderRadius: 3, paddingVertical: 3, marginBottom: 6 },
+  linesNote: { fontSize: 6.5, color: MUTE, marginTop: 3 },
 
   /* Continuation strip on pages 2+ so a spilled table is never context-free */
   contBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1.5, borderBottomColor: RED, paddingBottom: 5, marginBottom: 9 },
@@ -220,28 +222,39 @@ const S = StyleSheet.create({
 
 const ce = React.createElement;
 
-type PayloadResult = { payload: any } | { status: number; error: string };
+type LoadResult = { doc: InvoiceDocumentModel } | { status: number; error: string };
 
-const asDMY = (d?: string | null): string => {
-  if (!d) return '';
-  const dt = new Date(d);
-  return Number.isNaN(dt.getTime())
-    ? ''
-    : dt.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The active bank account, which the screen view also prints. Null when none is set up. */
+async function activeBankAccount(admin: ReturnType<typeof getSupabaseServiceClient>): Promise<Partial<BankDetails> | null> {
+  const { data, error } = await admin
+    .from('bank_accounts')
+    .select('account_name, account_number, bank_name, ifsc_code')
+    .eq('status', 'active')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const bank: Partial<BankDetails> = {};
+  if (data.bank_name) bank.bankName = data.bank_name;
+  if (data.account_number) bank.bankAccountNo = data.account_number;
+  if (data.ifsc_code) bank.ifscCode = data.ifsc_code;
+  if (data.account_name) bank.accountName = data.account_name;
+  return bank;
+}
 
 /**
- * Builds the render payload from the database rather than the request.
+ * Builds the document from the database, never from the request: the caller
+ * supplies only an id, so amounts, GSTIN and party details all come from our
+ * own records. It goes through the same builder as the screen view
+ * (buildInvoiceViewData → documentFromViewData), so the download matches it.
  *
- * This is what makes the endpoint forgery-proof: the caller supplies only an id,
- * so amounts, GSTIN and party details all come from our own records.
- *
- * When the receivable carries an `invoice_snapshot`, its stored lines and rates
- * are fed back through the engine. The engine is deterministic for a given set
- * of line inputs and rate basis, so this reproduces the issued figures exactly
- * instead of recomputing against today's rules.
+ * The first download by staff of a never-issued invoice issues it: the tax
+ * invoice is frozen onto invoice_snapshot and issued_at is set (the database
+ * keeps both write-once). Client-portal downloads never issue.
  */
-async function loadInvoicePayload(receivableId: string, actor: Actor): Promise<PayloadResult> {
+async function loadInvoiceDocument(receivableId: string, actor: Actor): Promise<LoadResult> {
   const admin = getSupabaseServiceClient();
 
   const { data: row, error } = await admin
@@ -256,124 +269,63 @@ async function loadInvoicePayload(receivableId: string, actor: Actor): Promise<P
     return { status: 403, error: 'You are not permitted to view this invoice.' };
   }
 
-  // Lifecycle: downloading the PDF marks an invoice as "Issued". Only promote
-  // invoices that are still in their initial state (created / legacy pending)
-  // and have not already been issued, paid or cancelled. Best-effort: a failure
-  // here must never block the PDF from being generated.
-  const issuableStatuses = ['created', 'pending'];
-  if (row.category === 'Invoices' && !row.issued_at && issuableStatuses.includes(String(row.status ?? ''))) {
-    const issuedAt = new Date().toISOString();
-    const { error: issueErr } = await admin
-      .from('receivables')
-      .update({ status: 'issued', issued_at: issuedAt })
-      .eq('id', receivableId);
-    if (!issueErr) {
-      row.status = 'issued';
-      row.issued_at = issuedAt;
-    }
-  }
-
-  const { data: paymentRows } = await admin
+  // Payment rows supply the receipt details. If they fail to load the statement
+  // still adds up: it falls back to the row's trigger-maintained paid, TDS and
+  // credit-note columns.
+  const { data: payments, error: payErr } = await admin
     .from('receivable_payments')
     .select('*')
     .eq('receivable_id', receivableId)
     .order('created_at', { ascending: true });
-  const payments = paymentRows ?? [];
-  const received = payments.reduce((s: number, p: any) => s + (Number(p.amount) || 0), 0);
+  if (payErr) console.error(`Invoice PDF ${receivableId}: payments not loaded: ${payErr.message}`);
 
-  // Legacy rows still hold some fields in the free-text notes blob; real columns
-  // win where the migration has backfilled them.
-  const notes = String(row.notes ?? '');
-  const pick = (re: RegExp) => notes.match(re)?.[1]?.trim() ?? null;
+  // Older invoices this one lists, looked up live. A failure here would print
+  // too small a "total payable", so it fails the download instead.
+  const refs = carriedReferenceNumbers(row);
+  let carried: Record<string, any>[] = [];
+  if (refs.length > 0 && row.work_order_id) {
+    const { data, error: carriedErr } = await admin
+      .from('receivables')
+      .select('*')
+      .eq('category', 'Invoices')
+      .eq('work_order_id', row.work_order_id)
+      .in('reference_number', refs);
+    if (carriedErr) return { status: 500, error: `Could not load the earlier invoices: ${carriedErr.message}` };
+    carried = data ?? [];
+  }
 
-  const snapshot = row.invoice_snapshot as any | null;
-  const snapTax = snapshot?.taxInvoice;
+  const bank = await activeBankAccount(admin);
+  let { doc } = documentFromViewData(buildInvoiceViewData(row, payments ?? [], carried), { bank });
 
-  const gstPct = snapTax?.gstRate ?? (Number(pick(/GST:\s*([\d.]+)\s*%/)) || 0);
-  const gstType: string = row.gst_type || 'cgst_sgst';
-  const taxType = snapTax?.taxType ?? (gstType === 'igst' ? 'inter' : gstType === 'exempt' ? 'exempt' : 'intra');
+  // Issue on first staff download. The filters make a concurrent second
+  // download a no-op instead of tripping the write-once guard. Best-effort: a
+  // failure here never blocks the PDF.
+  if (isInvoiceStaff(actor) && shouldFreezeOnDownload(row) && doc.blockedReasons.length === 0) {
+    const issuedAt = new Date().toISOString();
+    const { error: issueErr } = await admin
+      .from('receivables')
+      .update(issuePatch(row, snapshotOf(doc, issuedAt), issuedAt))
+      .eq('id', receivableId)
+      .is('issued_at', null)
+      .is('invoice_snapshot', null);
+    if (issueErr) {
+      console.error(`Invoice PDF ${row.reference_number ?? receivableId}: not marked issued: ${issueErr.message}`);
+    } else {
+      doc = { ...doc, issuedAt };
+    }
+  }
 
-  const items = ((snapTax?.lines ?? row.line_items ?? []) as InvoiceLineItem[]).map((li: any) => ({
-    ...li,
-    // Clean any accumulated duplicate shift suffixes from repeatedly edited invoices
-    service: (li.service || '')
-      .replace(/(\s*\(12-Hour\))+/g, ' (12-Hour)')
-      .replace(/(\s*\(8-Hour\))+/g, ' (8-Hour)')
-      .trim(),
-  }));
-
-  return {
-    payload: {
-      // Snapshot keeps the issued figures; the letterhead always reflects our
-      // current registered address so a corrected address appears on reprints.
-      companyInfo: withCurrentSupplierLetterhead(snapshot?.supplier),
-      clientInfo:
-        snapshot?.recipient ?? {
-          name: row.client_name ?? '',
-          address: row.client_address ?? pick(/Addr:\s*([^|]+)/) ?? '',
-          gstin: row.client_gstin ?? pick(/GSTIN:\s*([0-9A-Za-z]{15})/) ?? '',
-          state: (() => {
-            const gstin: string = row.client_gstin ?? pick(/GSTIN:\s*([0-9A-Za-z]{15})/) ?? '';
-            if (gstin.length >= 2) {
-              const found = INDIAN_STATES.find((s: any) => s.code === gstin.slice(0, 2));
-              if (found) return found.label;
-            }
-            const pos: string = row.place_of_supply ?? '';
-            const posCode = pos.split('-')[0]?.trim();
-            const posState = INDIAN_STATES.find((s: any) => s.code === posCode);
-            return posState ? posState.label : pos;
-          })(),
-        },
-      invoiceDetails: {
-        invoiceNo: row.reference_number ?? '',
-        date: snapshot?.meta?.date ?? asDMY(row.created_at),
-        dueDate: snapshot?.meta?.dueDate ?? asDMY(row.due_date),
-        placeOfSupply: row.place_of_supply ?? '',
-        workOrderNo: snapshot?.meta?.workOrderNo ?? '',
-        workOrderDate: snapshot?.meta?.workOrderDate ?? '',
-        servicePeriodStart: row.service_period_start ?? null,
-        servicePeriodEnd: row.service_period_end ?? null,
-        irn: row.irn ?? null,
-        irnQr: row.irn_qr ?? null,
-        irnAckNo: row.irn_ack_no ?? null,
-        irnAckDate: row.irn_ack_date ?? null,
-      },
-      items,
-      taxConfig: {
-        gstRate: gstPct,
-        taxType,
-        tdsRate: row.tds_rate != null ? Number(row.tds_rate) : Number(pick(/TDS:\s*([\d.]+)\s*%/)) || 0,
-        received,
-        // DB column wins; fall back to notes regex for invoices saved before the column existed
-        previousBalance: Number(row.previous_balance ?? 0) ||
-          Number((pick(/Previous Due:\s*₹?([\d,]+(?:\.\d+)?)/) ?? '').replace(/,/g, '')) || 0,
-      },
-      previousEntries: row.previous_balance_breakdown ?? [],
-      paymentDetails: snapshot?.bank ?? {},
-      invoiceStatus: row.status ?? 'pending',
-      payments,
-      gstTreatment: gstType === 'exempt' ? 'exempt' : 'forward',
-      snapshot,
-    },
-  };
+  return { doc };
 }
 
 export async function POST(req: NextRequest) {
   try {
-    /* ── Authentication ────────────────────────────────────────────────────
-     * This endpoint previously accepted companyInfo/clientInfo/items/taxConfig
-     * straight off the request body with no session check, so anyone who could
-     * reach the URL could mint a PDF on company letterhead carrying an
-     * arbitrary GSTIN and arbitrary amounts.
-     *
-     * Two changes close that:
-     *   1. A valid Supabase access token is now required.
-     *   2. The preferred call shape is `{ receivableId }` — the figures are read
-     *      from the database server-side, so a caller cannot dictate them.
-     *
-     * The legacy payload shape still works, restricted to accounts/admin staff,
-     * so existing callers keep functioning while they migrate. Remove that
-     * branch once ManageReceivables passes receivableId.
+    /* ── Authentication and input ──────────────────────────────────────────
+     * A valid Supabase access token is required, and the only accepted body is
+     * { receivableId }: every figure is read from the database. The branch that
+     * rendered caller-supplied figures is gone, so nobody can put amounts or a
+     * GSTIN of their own on our letterhead. Client-portal users may download
+     * their own client's invoices (canReadInvoice).
      * ─────────────────────────────────────────────────────────────────────── */
     const actor = await authenticateActor(req);
     if (!actor) {
@@ -383,78 +335,46 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const rawBody = await req.json();
-    let body = rawBody;
-
-    if (rawBody?.receivableId) {
-      const resolved = await loadInvoicePayload(String(rawBody.receivableId), actor);
-      if ('status' in resolved) {
-        return NextResponse.json({ error: resolved.error }, { status: resolved.status });
-      }
-      body = resolved.payload;
-    } else if (!isInvoiceStaff(actor)) {
-      // A client-portal user must not be able to hand us numbers of their own.
+    const body = await req.json().catch(() => null);
+    const receivableId = typeof body?.receivableId === 'string' ? body.receivableId.trim() : '';
+    if (!UUID_RE.test(receivableId)) {
       return NextResponse.json(
-        { error: 'Pass { receivableId }. Supplying invoice figures directly is not permitted.' },
-        { status: 403 }
+        { error: 'Pass { receivableId }. Invoice figures are read from the database, never from the request.' },
+        { status: 400 }
       );
     }
 
-    const {
-      companyInfo: rawCompanyInfo = {}, invoiceDetails = {}, clientInfo = {}, items = [],
-      taxConfig = {}, paymentDetails = {}, invoiceStatus = 'pending', payments = [],
-      gstTreatment = null,
-    } = body;
+    const loaded = await loadInvoiceDocument(receivableId, actor);
+    if ('status' in loaded) {
+      return NextResponse.json({ error: loaded.error }, { status: loaded.status });
+    }
 
-    // The letterhead is ours, never the caller's. This also covers the legacy
-    // payload branch above, so a stale snapshot or a hand-rolled body can never
-    // put an outdated registered address on our letterhead.
-    const companyInfo = withCurrentSupplierLetterhead(rawCompanyInfo);
-
-    /* ── Shared calculation engine (identical to the screen view) ─────────── */
-    // receivable_payments.amount is stored as (cash + TDS). The Payment Advice
-    // shows TDS on its own line, so "Payments received" must be pure cash or the
-    // TDS is subtracted twice. Compute the invoice TDS first, then strip it out
-    // of the summed payments before feeding `received` into the totals engine.
-    const tdsProbe = computeInvoiceTotals(items as InvoiceLineItem[], { ...taxConfig, received: 0 });
-    const cashReceived = Math.max(0, (Number(taxConfig.received) || 0) - (tdsProbe.tds || 0));
-    const totals = computeInvoiceTotals(items as InvoiceLineItem[], { ...taxConfig, received: cashReceived });
-    const { lines, subTotal, sgst, cgst, tds, roundOff, invoiceTotal, received, previousBalance, currentBalance } = totals;
-    const sgstRate = taxConfig.sgstRate ?? 9;
-    const cgstRate = taxConfig.cgstRate ?? 9;
-    const igstRate = taxConfig.igstRate ?? 0;
-    const tdsRate = taxConfig.tdsRate ?? 0;
-    const isIGST = igstRate > 0;
-
-    const isPaid = invoiceStatus === 'received';
-    const isPartial = payments.length > 0 && !isPaid;
-
-    /* ── Reusable pieces ───────────────────────────────────────────────── */
-    const invNo = invoiceDetails.invoiceNo || '—';
-    const supplierPan = companyInfo.pan || panFromGstin(companyInfo.gstin || '21ABDCS8727K1Z4');
-    const period = formatServicePeriod(invoiceDetails.servicePeriodStart, invoiceDetails.servicePeriodEnd);
-
-    const advice = buildPaymentAdvice(
-      totals,
-      invNo,
-      (body.previousEntries ?? []) as any[],
-      invoiceDetails.dueDate
-    );
-    const hasAdvice = advice.tds > 0 || advice.received > 0 || advice.previousBalance > 0;
+    /* ── The document model: the same one the screen view renders ──────── */
+    const model = loaded.doc;
+    const { supplier: companyInfo, recipient: clientInfo, meta, taxInvoice: ti, statement, bank, eInvoice } = model;
+    const lines = ti.lines;
+    const isIGST = ti.taxType === 'inter';
+    const isExempt = ti.taxType === 'exempt';
+    const cancelled = statement.state === 'cancelled';
+    // Reconciled lines close onto the recorded taxable value via the round-off row.
+    const tableTotal = ti.linesReconciled ? ti.taxableValue : ti.linesTotal;
+    const invNo = meta.invoiceNo || '—';
+    const supplierPan = companyInfo.pan || panFromGstin(companyInfo.gstin);
+    const period = formatServicePeriod(meta.servicePeriodStart, meta.servicePeriodEnd);
 
     const metaRows: [string, string, string?][] = [
       ['Invoice No.', invNo, 'big'],
-      ['Date', invoiceDetails.date || '—'],
-      ['Due Date', invoiceDetails.dueDate || '—'],
+      ['Date', meta.date || '—'],
+      ['Due Date', meta.dueDate || '—'],
       ...(period ? ([[L.servicePeriod, period]] as [string, string][]) : []),
-      ['Place of Supply', invoiceDetails.placeOfSupply || '21-Odisha'],
-      ...(invoiceDetails.workOrderNo ? ([['Work Order No.', invoiceDetails.workOrderNo]] as [string, string][]) : []),
-      ...(invoiceDetails.workOrderDate ? ([['Work Order Date', invoiceDetails.workOrderDate]] as [string, string][]) : []),
+      ['Place of Supply', meta.placeOfSupply || '21-Odisha'],
+      ...(meta.workOrderNo ? ([['Work Order No.', meta.workOrderNo]] as [string, string][]) : []),
+      ...(meta.workOrderDate ? ([['Work Order Date', meta.workOrderDate]] as [string, string][]) : []),
     ];
 
-    const showWoCol = lines.some((item: any) => !item.hideWoPrice);
-    const sacSummary = totals.sacSummary ?? [];
-    const hasEInvoice = !!(invoiceDetails.irn && invoiceDetails.irnQr);
+    const showWoCol = lines.some((item) => !item.hideWoPrice);
+    const sacSummary = ti.sacSummary ?? [];
+    const hasEInvoice = !!(eInvoice.irn && eInvoice.qr);
 
 
 
@@ -473,27 +393,41 @@ export async function POST(req: NextRequest) {
 
     // A row is atomic: wrap={false} stops @react-pdf breaking between the
     // service name and its "@ post" / rate-derivation sub-lines.
-    const tableRow = (item: any, idx: number) =>
+    const tableRow = (item: (typeof lines)[number], idx: number) =>
       ce(View, { key: `r${idx}`, style: { ...S.trow, ...S.tableSide }, wrap: false },
         ce(Text, { style: { ...S.td, ...S.cHash, fontWeight: 700, color: MUTE } }, String(idx + 1)),
         ce(View, { style: { ...S.td, ...S.cDesc } },
           ce(Text, { style: S.svcName }, item.service || '—'),
           item.personnel ? ce(Text, { style: S.svcMeta }, `${item.personnel} ${L.personnelSuffix}`) : null,
-          (item.post && !item.hideLocation) ? ce(Text, { style: S.svcMeta }, `@ ${item.post}`) : null,
+          item.post ? ce(Text, { style: S.svcMeta }, `@ ${item.post}`) : null,
+          item.note ? ce(Text, { style: S.svcMeta }, item.note) : null,
         ),
-        ce(Text, { style: { ...S.td, ...S.cSac, color: MUTE } }, item.sac || DEFAULT_SAC_SECURITY),
+        ce(Text, { style: { ...S.td, ...S.cSac, color: MUTE } }, item.sac || '—'),
         showWoCol ? ce(Text, { style: { ...S.td, ...S.cWo, fontWeight: 700 } }, item.hideWoPrice ? '—' : num(item.woPrice || 0)) : null,
-        ce(Text, { style: { ...S.td, ...S.cDuty, fontWeight: 700 } }, String(item.duties || 0)),
-        ce(View, { style: { ...S.td, ...S.cRate } },
-          ce(Text, { style: { fontSize: 8.5, color: INK, fontWeight: 700, textAlign: 'right' } }, `\u20B9${numInt(item.rate ?? 0)}`),
-          item.rateDerivation ? ce(Text, { style: { ...S.rateDeriv, textAlign: 'right' } }, item.rateDerivation) : null,
-        ),
-        ce(Text, { style: { ...S.td, ...S.cAmt, fontWeight: 700, color: BLACK } }, numInt(item.amount)),
+        ce(Text, { style: { ...S.td, ...S.cDuty, fontWeight: 700 } }, item.lumpSum ? '—' : String(item.duties || 0)),
+        item.lumpSum
+          ? ce(Text, { style: { ...S.td, ...S.cRate, color: MUTE } }, '—')
+          : ce(View, { style: { ...S.td, ...S.cRate } },
+              ce(Text, { style: { fontSize: 8.5, color: INK, fontWeight: 700, textAlign: 'right' } }, `\u20B9${num(item.rate ?? 0)}`),
+              item.rateDerivation ? ce(Text, { style: { ...S.rateDeriv, textAlign: 'right' } }, item.rateDerivation) : null,
+            ),
+        ce(Text, { style: { ...S.td, ...S.cAmt, fontWeight: 700, color: BLACK } }, num(item.amount)),
+      );
+
+    // Closes reconciled lines onto the recorded taxable value.
+    const roundOffRow = () =>
+      ti.linesRoundOff === 0 ? null :
+      ce(View, { key: 'lro', style: { ...S.trow, ...S.tableSide }, wrap: false },
+        ce(Text, { style: { ...S.td, ...S.cHash } }, ''),
+        ce(Text, { style: { ...S.td, ...S.cDesc, fontSize: 7.5, color: MUTE } }, D.linesRoundOff),
+        ce(Text, { style: { ...S.td, ...S.cAmt, fontSize: 7.5, color: MUTE } },
+          `${ti.linesRoundOff > 0 ? '+ ' : '- '}${num(Math.abs(ti.linesRoundOff))}`),
       );
 
     const headerBlock = () =>
       ce(View, { key: 'hdr', wrap: false },
-        ce(Text, { style: S.copyMark }, invoiceCopyLabel(invoiceDetails.copyType)),
+        ce(Text, { style: S.copyMark }, invoiceCopyLabel(meta.copyType)),
+        cancelled ? ce(Text, { style: S.cancelBanner }, D.cancelled) : null,
         ce(View, { style: S.header },
           ce(View, { style: S.brandRow },
             LOGO_SRC ? ce(Image, { src: LOGO_SRC, style: S.logo }) : null,
@@ -518,10 +452,16 @@ export async function POST(req: NextRequest) {
                 ce(Text, { style: S.taxIdValue }, companyInfo.state || '21-Odisha'),
               ),
               // PAN: the client deducts TDS and needs it to claim credit.
-              supplierPan ? ce(View, { style: { ...S.taxIdRow, marginBottom: companyInfo.cin ? 1 : 0 } },
+              supplierPan ? ce(View, { style: { ...S.taxIdRow, marginBottom: 1 } },
                 ce(Text, { style: S.taxIdLabel }, 'PAN'),
                 ce(Text, { style: S.taxIdValue }, supplierPan),
               ) : null,
+              // Udyam registration: mandatory on invoices to support MSME Samadhaan
+              // delayed-payment claims under Sections 15-16 of the MSMED Act, 2006.
+              ce(View, { style: { ...S.taxIdRow, marginBottom: companyInfo.cin ? 1 : 0 } },
+                ce(Text, { style: S.taxIdLabel }, 'MSME Udyam No.'),
+                ce(Text, { style: { ...S.taxIdValue, fontSize: 6.8 } }, 'UDYAM-OD-07-0000118'),
+              ),
               companyInfo.cin ? ce(View, { style: { ...S.taxIdRow, marginBottom: 0 } },
                 ce(Text, { style: S.taxIdLabel }, 'CIN'),
                 ce(Text, { style: S.taxIdValue }, companyInfo.cin),
@@ -564,11 +504,11 @@ export async function POST(req: NextRequest) {
 
     const eInvoiceBlock = () =>
       ce(View, { key: 'einv', style: { ...S.card, flexDirection: 'row', alignItems: 'center' }, wrap: false },
-        ce(Image, { src: invoiceDetails.irnQr, style: { width: 58, height: 58, marginRight: 10, objectFit: 'contain' } }),
+        ce(Image, { src: eInvoice.qr, style: { width: 58, height: 58, marginRight: 10, objectFit: 'contain' } }),
         ce(View, { style: { flex: 1 } },
-          ce(View, { style: S.kv }, ce(Text, { style: S.kvLabel }, 'IRN'), ce(Text, { style: { ...S.kvValue, fontSize: 6 } }, invoiceDetails.irn)),
-          ce(View, { style: S.kv }, ce(Text, { style: S.kvLabel }, 'Ack No.'), ce(Text, { style: S.kvValue }, invoiceDetails.irnAckNo || '—')),
-          ce(View, { style: S.kv }, ce(Text, { style: S.kvLabel }, 'Ack Date'), ce(Text, { style: S.kvValue }, invoiceDetails.irnAckDate || '—')),
+          ce(View, { style: S.kv }, ce(Text, { style: S.kvLabel }, 'IRN'), ce(Text, { style: { ...S.kvValue, fontSize: 6 } }, eInvoice.irn)),
+          ce(View, { style: S.kv }, ce(Text, { style: S.kvLabel }, 'Ack No.'), ce(Text, { style: S.kvValue }, eInvoice.ackNo || '—')),
+          ce(View, { style: S.kv }, ce(Text, { style: S.kvLabel }, 'Ack Date'), ce(Text, { style: S.kvValue }, eInvoice.ackDate || '—')),
         ),
       );
 
@@ -584,42 +524,19 @@ export async function POST(req: NextRequest) {
         ce(Text, { style: { ...S.tfootLabel, ...S.cDesc } }, 'TOTAL'),
         ce(Text, { style: { ...S.tfootLabel, ...S.cSac } }, ''),
         showWoCol ? ce(Text, { style: { ...S.tfootLabel, ...S.cWo } }, '') : null,
-        ce(Text, { style: { ...S.td, ...S.cDuty, fontWeight: 700, color: BLACK } }, String(totals.totalDuties ?? 0)),
+        ce(Text, { style: { ...S.td, ...S.cDuty, fontWeight: 700, color: BLACK } },
+          lines.every((l) => l.lumpSum) ? '—' : String(ti.totalDuties ?? 0)),
         ce(Text, { style: { ...S.tfootLabel, ...S.cRate } }, ''),
-        ce(Text, { style: { ...S.td, ...S.cAmt, fontWeight: 700, color: BLACK } }, numInt(subTotal)),
+        ce(Text, { style: { ...S.td, ...S.cAmt, fontWeight: 700, color: BLACK } }, num(tableTotal)),
       );
 
-    // Only worth printing when there is more than one SAC/rate group — with a
-    // single group it restates the line and the totals panel, and costs a page.
-    const sacBlock = () =>
-      !showSacSummary(sacSummary.length) ? null :
-      ce(View, { key: 'sac', style: S.sacTable, wrap: false },
-        ce(View, { style: S.sacHead },
-          ce(Text, { style: { ...S.sacTh, flex: 1 } }, 'SAC'),
-          ce(Text, { style: { ...S.sacTh, width: 62, textAlign: 'right' } }, 'TAXABLE'),
-          ce(Text, { style: { ...S.sacTh, width: 32, textAlign: 'center' } }, 'RATE'),
-          ...(isIGST
-            ? [ce(Text, { key: 'i', style: { ...S.sacTh, width: 54, textAlign: 'right' } }, 'IGST')]
-            : [
-                ce(Text, { key: 'c', style: { ...S.sacTh, width: 54, textAlign: 'right' } }, 'CGST'),
-                ce(Text, { key: 's', style: { ...S.sacTh, width: 54, textAlign: 'right' } }, 'SGST'),
-              ]),
-          ce(Text, { style: { ...S.sacTh, width: 56, textAlign: 'right' } }, 'TOTAL TAX'),
-        ),
-        ...sacSummary.map((r: any) =>
-          ce(View, { key: `${r.sac}-${r.gstRate}`, style: S.sacRow },
-            ce(Text, { style: { ...S.sacTd, flex: 1 } }, r.sac),
-            ce(Text, { style: { ...S.sacTd, width: 62, textAlign: 'right' } }, numInt(r.taxableValue)),
-            ce(Text, { style: { ...S.sacTd, width: 32, textAlign: 'center' } }, `${r.gstRate}%`),
-            ...(isIGST
-              ? [ce(Text, { key: 'i', style: { ...S.sacTd, width: 54, textAlign: 'right' } }, numInt(r.igst))]
-              : [
-                  ce(Text, { key: 'c', style: { ...S.sacTd, width: 54, textAlign: 'right' } }, numInt(r.cgst)),
-                  ce(Text, { key: 's', style: { ...S.sacTd, width: 54, textAlign: 'right' } }, numInt(r.sgst)),
-                ]),
-            ce(Text, { style: { ...S.sacTd, width: 56, textAlign: 'right', fontWeight: 700 } }, numInt(r.totalTax)),
-          )
-        ),
+    const linesNote = () =>
+      ti.linesReconciled ? null : ce(Text, { key: 'lnote', style: S.linesNote }, D.linesDiffer);
+
+    const taxRow = (key: string, label: string, value: string) =>
+      ce(View, { key, style: S.tRow },
+        ce(Text, { style: S.tLabel }, label),
+        ce(Text, { style: S.tValue }, value),
       );
 
     // Tax invoice totals — ends at INVOICE VALUE and nothing beyond it, so the
@@ -627,84 +544,75 @@ export async function POST(req: NextRequest) {
     const totalsBlock = () =>
       ce(View, { key: 'totals', style: S.totals, wrap: false },
         ce(View, { style: S.tRowSub },
-          ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, L.taxableValue),
-          ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, `\u20B9${numInt(subTotal)}`),
+          ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, ti.taxableLabel || L.taxableValue),
+          ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, money(ti.taxableValue)),
         ),
-        ...(isIGST ? [
-          ce(View, { key: 'igst', style: S.tRow },
-            ce(Text, { style: S.tLabel }, `IGST @ ${igstRate}%`),
-            ce(Text, { style: S.tValue }, numInt(totals.igst ?? 0)),
-          ),
-        ] : [
-          ce(View, { key: 'cgst', style: S.tRow },
-            ce(Text, { style: S.tLabel }, `CGST @ ${cgstRate}%`),
-            ce(Text, { style: S.tValue }, numInt(cgst)),
-          ),
-          ce(View, { key: 'sgst', style: S.tRow },
-            ce(Text, { style: S.tLabel }, `SGST @ ${sgstRate}%`),
-            ce(Text, { style: S.tValue }, numInt(sgst)),
-          ),
-        ]),
-        roundOff !== 0 ? ce(View, { style: S.tRow },
+        ...(ti.taxNote
+          ? [ce(View, { key: 'note', style: S.tRow }, ce(Text, { style: { ...S.tLabel, fontSize: 7.5 } }, ti.taxNote))]
+          : isExempt
+            ? [taxRow('gst', 'GST', 'Exempt / Nil-rated')]
+            : isIGST
+              ? [taxRow('igst', `IGST @ ${ti.igstRate}%`, num(ti.igst))]
+              : [taxRow('cgst', `CGST @ ${ti.cgstRate}%`, num(ti.cgst)), taxRow('sgst', `SGST @ ${ti.sgstRate}%`, num(ti.sgst))]),
+        ti.roundOff !== 0 ? ce(View, { style: S.tRow },
           ce(Text, { style: { ...S.tLabel, fontSize: 7.5 } }, 'Round Off'),
-          ce(Text, { style: { ...S.tValue, fontSize: 7.5, color: MUTE } }, `${roundOff >= 0 ? '+ ' : '- '}${num(Math.abs(roundOff))}`),
+          ce(Text, { style: { ...S.tValue, fontSize: 7.5, color: MUTE } }, `${ti.roundOff >= 0 ? '+ ' : '- '}${num(Math.abs(ti.roundOff))}`),
         ) : null,
         ce(View, { style: S.tRowValue },
           ce(View, null,
             ce(Text, { style: S.tValueLabel }, L.invoiceTotal),
             ce(Text, { style: S.tValueNote }, L.invoiceTotalNote.toUpperCase()),
           ),
-          ce(Text, { style: S.tValueAmt }, money(invoiceTotal)),
+          ce(Text, { style: S.tValueAmt }, money(ti.invoiceTotal)),
         ),
       );
 
-    // Statement of account. Captioned so it cannot be read as part of the tax
-    // invoice, which is what keeps the previous-dues carry-forward compliant.
-    const adviceBlock = () =>
-      !hasAdvice ? null :
-      ce(View, { key: 'advice', style: S.advice, wrap: false },
+    // Statement of account: live from the ledger, and captioned so it cannot be
+    // read as part of the tax invoice. Same rows as the screen view.
+    const statementRow = (r: (typeof statement.rows)[number]) => {
+      const amount = r.amount === null ? '' : `${r.less ? '\u2212 ' : ''}${num(r.amount)}`;
+      if (r.kind === 'entry') {
+        return ce(View, { key: r.key, style: S.aEntry },
+          ce(Text, { style: S.aEntryText }, `\u00B7 ${r.label}`),
+          ce(Text, { style: S.aEntryText }, amount),
+        );
+      }
+      const strong = r.kind === 'balance' || r.kind === 'subtotal';
+      return ce(View, { key: r.key, style: S.aRow },
+        ce(View, { style: { flex: 1, paddingRight: 8 } },
+          ce(Text, { style: strong ? { ...S.aLabel, fontWeight: 700 } : S.aLabel }, r.label),
+          r.note ? ce(Text, { style: S.aSubNote }, r.note) : null,
+        ),
+        ce(Text, { style: S.aValue }, amount),
+      );
+    };
+
+    // Payable figure in red; PAID IN FULL in green; CANCELLED in grey.
+    const totalBg = statement.total.amount !== null ? RED : statement.state === 'paid' ? '#15803D' : INK;
+    const statementHead = [D.statementHead, statement.asOf ? `as of ${statement.asOf}` : '', statement.badge?.toUpperCase() ?? '']
+      .filter(Boolean).join('  \u00B7  ');
+
+    const statementBlock = () =>
+      !statement.show ? null :
+      ce(View, { key: 'statement', style: S.advice, wrap: false },
         ce(View, { style: S.adviceHeadRow },
-          ce(Text, { style: S.adviceHead }, L.paymentAdviceHead),
-          advice.dueDate ? ce(Text, { style: S.adviceDue }, `Payment due by ${advice.dueDate}`) : null,
+          ce(Text, { style: S.adviceHead }, statementHead),
+          statement.dueDate && statement.state === 'open'
+            ? ce(Text, { style: S.adviceDue }, `Payment due by ${statement.dueDate}`) : null,
         ),
         ce(Text, { style: S.adviceCaption }, L.adviceDisclaimer),
-        ce(View, { style: S.aRow },
-          ce(Text, { style: S.aLabel }, `This invoice (${invNo})`),
-          ce(Text, { style: S.aValue }, num(advice.invoiceTotal)),
+        ...statement.rows.map(statementRow),
+        ce(View, { style: { ...S.aTotal, backgroundColor: totalBg } },
+          ce(Text, { style: S.aTotalText }, statement.total.label),
+          ce(Text, { style: S.aTotalText }, statement.total.amount === null ? '' : money(statement.total.amount)),
         ),
-        advice.tds > 0 ? ce(View, { style: S.aRow },
-          ce(View, { style: { flex: 1, paddingRight: 8 } },
-            ce(Text, { style: S.aLabel }, `Less: TDS @ ${advice.tdsRate}% u/s 194C`),
-            ce(Text, { style: S.aSubNote }, L.tdsNote),
-          ),
-          ce(Text, { style: { ...S.aValue, marginTop: 2 } }, `\u2212 ${numInt(advice.tds)}`),
+        statement.remark ? ce(Text, { style: { ...S.aWords, color: INK, fontWeight: 700 } }, statement.remark) : null,
+        statement.total.words ? ce(Text, { style: S.aWords }, `${L.payableWords}: ${statement.total.words}`) : null,
+        statement.interest ? ce(View, { style: { marginTop: 5 } },
+          ce(Text, { style: { fontSize: 7, color: INK, fontWeight: 700 } },
+            `${statement.interest.label}: ${money(statement.interest.amount)}`),
+          ce(Text, { style: S.aSubNote }, statement.interest.note),
         ) : null,
-        advice.received > 0 ? ce(View, { style: S.aRow },
-          ce(Text, { style: S.aLabel }, L.amountReceived),
-          ce(Text, { style: S.aValue }, `- ${num(advice.received)}`),
-        ) : null,
-        advice.previousBalance !== 0 ? ce(View, null,
-          ce(View, { style: { ...S.aRow, borderBottomWidth: advice.previousEntries.length ? 0 : 0.5 } },
-            ce(Text, { style: S.aLabel }, 'Previous outstanding'),
-            ce(Text, { style: S.aValue }, advice.previousEntries.length ? '' : num(advice.previousBalance)),
-          ),
-          // Itemised: a bare carried-forward figure is what clients dispute.
-          ...advice.previousEntries.map((e: any) =>
-            ce(View, { key: e.referenceNumber, style: S.aEntry },
-              ce(Text, { style: S.aEntryText }, `· ${e.referenceNumber}${e.date ? `  ·  ${e.date}` : ''}`),
-              ce(Text, { style: S.aEntryText }, num(e.amount)),
-            )
-          ),
-          advice.previousEntries.length ? ce(View, { style: { ...S.aRow, paddingLeft: 10 } },
-            ce(Text, { style: { ...S.aEntryText, fontWeight: 700 } }, 'Sub-total'),
-            ce(Text, { style: { ...S.aEntryText, fontWeight: 700 } }, num(advice.previousBalance)),
-          ) : null,
-        ) : null,
-        ce(View, { style: S.aTotal },
-          ce(Text, { style: S.aTotalText }, L.amountDue),
-          ce(Text, { style: S.aTotalText }, money(advice.totalPayable)),
-        ),
-        ce(Text, { style: S.aWords }, `${L.payableWords}: ${amountInWords(advice.totalPayable)}`),
       );
 
     const lowerBlock = () =>
@@ -728,15 +636,15 @@ export async function POST(req: NextRequest) {
             ...sacSummary.map((r: any) =>
               ce(View, { key: `${r.sac}-${r.gstRate}`, style: S.sacRow },
                 ce(Text, { style: { ...S.sacTd, flex: 1 } }, r.sac),
-                ce(Text, { style: { ...S.sacTd, width: 56, textAlign: 'right' } }, numInt(r.taxableValue)),
+                ce(Text, { style: { ...S.sacTd, width: 56, textAlign: 'right' } }, num(r.taxableValue)),
                 ce(Text, { style: { ...S.sacTd, width: 28, textAlign: 'center' } }, `${r.gstRate}%`),
                 ...(isIGST
-                  ? [ce(Text, { key: 'i', style: { ...S.sacTd, width: 48, textAlign: 'right' } }, numInt(r.igst))]
+                  ? [ce(Text, { key: 'i', style: { ...S.sacTd, width: 48, textAlign: 'right' } }, num(r.igst))]
                   : [
-                      ce(Text, { key: 'c', style: { ...S.sacTd, width: 44, textAlign: 'right' } }, numInt(r.cgst)),
-                      ce(Text, { key: 's', style: { ...S.sacTd, width: 44, textAlign: 'right' } }, numInt(r.sgst)),
+                      ce(Text, { key: 'c', style: { ...S.sacTd, width: 44, textAlign: 'right' } }, num(r.cgst)),
+                      ce(Text, { key: 's', style: { ...S.sacTd, width: 44, textAlign: 'right' } }, num(r.sgst)),
                     ]),
-                ce(Text, { style: { ...S.sacTd, width: 48, textAlign: 'right', fontWeight: 700 } }, numInt(r.totalTax)),
+                ce(Text, { style: { ...S.sacTd, width: 48, textAlign: 'right', fontWeight: 700 } }, num(r.totalTax)),
               )
             ),
           ) : null,
@@ -746,32 +654,23 @@ export async function POST(req: NextRequest) {
               ce(Text, { style: S.cardHead }, L.bankDetails),
             ),
             ...[
-              ['BANK', paymentDetails.bankName || 'Axis Bank'],
-              ['A/C NUMBER', paymentDetails.bankAccountNo || '921020000544081'],
-              ['IFSC CODE', paymentDetails.ifscCode || 'UTIB0000091'],
-              ['BENEFICIARY', paymentDetails.accountName || 'Safend Secure Solutions Private Limited'],
-            ].map(([label, value]: any) =>
+              ['BANK', bank.bankName],
+              ['A/C NUMBER', bank.bankAccountNo],
+              ['IFSC CODE', bank.ifscCode],
+              ['BENEFICIARY', bank.accountName],
+            ].map(([label, value]) =>
               ce(View, { key: label, style: S.bankRow },
                 ce(Text, { style: S.bankLabel }, label),
-                ce(Text, { style: S.bankValue }, value),
+                ce(Text, { style: S.bankValue }, value || '—'),
               )
             ),
           ),
           ce(View, { style: S.words },
             ce(Text, { style: S.wordsLabel }, L.totalAmountWords),
-            ce(Text, { style: S.wordsValue }, amountInWords(invoiceTotal)),
+            ce(Text, { style: S.wordsValue }, ti.invoiceTotalWords),
           ),
-          (isPaid || isPartial) ? ce(View, { style: S.payWrap },
-            ce(View, { style: S.payHead },
-              ce(View, { style: { ...S.payDot, backgroundColor: isPaid ? '#15803D' : RED } }),
-              ce(Text, { style: { ...S.payHeadText, color: isPaid ? '#15803D' : RED } }, isPaid ? 'PAID IN FULL' : 'PARTIALLY PAID'),
-            ),
-            ce(View, { style: S.payBody },
-              ...(payments.length ? payments : [{}]).map((p: any, i: number) =>
-                ce(Text, { key: String(i), style: S.payLine }, formatPaymentLine(p))
-              ),
-            ),
-          ) : null,
+          // Paid / part-paid status and the receipts now live in the statement
+          // of account below, as on the screen view.
         ),
         // RIGHT: Totals panel
         ce(View, { style: S.lowerRight, wrap: false }, totalsBlock()),
@@ -781,8 +680,8 @@ export async function POST(req: NextRequest) {
       ce(View, { key: 'foot', style: S.footer, wrap: false },
         ce(View, { style: S.termsCol },
           ce(Text, { style: S.termsHead }, L.termsAndConditions),
-          ce(Text, { style: S.termsText }, paymentDetails.terms || L.defaultTerms),
-          ce(Text, { style: S.declaration }, getInvoiceDeclaration(gstTreatment)),
+          ce(Text, { style: S.termsText }, model.terms),
+          ce(Text, { style: S.declaration }, model.declaration),
         ),
         ce(View, { style: S.signCol },
           ce(Text, { style: S.signFor }, 'For'),
@@ -806,13 +705,15 @@ export async function POST(req: NextRequest) {
         // Line items — each row is wrap={false} so rows never break internally,
         // but the table as a whole flows naturally across pages.
         tableHead('th0'),
-        ...lines.map((item: any, i: number) => tableRow(item, i)),
+        ...lines.map((item, i) => tableRow(item, i)),
+        roundOffRow(),
         tableFoot(),
+        linesNote(),
 
         // Closing stack — wrap={false} on each block so they move whole to next
         // page rather than breaking internally.
         lowerBlock(),
-        adviceBlock(),
+        statementBlock(),
         footerBlock(),
 
         // Fixed footer on every page — page number sits on the right of the border line
@@ -832,7 +733,7 @@ export async function POST(req: NextRequest) {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="Invoice_${invoiceDetails.invoiceNo || 'draft'}.pdf"`,
+        'Content-Disposition': `attachment; filename="Invoice_${(meta.invoiceNo || 'draft').replace(/[^A-Za-z0-9._-]/g, '_')}.pdf"`,
         'Cache-Control': 'no-store',
       },
     });

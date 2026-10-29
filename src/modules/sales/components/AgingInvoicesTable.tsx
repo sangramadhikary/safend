@@ -19,9 +19,9 @@ import {
   fetchCollectionTasks,
   updateCollectionTaskStatus,
   checkAndAssignOverdueCollections,
-  refreshOverdueDays,
   type CollectionTask,
 } from '@/services/collections/OverdueCollectionService';
+import { isPartlyPaid } from '@/lib/invoice/ledger';
 
 const getStatusBadge = (status: CollectionTask['status']) => {
   switch (status) {
@@ -72,14 +72,12 @@ export function AgingInvoicesTable({ filter, searchTerm, onEdit }: AgingInvoices
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  // On mount: check for new overdue items and refresh days
+  // On mount: flag new overdue invoices and refresh every open task's balance and
+  // age. The refresh rewrites amounts and closes settled tasks, so always refetch.
   useEffect(() => {
-    checkAndAssignOverdueCollections().then((result) => {
-      if (result.tasksCreated > 0) {
-        queryClient.invalidateQueries({ queryKey: ['collection_tasks'] });
-      }
+    checkAndAssignOverdueCollections().then(() => {
+      queryClient.invalidateQueries({ queryKey: ['collection_tasks'] });
     });
-    refreshOverdueDays();
   }, []);
 
   // Fetch collection tasks from Supabase
@@ -123,11 +121,18 @@ export function AgingInvoicesTable({ filter, searchTerm, onEdit }: AgingInvoices
 
   // Mutation to update task status
   const updateStatus = useMutation({
-    mutationFn: ({ taskId, status }: { taskId: string; status: CollectionTask['status'] }) =>
-      updateCollectionTaskStatus(taskId, status),
-    onSuccess: () => {
+    mutationFn: async ({ taskId, status }: { taskId: string; status: CollectionTask['status'] }) => {
+      if (!(await updateCollectionTaskStatus(taskId, status))) throw new Error('Failed to update task.');
+    },
+    onSuccess: (_data, { status }) => {
       queryClient.invalidateQueries({ queryKey: ['collection_tasks'] });
-      toast({ title: 'Task Updated', description: 'Collection task status updated.' });
+      // Resolving closes the task only; the invoice is settled by recording the payment in Accounts.
+      toast(status === 'resolved'
+        ? {
+            title: 'Task Resolved',
+            description: 'Only the collection task is closed. The payment itself is recorded in Accounts → Receivables, which settles the invoice.',
+          }
+        : { title: 'Task Updated', description: 'Collection task status updated.' });
     },
     onError: () => {
       toast({ title: 'Error', description: 'Failed to update task.', variant: 'destructive' });
@@ -176,7 +181,7 @@ export function AgingInvoicesTable({ filter, searchTerm, onEdit }: AgingInvoices
           <TableRow>
             <TableHead>Invoice</TableHead>
             <TableHead>Client</TableHead>
-            <TableHead className="hidden md:table-cell">Amount</TableHead>
+            <TableHead className="hidden md:table-cell">Balance Due</TableHead>
             <TableHead className="hidden lg:table-cell">Due Date</TableHead>
             <TableHead>Aging</TableHead>
             <TableHead className="hidden md:table-cell">Priority</TableHead>
@@ -194,6 +199,9 @@ export function AgingInvoicesTable({ filter, searchTerm, onEdit }: AgingInvoices
                 <TableCell>{task.client_name || 'Unknown'}</TableCell>
                 <TableCell className="hidden md:table-cell">
                   ₹{task.amount?.toLocaleString('en-IN') || '0'}
+                  {task.invoice && isPartlyPaid(task.invoice) && (
+                    <Badge variant="outline" className="ml-2 border-blue-300 text-blue-600 text-[10px]">Part paid</Badge>
+                  )}
                 </TableCell>
                 <TableCell className="hidden lg:table-cell">
                   {task.due_date ? new Date(task.due_date).toLocaleDateString('en-IN') : '—'}
@@ -244,7 +252,7 @@ export function AgingInvoicesTable({ filter, searchTerm, onEdit }: AgingInvoices
                     <Button
                       variant="ghost"
                       size="icon"
-                      title="Mark as resolved (payment collected)"
+                      title="Mark task resolved (the payment itself is recorded in Accounts → Receivables)"
                       className="text-green-500 hover:text-green-600"
                       onClick={() => handleMarkResolved(task.id)}
                     >

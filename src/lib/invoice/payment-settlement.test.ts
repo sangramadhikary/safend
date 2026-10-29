@@ -90,7 +90,7 @@ describe('computeSettlement', () => {
     expect(r.fullyPaid).toBe(true);
   });
 
-  it('never reports a negative balance', () => {
+  it('never reports a negative balance, and reports the overpayment separately', () => {
     const r = computeSettlement({
       totalAmount: 1000,
       previousDue: 0,
@@ -100,5 +100,7 @@ describe('computeSettlement', () => {
     });
     expect(r.balanceAmount).toBe(0);
     expect(r.fullyPaid).toBe(true);
+    // record_receipt refuses this; callers must not treat it as a clean settlement.
+    expect(r.excess).toBe(500);
   });
 });

@@ -14,9 +14,10 @@
  *   Block A  TAX INVOICE      Self-contained and Rule 46 compliant. Ends at
  *                             INVOICE VALUE, which is the dominant figure and
  *                             the amount reported in GSTR-1.
- *   Block B  PAYMENT ADVICE   A statement of account, captioned as not forming
- *                             part of the tax invoice. Carries TDS, receipts and
- *                             itemised previous dues, ending at TOTAL PAYABLE NOW.
+ *   Block B  STATEMENT OF     Live from the ledger as of today, captioned as not
+ *            ACCOUNT          forming part of the tax invoice. Carries receipts,
+ *                             TDS, credit notes and the older invoices still
+ *                             owed, ending at TOTAL PAYABLE NOW.
  *
  * Previously these were fused: "Amount Due" (invoice + previous balance) was the
  * largest, reddest number on a document headed TAX INVOICE, while the actual
@@ -25,19 +26,22 @@
  * was being restated inside a new tax invoice.
  *
  * PRINT GEOMETRY — a fixed 210mm box with 12mm padding, and @page margin 0, so
- * screen and paper are 1:1 with no browser scaling. The payment advice is
- * allowed to break to a second page; it is a separate document, so that is
+ * screen and paper are 1:1 with no browser scaling. The statement of account
+ * is allowed to break to a second page; it is a separate document, so that is
  * correct rather than a defect.
  */
 
 import {
   INVOICE_LABELS as L,
   formatNumber,
-  formatWholeNumber,
   invoiceCopyLabel,
   type InvoiceCopyType,
 } from '@/lib/invoice/calculations';
-import { formatServicePeriod, type InvoiceDocumentModel } from '@/lib/invoice/document';
+import {
+  DOCUMENT_LABELS as D,
+  formatServicePeriod,
+  type InvoiceDocumentModel,
+} from '@/lib/invoice/document';
 
 const BRAND = '#D71920';
 
@@ -72,14 +76,17 @@ function SectionRule({ label }: { label: string }) {
 }
 
 export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
-  const { supplier, recipient, meta, taxInvoice: ti, advice, bank, eInvoice } = doc;
+  const { supplier, recipient, meta, taxInvoice: ti, statement, bank, eInvoice } = doc;
   const copy = copyType ?? meta.copyType ?? 'recipient';
   const period = formatServicePeriod(meta.servicePeriodStart, meta.servicePeriodEnd);
   const isInter = ti.taxType === 'inter';
   const isExempt = ti.taxType === 'exempt';
   const showContractPrice = ti.lines.some((l) => !l.hideWoPrice);
-  const hasAdvice =
-    advice.tds > 0 || advice.received > 0 || advice.previousBalance > 0;
+  const cancelled = statement.state === 'cancelled';
+  // Payable figure in brand red; PAID IN FULL in green; CANCELLED in grey.
+  const totalBg = statement.total.amount !== null ? BRAND : statement.state === 'paid' ? '#15803D' : '#374151';
+  // Reconciled lines close onto the recorded taxable value via the round-off row.
+  const tableTotal = ti.linesReconciled ? ti.taxableValue : ti.linesTotal;
 
   return (
     <>
@@ -102,10 +109,16 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
           </span>
           {recomputed && (
             <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[6.5pt] font-semibold uppercase tracking-wide text-amber-700 print:hidden">
-              Recomputed — issued before snapshotting
+              {ti.linesReconciled ? D.recomputedLegacy : D.recomputedLines}
             </span>
           )}
         </div>
+
+        {cancelled && (
+          <div className="mb-2 rounded border-2 border-red-700 py-1 text-center font-montserrat text-[14pt] font-extrabold tracking-[0.35em] text-red-700">
+            {D.cancelled}
+          </div>
+        )}
 
         {/* ── Header ─────────────────────────────────────────────────────── */}
         <header className="avoid-break">
@@ -141,6 +154,9 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                 <Field label="GSTIN" value={supplier.gstin} />
                 <Field label="State" value={supplier.state} />
                 {supplier.pan && <Field label="PAN" value={supplier.pan} />}
+                {/* Udyam number: required on invoices to support MSME Samadhaan
+                    delayed-payment claims under Sections 15-16 of the MSMED Act, 2006. */}
+                <Field label="MSME Udyam No." value="UDYAM-OD-07-0000118" />
                 {supplier.cin && <Field label="CIN" value={supplier.cin} />}
               </dl>
             </div>
@@ -230,40 +246,60 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                       </span>
                     )}
                     {line.post && <div className="text-[7.5pt] text-neutral-500">@ {line.post}</div>}
+                    {line.note && <div className="text-[7pt] italic text-neutral-500">{line.note}</div>}
                   </td>
-                  <td className="px-2 py-2 text-center text-[8pt] font-medium text-neutral-700">{line.sac}</td>
+                  <td className="px-2 py-2 text-center text-[8pt] font-medium text-neutral-700">{line.sac || '\u2014'}</td>
                   {showContractPrice && (
                     <td className="px-2 py-2 text-right font-semibold tabular-nums">
                       {line.hideWoPrice ? '\u2014' : formatNumber(line.woPrice)}
                     </td>
                   )}
-                  <td className="px-2 py-2 text-center font-semibold tabular-nums">{line.duties}</td>
+                  <td className="px-2 py-2 text-center font-semibold tabular-nums">{line.lumpSum ? '\u2014' : line.duties}</td>
                   <td className="px-2 py-2 text-right tabular-nums">
-                    <span className="font-semibold text-neutral-800">₹{formatWholeNumber(line.rate)}</span>
-                    {/* Printed derivation — this is what makes the line reproducible
-                        with a calculator, and what exposes the contracted divisor. */}
-                    <div className="text-[6.5pt] leading-tight text-neutral-400">{line.rateDerivation}</div>
+                    {line.lumpSum ? '\u2014' : (
+                      <>
+                        <span className="font-semibold text-neutral-800">₹{formatNumber(line.rate)}</span>
+                        {/* Printed derivation — this is what makes the line reproducible
+                            with a calculator, and what exposes the contracted divisor. */}
+                        <div className="text-[6.5pt] leading-tight text-neutral-400">{line.rateDerivation}</div>
+                      </>
+                    )}
                   </td>
                   <td className="px-2 py-2 text-right font-bold tabular-nums text-neutral-900">
-                    {formatWholeNumber(line.amount)}
+                    {formatNumber(line.amount)}
                   </td>
                 </tr>
               ))}
+              {ti.linesRoundOff !== 0 && (
+                <tr className="border-b border-neutral-200 text-[7.5pt] text-neutral-500">
+                  <td />
+                  <td colSpan={showContractPrice ? 5 : 4} className="px-2 py-1 italic">{D.linesRoundOff}</td>
+                  <td className="px-2 py-1 text-right tabular-nums">
+                    {ti.linesRoundOff > 0 ? '+' : '\u2212'}
+                    {formatNumber(Math.abs(ti.linesRoundOff))}
+                  </td>
+                </tr>
+              )}
             </tbody>
             <tfoot className="text-[8.5pt]">
               <tr className="border-t-2 bg-neutral-50" style={{ borderColor: BRAND }}>
                 <td colSpan={showContractPrice ? 4 : 3} className="px-2 py-1.5 text-right text-[7.5pt] font-bold uppercase tracking-wide text-neutral-500">
                   Total
                 </td>
-                <td className="px-2 py-1.5 text-center font-bold tabular-nums">{ti.totalDuties}</td>
+                <td className="px-2 py-1.5 text-center font-bold tabular-nums">
+                  {ti.lines.every((l) => l.lumpSum) ? '\u2014' : ti.totalDuties}
+                </td>
                 <td />
                 <td className="px-2 py-1.5 text-right font-bold tabular-nums text-neutral-900">
-                  {formatWholeNumber(ti.taxableValue)}
+                  {formatNumber(tableTotal)}
                 </td>
               </tr>
             </tfoot>
           </table>
         </section>
+        {!ti.linesReconciled && (
+          <p className="mt-1 text-[6.5pt] italic leading-snug text-neutral-500">{D.linesDiffer}</p>
+        )}
 
         {/* ── Tax summary + totals ──────────────────────────────────────── */}
         <section className="mt-3 grid grid-cols-[1fr_78mm] items-start gap-4">
@@ -296,17 +332,17 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                     {ti.sacSummary.map((r) => (
                       <tr key={`${r.sac}-${r.gstRate}`}>
                         <td className="border border-neutral-200 px-1.5 py-1 font-medium">{r.sac}</td>
-                        <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatWholeNumber(r.taxableValue)}</td>
+                        <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatNumber(r.taxableValue)}</td>
                         <td className="border border-neutral-200 px-1.5 py-1 text-center">{r.gstRate}%</td>
                         {isInter ? (
-                          <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatWholeNumber(r.igst)}</td>
+                          <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatNumber(r.igst)}</td>
                         ) : (
                           <>
-                            <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatWholeNumber(r.cgst)}</td>
-                            <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatWholeNumber(r.sgst)}</td>
+                            <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatNumber(r.cgst)}</td>
+                            <td className="border border-neutral-200 px-1.5 py-1 text-right">{formatNumber(r.sgst)}</td>
                           </>
                         )}
-                        <td className="border border-neutral-200 px-1.5 py-1 text-right font-semibold">{formatWholeNumber(r.totalTax)}</td>
+                        <td className="border border-neutral-200 px-1.5 py-1 text-right font-semibold">{formatNumber(r.totalTax)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -325,7 +361,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
             </div>
 
             {/* Words track the INVOICE VALUE, which is the statutory figure.
-                The payable figure gets its own words in the advice below. */}
+                The payable figure gets its own words in the statement below. */}
             <div className="avoid-break mt-3 rounded-r border-l-2 bg-neutral-50 px-3 py-2" style={{ borderColor: BRAND }}>
               <p className="text-[7pt] font-bold uppercase tracking-[0.14em] text-neutral-500">{L.totalAmountWords}</p>
               <p className="mt-0.5 text-[9.5pt] font-extrabold leading-snug text-neutral-900">{ti.invoiceTotalWords}</p>
@@ -337,10 +373,14 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
             <table className="w-full text-[8.5pt]">
               <tbody className="tabular-nums">
                 <tr className="border-b border-neutral-200 bg-neutral-50">
-                  <td className="px-3 py-2 font-bold text-neutral-800">{L.taxableValue}</td>
-                  <td className="px-3 py-2 text-right font-bold text-neutral-900">₹{formatWholeNumber(ti.taxableValue)}</td>
+                  <td className="px-3 py-2 font-bold text-neutral-800">{ti.taxableLabel || L.taxableValue}</td>
+                  <td className="px-3 py-2 text-right font-bold text-neutral-900">{money(ti.taxableValue)}</td>
                 </tr>
-                {isExempt ? (
+                {ti.taxNote ? (
+                  <tr className="border-b border-neutral-100">
+                    <td colSpan={2} className="px-3 py-1.5 text-[7.5pt] text-neutral-600">{ti.taxNote}</td>
+                  </tr>
+                ) : isExempt ? (
                   <tr className="border-b border-neutral-100">
                     <td className="px-3 py-1.5 text-neutral-600">GST</td>
                     <td className="px-3 py-1.5 text-right text-neutral-600">Exempt / Nil-rated</td>
@@ -348,17 +388,17 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                 ) : isInter ? (
                   <tr className="border-b border-neutral-100">
                     <td className="px-3 py-1.5 text-neutral-600">IGST @ {ti.igstRate}%</td>
-                    <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatWholeNumber(ti.igst)}</td>
+                    <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatNumber(ti.igst)}</td>
                   </tr>
                 ) : (
                   <>
                     <tr className="border-b border-neutral-100">
                       <td className="px-3 py-1.5 text-neutral-600">CGST @ {ti.cgstRate}%</td>
-                      <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatWholeNumber(ti.cgst)}</td>
+                      <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatNumber(ti.cgst)}</td>
                     </tr>
                     <tr className="border-b border-neutral-100">
                       <td className="px-3 py-1.5 text-neutral-600">SGST @ {ti.sgstRate}%</td>
-                      <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatWholeNumber(ti.sgst)}</td>
+                      <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatNumber(ti.sgst)}</td>
                     </tr>
                   </>
                 )}
@@ -385,89 +425,68 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
           </div>
         </section>
 
-        {/* ── Block B: PAYMENT ADVICE — statement of account ─────────────── */}
-        {hasAdvice && (
+        {/* ── Block B: STATEMENT OF ACCOUNT — live from the ledger ────────── */}
+        {statement.show && (
           <section className="avoid-break mt-4 rounded border border-dashed border-neutral-400 bg-neutral-50/70 p-3">
             <div className="mb-1.5 flex items-baseline justify-between gap-4">
               <h3 className="font-montserrat text-[9pt] font-bold uppercase tracking-[0.14em] text-neutral-700">
-                {L.paymentAdviceHead}
+                {D.statementHead}
+                {statement.asOf && (
+                  <span className="ml-2 text-[7.5pt] font-semibold normal-case tracking-normal text-neutral-500">
+                    as of {statement.asOf}
+                  </span>
+                )}
+                {statement.badge && (
+                  <span className="ml-2 rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-[6.5pt] font-bold uppercase tracking-wide text-neutral-600">
+                    {statement.badge}
+                  </span>
+                )}
               </h3>
-              {advice.dueDate && (
-                <span className="text-[7.5pt] font-semibold text-neutral-500">Payment due by {advice.dueDate}</span>
+              {statement.dueDate && statement.state === 'open' && (
+                <span className="text-[7.5pt] font-semibold text-neutral-500">Payment due by {statement.dueDate}</span>
               )}
             </div>
             {/* The caption is what keeps this out of the tax invoice. */}
             <p className="mb-2 text-[6.5pt] italic leading-snug text-neutral-500">{L.adviceDisclaimer}</p>
-
             <table className="w-full text-[8.5pt] tabular-nums align-top">
               <tbody>
-                <tr className="border-b border-neutral-200 align-top">
-                  <td className="py-1.5 text-neutral-700">This invoice ({advice.invoiceNo})</td>
-                  <td className="py-1.5 text-right font-semibold text-neutral-900">{formatNumber(advice.invoiceTotal)}</td>
-                </tr>
-                {advice.tds > 0 && (
-                  <tr className="border-b border-neutral-200">
-                    <td className="py-1.5 align-top text-neutral-700 leading-snug">
-                      <span>Less: TDS @ {advice.tdsRate}% u/s 194C</span>
-                      {/* TDS is the buyer's statutory obligation, not a discount
-                          we grant — labelling it as such avoids the common
-                          misreading that the invoice value is reduced. */}
-                      <div className="text-[6.5pt] italic text-neutral-400 mt-0.5">{L.tdsNote}</div>
-                    </td>
-                    <td className="py-1.5 align-top text-right font-medium text-neutral-700">
-                      &minus;{formatNumber(advice.tds)}
-                    </td>
-                  </tr>
-                )}
-                {advice.received > 0 && (
-                  <tr className="border-b border-neutral-200">
-                    <td className="py-1.5 text-neutral-700">{L.amountReceived}</td>
-                    <td className="py-1.5 text-right font-medium text-neutral-700">&minus;{formatNumber(advice.received)}</td>
-                  </tr>
-                )}
-                {advice.previousBalance !== 0 && (
-                  <>
-                    <tr>
-                      <td className="pt-1.5 text-neutral-700">Previous outstanding</td>
-                      <td className="pt-1.5 text-right font-medium text-neutral-700">
-                        {advice.previousEntries.length === 0 ? formatNumber(advice.previousBalance) : ''}
+                {statement.rows.map((r) => {
+                  const entry = r.kind === 'entry';
+                  const strong = r.kind === 'balance' || r.kind === 'subtotal';
+                  return (
+                    <tr key={r.key} className={entry ? 'align-top' : 'border-b border-neutral-200 align-top'}>
+                      <td className={`leading-snug ${entry ? 'py-0.5 pl-4 text-[7.5pt] text-neutral-500' : 'py-1.5 text-neutral-700'} ${strong ? 'font-semibold' : ''}`}>
+                        {entry ? `\u00B7 ${r.label}` : r.label}
+                        {r.note && <div className="mt-0.5 text-[6.5pt] italic text-neutral-400">{r.note}</div>}
+                      </td>
+                      <td className={`text-right ${entry ? 'py-0.5 text-[7.5pt] text-neutral-600' : 'py-1.5 font-medium text-neutral-800'} ${strong ? 'font-semibold' : ''}`}>
+                        {r.amount === null ? '' : `${r.less ? '\u2212' : ''}${formatNumber(r.amount)}`}
                       </td>
                     </tr>
-                    {/* Itemised, because a bare carried-forward figure is what
-                        clients dispute and auditors query — and it gives the
-                        client something they can actually reconcile. */}
-                    {advice.previousEntries.map((e) => (
-                      <tr key={e.referenceNumber}>
-                        <td className="py-0.5 pl-4 text-[7.5pt] text-neutral-500">
-                          · {e.referenceNumber}
-                          {e.date ? ` · ${e.date}` : ''}
-                        </td>
-                        <td className="py-0.5 text-right text-[7.5pt] text-neutral-600">{formatNumber(e.amount)}</td>
-                      </tr>
-                    ))}
-                    {advice.previousEntries.length > 0 && (
-                      <tr className="border-b border-neutral-200">
-                        <td className="py-1 pl-4 text-[7.5pt] font-semibold text-neutral-600">Sub-total</td>
-                        <td className="py-1 text-right text-[8pt] font-semibold text-neutral-700">
-                          {formatNumber(advice.previousBalance)}
-                        </td>
-                      </tr>
-                    )}
-                  </>
-                )}
-                <tr style={{ background: BRAND }}>
+                  );
+                })}
+                <tr style={{ background: totalBg }}>
                   <td className="px-2 py-2.5 font-montserrat text-[10pt] font-extrabold uppercase tracking-wide text-white">
-                    {L.amountDue}
+                    {statement.total.label}
                   </td>
                   <td className="px-2 py-2.5 text-right font-montserrat text-[13pt] font-extrabold text-white">
-                    {money(advice.totalPayable)}
+                    {statement.total.amount === null ? '' : money(statement.total.amount)}
                   </td>
                 </tr>
               </tbody>
             </table>
-            <p className="mt-1.5 text-[7pt] leading-snug text-neutral-500">
-              <span className="font-bold uppercase tracking-wide">{L.payableWords}:</span> {advice.totalPayableWords}
-            </p>
+            {statement.remark && <p className="mt-1.5 text-[7.5pt] font-semibold text-neutral-700">{statement.remark}</p>}
+            {statement.total.words && (
+              <p className="mt-1.5 text-[7pt] leading-snug text-neutral-500">
+                <span className="font-bold uppercase tracking-wide">{L.payableWords}:</span> {statement.total.words}
+              </p>
+            )}
+            {statement.interest && (
+              <p className="mt-1.5 text-[7pt] leading-snug text-neutral-600">
+                <span className="font-semibold">{statement.interest.label}: {money(statement.interest.amount)}</span>
+                <span className="block text-[6.5pt] italic text-neutral-400">{statement.interest.note}</span>
+              </p>
+            )}
           </section>
         )}
 

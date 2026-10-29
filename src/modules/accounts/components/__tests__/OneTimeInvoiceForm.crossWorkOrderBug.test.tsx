@@ -9,19 +9,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
  * Property 1 (Bug Condition): Cross-Work-Order Auto-Fill Bug.
  * **Validates: Requirements 1.1, 1.2, 1.3**
  *
- * THIS TEST IS EXPECTED TO FAIL ON UNFIXED CODE. `handleSelectWorkOrder` in
- * OneTimeInvoiceForm.tsx currently queries `receivables` filtered only by
- * `client_name` (no work-order scoping — the `work_order_id` column does not
- * exist yet) and unconditionally calls
- * `setPreviousDue(String(Math.round(total)))` with whatever balance the
- * query returns. A failure here CONFIRMS the bug: an outstanding invoice
- * belonging to a different work order gets silently folded into the new
- * invoice's Previous Due amount.
- *
- * Do not "fix" this test or the component when it fails — a failure is the
- * expected/successful outcome for this exploratory step. It will start
- * passing once the fix (removing the unconditional setPreviousDue call and
- * scoping the query by work_order_id) is implemented in a later task.
+ * The selected work order is queried through the `work_order_id`-scoped
+ * helper, and a fresh invoice leaves Previous Due empty until the user opts
+ * in to include the displayed outstanding balance.
  */
 
 // ---- Supabase mock --------------------------------------------------------

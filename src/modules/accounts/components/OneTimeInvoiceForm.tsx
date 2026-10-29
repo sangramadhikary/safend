@@ -15,8 +15,19 @@ import { ArrowLeft, Loader2, Info, Plus, Trash2, EyeOff, Eye, Search } from 'luc
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
-import { fetchWorkOrderOutstandingInvoices, computeOutstandingFromRows, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { peekNextInvoiceNumber } from '@/services/invoiceNumberService';
+import {
+  createInvoice as raiseInvoice, isDraftInvoice, INVOICE_NUMBER_PLACEHOLDER,
+  type CreateInvoiceInput, type PaymentMode,
+} from '@/services/invoiceLedgerService';
+import { planReceipt, resolvePreviousDue, round2, sumMoney } from '@/lib/invoice/ledger';
+import { auditActions } from '@/utils/auditLog';
+import {
+  fetchWorkOrderOutstandingInvoices, computeOutstandingFromRows, sumOutstanding,
+  OUTSTANDING_COLUMNS, type OutstandingInvoice,
+} from '@/lib/invoice/outstanding';
 import { deriveServiceLines, daysInServicePeriod } from '@/lib/invoice/service-line-derivation';
 import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, extractStateCode } from '@/lib/tax/gst';
 import { formatINRShort } from '@/lib/format';
@@ -112,6 +123,16 @@ interface OneTimeInvoiceFormProps {
 
 interface StaffUser { id: string; name: string; role: string; }
 
+/** Standard 7-day payment term: today + 7 days (yyyy-mm-dd). */
+function defaultDueDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  return d.toISOString().split('T')[0];
+}
+
+/** Stable key for an outstanding invoice (hand-built rows may have no id). */
+const outstandingKey = (inv: OutstandingInvoice) => inv.id ?? `ref:${inv.ref}`;
+
 // Amount = (WO Price/Month ÷ Days) × Duties — same formula as calculations.ts
 function lineAmount(l: ServiceLine): number {
   const woPrice = parseFloat(l.woPricePerMonth) || 0;
@@ -136,7 +157,10 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [dueDate,       setDueDate]       = useState('');
   const [paymentStatus, setPaymentStatus] = useState<'due'|'paid'>('due');
-  const [invoiceNumInfo, setInvoiceNumInfo] = useState<{ isReused: boolean; reusedFrom?: string } | null>(null);
+  // Only never-issued, unpaid drafts can be edited; anything else is frozen by
+  // the database and is shown read-only.
+  const isDraftEdit = !!editEntry && isDraftInvoice(editEntry);
+  const readOnly = !!editEntry && !isDraftEdit;
   // Store Place of Supply in the dropdown's own value format (state label) so
   // <SelectValue /> renders it. Stored values elsewhere use "21-Odisha"; the
   // dropdown items use "21 - Odisha", so we normalise via the state code.
@@ -169,6 +193,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const [tdsRate,    setTdsRate]    = useState('2');
   const [previousDue, setPreviousDue] = useState('');
   const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
+  // Keys (outstandingKey) of the listed invoices whose balances the previous due carries.
+  const [includedKeys, setIncludedKeys] = useState<string[]>([]);
 
   // ── Service lines ─────────────────────────────────────────────────────────
   const [lines, setLines] = useState<ServiceLine[]>([newLine()]);
@@ -216,16 +242,15 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const [chequeNumber,       setChequeNumber]       = useState('');
   const [chequeDate,         setChequeDate]         = useState('');
   const [bankAccountId,      setBankAccountId]      = useState('');
+  const [depositAccountId,   setDepositAccountId]   = useState('');
   const [transactionNumber,  setTransactionNumber]  = useState('');
   const [transactionDatetime,setTransactionDatetime]= useState('');
 
-  // Auto-generate invoice number on open (new invoices only)
+  // Preview the next invoice number on open (new invoices only). It is
+  // provisional: create_invoice allocates the real number when saving.
   useEffect(() => {
     if (open && !editEntry && !invoiceNumber) {
-      peekNextInvoiceNumber().then(({ number }) => {
-        setInvoiceNumber(number);
-        setInvoiceNumInfo(null);
-      }).catch(() => {});
+      peekNextInvoiceNumber().then(({ number }) => setInvoiceNumber(number)).catch(() => {});
     }
   }, [open]);
 
@@ -247,17 +272,23 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       setClientAddress(addrMatch ? addrMatch[1].trim() : '');
       setInvoiceNumber(editEntry.reference_number || '');
       setDueDate(editEntry.due_date || '');
-      setPaymentStatus(editEntry.status === 'received' ? 'paid' : 'due');
+      // Payments are recorded against the invoice, never by editing it.
+      setPaymentStatus('due');
       setGstPercent(gstMatch ? gstMatch[1] : '18');
       setTdsEnabled(!!tdsMatch);
       setTdsRate(tdsMatch ? tdsMatch[1] : '2');
-      // Prefer the stored previous_balance column; fall back to the notes regex
-      // for legacy invoices saved before the column was populated.
+      // An issued invoice shows the previous due it was raised with: the
+      // previous_balance column, else the notes of legacy invoices. A draft
+      // starts from its own opening balance; the live balances of the invoices
+      // it carries are added when they load (below), so the figure is current.
       const storedPrevBalance = editEntry.previous_balance != null ? Number(editEntry.previous_balance) : null;
+      const openingBalance = Number(editEntry.opening_balance) || 0;
       setPreviousDue(
-        storedPrevBalance && storedPrevBalance > 0
-          ? String(storedPrevBalance)
-          : (prevMatch ? prevMatch[1].replace(/,/g, '') : '')
+        isDraftInvoice(editEntry)
+          ? (openingBalance > 0 ? String(openingBalance) : '')
+          : storedPrevBalance && storedPrevBalance > 0
+            ? String(storedPrevBalance)
+            : (prevMatch ? prevMatch[1].replace(/,/g, '') : '')
       );
       // Restore Place of Supply from proper DB column first, then notes fallback,
       // normalised to the dropdown's label format so it displays.
@@ -338,15 +369,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
     }
   }, [open, editEntry]);
 
-  // When EDITING an existing invoice, surface the SAME WORK ORDER's other
-  // outstanding invoices so the previous due can be reviewed/added. Unlike the
-  // new-invoice flow this does NOT auto-fill the amount (the invoice may
-  // already carry a previous balance, and re-adding could double up) — it only
-  // populates the suggestion panel; the user opts in via the "Include previous
-  // balance" button. The invoice being edited is excluded from its own
-  // detection. Invoices with no work order have no scope to carry from.
+  // When EDITING a draft, list the SAME WORK ORDER's other unpaid invoices with
+  // their live balances. The ones the draft already carries are ticked and
+  // added to its opening balance, so the previous due shown is today's figure.
+  // The draft itself is excluded. Issued invoices are read-only, and invoices
+  // with no work order have no scope to carry from.
   useEffect(() => {
-    if (!open || !editEntry || !editEntry.work_order_id) return;
+    if (!open || !editEntry || !editEntry.work_order_id || !isDraftInvoice(editEntry)) return;
     let cancelled = false;
     (async () => {
       try {
@@ -355,7 +384,19 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           editEntry.work_order_id,
           editEntry.reference_number || null,
         );
-        if (!cancelled) setOutstandingInvoices(unpaid);
+        if (cancelled) return;
+        setOutstandingInvoices(unpaid);
+        const carried: any[] = Array.isArray(editEntry.previous_balance_breakdown) ? editEntry.previous_balance_breakdown : [];
+        const carriesNothing = carried.length === 0 && !(Number(editEntry.opening_balance) > 0);
+        // A draft that carries nothing starts like a new invoice: all ticked,
+        // nothing included until the user opts in.
+        const ticked = carriesNothing ? unpaid : unpaid.filter((inv) => carried.some((b) =>
+          (b?.id && b.id === inv.id) || (b?.referenceNumber ?? b?.reference_number) === inv.ref));
+        setIncludedKeys(ticked.map(outstandingKey));
+        if (carried.length > 0) {
+          const total = sumMoney([editEntry.opening_balance, ...ticked.map((inv) => inv.amount)]);
+          setPreviousDue(total > 0 ? String(total) : '');
+        }
       } catch { /* non-critical — user can enter the amount manually */ }
     })();
     return () => { cancelled = true; };
@@ -368,14 +409,14 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       setInvoiceNumber(''); setDueDate('');
       setPaymentStatus('due'); setGstPercent('18');
       setTdsEnabled(false); setTdsRate('2'); setPreviousDue('');
-      setOutstandingInvoices([]);
+      setOutstandingInvoices([]); setIncludedKeys([]);
       setCustomerMode('existing'); setSelectedWorkOrderId('');
       setPlaceOfSupply(posLabelFor(DEFAULT_PLACE_OF_SUPPLY));
       setServicePeriodMode('month'); setServicePeriodMonth('');
       setServicePeriodStart(''); setServicePeriodEnd('');
       setLines([newLine()]);
       setPaymentMode('Bank Transfer'); setReceivedBy(''); setThirdPartyName('');
-      setChequeNumber(''); setChequeDate(''); setBankAccountId('');
+      setChequeNumber(''); setChequeDate(''); setBankAccountId(''); setDepositAccountId('');
       setTransactionNumber(''); setTransactionDatetime('');
     }
   }, [open]);
@@ -396,12 +437,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   // and no due date is set yet (standard 7-day payment term).
   useEffect(() => {
     if (!open || editEntry) return;
-    setDueDate(prev => {
-      if (prev) return prev;
-      const d = new Date();
-      d.setDate(d.getDate() + 7);
-      return d.toISOString().split('T')[0]; // yyyy-mm-dd for <input type="date">
-    });
+    setDueDate(prev => prev || defaultDueDate());
   }, [open, editEntry]);
 
   // Maps operational_post service_instances keys → SERVICE_OPTIONS labels
@@ -447,26 +483,24 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
 
       // Derive, per work order:
       //  (a) whether an invoice was created THIS MONTH, and
-      //  (b) the outstanding due still owed — using the SAME dedup/amount logic
-      //      as the carry-forward feature (computeOutstandingFromRows), so the
-      //      figure never double-counts a balance already rolled into a newer
-      //      invoice.
+      //  (b) the outstanding due still owed — the live balances of its unpaid
+      //      invoices, computed exactly as the carry-forward does
+      //      (computeOutstandingFromRows over the ledger columns).
       const invoicesByWo: Record<string, { totalDue: number; invoicedThisMonth: boolean }> = {};
       if (workOrderIds.length > 0) {
         const { data: invData } = await supabaseClient
           .from('receivables')
-          .select('work_order_id, reference_number, total_amount, previous_balance, previous_balance_breakdown, due_date, status, notes, created_at')
+          .select(OUTSTANDING_COLUMNS)
           .eq('category', 'Invoices')
           .in('work_order_id', workOrderIds);
 
         const now = new Date();
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const UNPAID = ['created', 'issued', 'open', 'pending', 'overdue'];
 
-        // Group all invoices for a work order so the outstanding calc sees the
-        // whole set (needed for roll-forward dedup).
+        // Group all invoices for a work order. (The column list is a runtime
+        // string, so supabase-js cannot infer the row type.)
         const rowsByWo: Record<string, any[]> = {};
-        for (const inv of (invData ?? [])) {
+        for (const inv of ((invData ?? []) as any[])) {
           const woId = inv.work_order_id;
           if (!woId) continue;
           (rowsByWo[woId] ||= []).push(inv);
@@ -479,8 +513,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         }
 
         for (const [woId, rows] of Object.entries(rowsByWo)) {
-          const unpaidRows = rows.filter((r: any) => UNPAID.includes(String(r.status)));
-          invoicesByWo[woId].totalDue = sumOutstanding(computeOutstandingFromRows(unpaidRows, null, now));
+          invoicesByWo[woId].totalDue = sumOutstanding(computeOutstandingFromRows(rows, null, now));
         }
       }
 
@@ -670,12 +703,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       }
     }
 
-    // Fetch all unpaid invoices for this client
+    // Fetch the unpaid invoices of THIS work order (billing is per work order,
+    // not per client). They are listed, all ticked, but nothing is carried
+    // until the user includes the previous balance.
     setOutstandingInvoices([]);
+    setIncludedKeys([]);
     setPreviousDue('');
     try {
-      // Scope the carry-forward to THIS work order only (billing is per work
-      // order, not per client).
       const unpaid = await fetchWorkOrderOutstandingInvoices(
         supabaseClient,
         woId,
@@ -684,14 +718,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
 
       if (unpaid.length > 0) {
         setOutstandingInvoices(unpaid);
-        // Auto-carry the outstanding balance into the new invoice so an
-        // overdue client's dues are added by default. The user can still
-        // override the amount in the Previous Due field. We only auto-fill
-        // when raising a fresh invoice (not editing) and the field is empty.
-        if (!editEntry) {
-          const outstandingTotal = Math.round(unpaid.reduce((s, r) => s + r.amount, 0));
-          if (outstandingTotal > 0) setPreviousDue(String(outstandingTotal));
-        }
+        setIncludedKeys(unpaid.map(outstandingKey));
       }
     } catch { /* non-critical — user can enter manually */ }
   };
@@ -747,25 +774,48 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const prevDue     = parseFloat(previousDue) || 0;
   const netPayable  = invoiceTotal - tdsAmt + prevDue;
 
+  // ── Previous due = ticked invoices + opening balance ──────────────────────
+  // The ticked invoices stay the debtors of their own balances (this invoice
+  // only lists them). Whatever the previous due adds beyond them becomes this
+  // invoice's opening balance: dues that have no invoice on file.
+  const tickedInvoices  = outstandingInvoices.filter(inv => includedKeys.includes(outstandingKey(inv)));
+  const carriedInvoices = prevDue > 0 ? tickedInvoices : [];
+  const carriedTotal    = sumOutstanding(carriedInvoices);
+  // A draft being edited keeps the opening balance it already carries.
+  const draftOpening = isDraftEdit ? Number(editEntry.opening_balance) || 0 : 0;
+  // "Include previous balance" fills in this figure rounded to the rupee, which
+  // means exactly these balances, not a rupee more or less.
+  const includedPrevDue = sumMoney([sumOutstanding(tickedInvoices), draftOpening]);
+  const typedPrevDue = previousDue.trim() === String(Math.round(includedPrevDue)) ? includedPrevDue : prevDue;
+  const { openingBalance, error: previousDueError } = resolvePreviousDue(typedPrevDue, carriedTotal);
+  const previousBalanceTotal = sumMoney([carriedTotal, openingBalance]);
+
+  // A "Paid" invoice is settled by one receipt that also clears the carried
+  // invoices (oldest first): their balances + this invoice + its opening
+  // balance, less the TDS withheld on this invoice.
+  const tdsOnInvoice = round2(tdsAmt);
+  const receiptCash  = sumMoney([...carriedInvoices.map(inv => inv.amount), invoiceTotal, openingBalance, -tdsOnInvoice]);
+
+  // Ticking or unticking an invoice while a previous due is carried moves its
+  // balance in or out of that figure, so the opening-balance part only changes
+  // when the user types a different amount.
+  const toggleIncluded = (inv: OutstandingInvoice, include: boolean) => {
+    const key = outstandingKey(inv);
+    setIncludedKeys(prev => include ? [...prev.filter(k => k !== key), key] : prev.filter(k => k !== key));
+    if (prevDue > 0) {
+      const next = Math.max(0, sumMoney([prevDue, include ? inv.amount : -inv.amount]));
+      setPreviousDue(next > 0 ? String(next) : '');
+    }
+  };
+
   // ── Save mutation ─────────────────────────────────────────────────────────
   const createInvoice = useMutation({
     mutationFn: async () => {
-      if (!clientName.trim() || !invoiceNumber.trim()) throw new Error('Client Name and Invoice Number are required.');
+      if (readOnly) throw new Error('This invoice has been issued or paid and can no longer be edited.');
+      if (!clientName.trim()) throw new Error('Client Name is required.');
       if (lines.every(l => !l.serviceType)) throw new Error('Add at least one service line.');
-
-      // Allocate the real invoice number atomically at save time (not on form open).
-      // The number shown on the form was a preview from peekNextInvoiceNumber.
-      // Only allocate for new invoices, not edits.
-      let finalInvoiceNumber = invoiceNumber;
-      if (!editEntry?.id) {
-        const allocated = await getNextInvoiceNumber();
-        finalInvoiceNumber = allocated.number;
-        setInvoiceNumber(finalInvoiceNumber);
-      }
-
-      // Lifecycle starts at 'created' (downloading the PDF promotes to 'issued').
-      // A paid-on-creation invoice is terminal 'received'.
-      const status = paymentStatus === 'paid' ? 'received' : 'created';
+      if (invoiceTotal <= 0) throw new Error('The invoice total must be greater than zero.');
+      if (previousDueError) throw new Error(previousDueError);
 
       const lineItems = lines.filter(l => l.serviceType).map(l => {
         const baseService = l.serviceType === 'Other' ? l.customService : l.serviceType;
@@ -800,17 +850,23 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
 
       const { gstType } = resolveGstConfig(placeOfSupply, gstPct);
 
-      const payload = {
-        category: 'Invoices',
-        description: `${serviceLabel} | Inv#: ${finalInvoiceNumber}`,
+      // Columns shared by create and draft update. Status, paid amounts and the
+      // invoice number are never written from here: the database owns them.
+      const fields = {
+        // create_invoice replaces the placeholder with the number it allocates;
+        // a draft keeps the number it already has.
+        description: editEntry
+          ? (editEntry.reference_number ? `${serviceLabel} | Inv#: ${editEntry.reference_number}` : serviceLabel)
+          : `${serviceLabel} | Inv#: ${INVOICE_NUMBER_PLACEHOLDER}`,
         client_name: clientName.trim(),
         amount: subTotal,
         gst_amount: gstAmt || null,
         total_amount: invoiceTotal,
-        due_date: dueDate || null,
-        reference_number: finalInvoiceNumber,
-        status,
+        // A due date is required; fall back to the standard 7-day term.
+        due_date: dueDate || defaultDueDate(),
         line_items: lineItems,
+        client_gstin: clientGstin.trim().toUpperCase() || null,
+        client_address: clientAddress.trim() || null,
         // ── Persist as proper DB columns ──────────────────────────────────
         // Store the canonical "code-Name" form (the dropdown works in "code - Name").
         place_of_supply: (() => {
@@ -821,70 +877,113 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         gst_type: gstPct === 0 ? 'exempt' : gstType,
         service_period_start: resolvedPeriodStart,
         service_period_end: resolvedPeriodEnd,
-        work_order_id: selectedWorkOrderId || null,
-        previous_balance: prevDue > 0 ? prevDue : null,
-        // Structured breakdown so the PDF/payment advice can itemise the
-        // carried-forward dues (each prior unpaid invoice), not just a lump sum.
-        previous_balance_breakdown:
-          prevDue > 0 && outstandingInvoices.length > 0
-            ? outstandingInvoices.map(i => ({
-                referenceNumber: i.ref,
-                date: i.due_date || null,
-                amount: i.amount,
-              }))
-            : null,
+        // Informational ("Previous Due" on the advice): the carried invoices
+        // keep their own balances; only opening_balance is owed on this invoice.
+        previous_balance: previousBalanceTotal > 0 ? previousBalanceTotal : null,
+        previous_balance_breakdown: carriedInvoices.length > 0
+          ? carriedInvoices.map(i => ({ id: i.id, referenceNumber: i.ref, date: i.due_date || null, amount: i.amount }))
+          : null,
+        opening_balance: openingBalance,
+        tds_rate: tdsEnabled ? (parseFloat(tdsRate) || 0) : null,
         notes: [
           `GST: ${gstPercent}%`,
           tdsEnabled ? `TDS: ${tdsRate}%` : '',
-          prevDue > 0 ? `Previous Due: ₹${prevDue.toLocaleString('en-IN')}` : '',
-          prevDue > 0 && outstandingInvoices.length > 0
-            ? `Outstanding: ${outstandingInvoices.map(i => `${i.ref} (₹${i.amount.toLocaleString('en-IN')})`).join(', ')}`
+          previousBalanceTotal > 0 ? `Previous Due: ₹${previousBalanceTotal.toLocaleString('en-IN')}` : '',
+          carriedInvoices.length > 0
+            ? `Outstanding: ${carriedInvoices.map(i => `${i.ref} (₹${i.amount.toLocaleString('en-IN')})`).join(', ')}`
             : '',
           clientGstin ? `GSTIN: ${clientGstin}` : '',
           clientAddress ? `Addr: ${clientAddress}` : '',
         ].filter(Boolean).join(' | '),
       };
+      // Never detach an invoice from its work order; carry-forward depends on it.
+      const workOrderId: string | null = selectedWorkOrderId || editEntry?.work_order_id || null;
 
-      // UPDATE existing invoice
+      // UPDATE a draft directly (allowed until it is issued or paid; the
+      // database rejects edits to anything else).
       if (editEntry?.id) {
-        const { error } = await supabaseClient.from('receivables').update(payload).eq('id', editEntry.id);
+        const update = workOrderId ? { ...fields, work_order_id: workOrderId } : fields;
+        const { data: updated, error } = await supabaseClient
+          .from('receivables').update(update).eq('id', editEntry.id).select('id');
         if (error) throw new Error(error.message);
-        return { id: editEntry.id };
-      }
-
-      // CREATE new invoice
-      const { data: receivable, error } = await supabaseClient.from('receivables').insert(payload).select().single();
-      if (error) throw new Error(error.message);
-
-      if (paymentStatus === 'paid' && receivable) {
-        const resolvedBy = receivedBy === '__third_party__' ? thirdPartyName || 'Authorized 3rd Person' : receivedBy || null;
-        try {
-          await supabaseClient.from('receivable_payments').insert({
-            receivable_id: receivable.id, amount: invoiceTotal, mode: paymentMode,
-            received_by: resolvedBy, cheque_number: chequeNumber || null,
-            cheque_date: chequeDate || null, bank_account_id: bankAccountId || null,
-            transaction_number: transactionNumber || null,
-            transaction_datetime: transactionDatetime || null,
-            is_partial: false, balance_amount: 0, created_at: new Date().toISOString(),
-          });
-        } catch { /* table may not exist */ }
-        if (paymentMode === 'Bank Transfer' && bankAccountId) {
-          try {
-            await supabaseClient.from('bank_transactions').insert({
-              account_id: bankAccountId,
-              transaction_date: transactionDatetime ? transactionDatetime.split('T')[0] : new Date().toISOString().split('T')[0],
-              type: 'credit', amount: invoiceTotal, category: 'client_receipt',
-              description: `Receipt: ${serviceLabel} (${clientName})`,
-              reference_number: transactionNumber || null, payment_mode: 'neft', party_name: clientName,
-            });
-          } catch { /* continue */ }
+        if (!updated || updated.length === 0) {
+          throw new Error('The invoice was not updated. It may have been removed, or you may not have permission to edit it.');
         }
+        return { reference_number: (editEntry.reference_number ?? null) as string | null, paid: false };
       }
-      return receivable;
+
+      // CREATE: the database allocates the number and, for an invoice raised as
+      // paid, records the receipt in the same transaction.
+      let payment: CreateInvoiceInput['payment'] = null;
+      if (paymentStatus === 'paid') {
+        const receivedByName = receivedBy === '__third_party__'
+          ? (thirdPartyName.trim() || 'Authorized 3rd Person')
+          : receivedBy;
+        // The same instrument checks record_receipt applies.
+        if (paymentMode === 'Bank Transfer' && (!bankAccountId || !transactionNumber.trim())) {
+          throw new Error('Select the bank account and enter the transaction reference (UTR).');
+        }
+        if (paymentMode === 'Cheque' && (!chequeNumber.trim() || !chequeDate)) {
+          throw new Error('Enter the cheque number and cheque date.');
+        }
+        if (paymentMode === 'Cheque' && !depositAccountId) {
+          throw new Error('Select the bank account the cheque will be deposited into.');
+        }
+        if (paymentMode === 'Cash' && !receivedByName) throw new Error('Select who received the cash.');
+
+        // Preview the allocation with the shared rules so a receipt the
+        // database would refuse is reported before anything is saved.
+        const NEW_INVOICE = '__new__';
+        const plan = planReceipt({
+          target: {
+            id: NEW_INVOICE, reference_number: invoiceNumber || 'being raised', status: 'created',
+            amount: subTotal, total_amount: invoiceTotal, opening_balance: openingBalance, paid_amount: 0,
+            tds_rate: tdsEnabled ? (parseFloat(tdsRate) || 0) : null,
+          },
+          carried: carriedInvoices.map(inv => ({
+            id: inv.id ?? outstandingKey(inv), reference_number: inv.ref, created_at: inv.created_at,
+            status: 'open', total_amount: inv.amount,
+          })),
+          cash: receiptCash,
+          tds: tdsOnInvoice > 0 ? { [NEW_INVOICE]: tdsOnInvoice } : {},
+        });
+        if (plan.errors.length > 0) throw new Error(plan.errors[0]);
+
+        payment = {
+          cash_amount: receiptCash,
+          tds_amount: tdsOnInvoice > 0 ? tdsOnInvoice : null,
+          carried_ids: carriedInvoices.map(inv => inv.id).filter((id): id is string => !!id),
+          mode: paymentMode as PaymentMode,
+          received_by: paymentMode === 'Bank Transfer' ? null : (receivedByName || null),
+          cheque_number: paymentMode === 'Cheque' ? chequeNumber.trim() : null,
+          cheque_date: paymentMode === 'Cheque' ? chequeDate : null,
+          deposit_account_id: paymentMode === 'Cheque' ? depositAccountId : null,
+          bank_account_id: paymentMode === 'Bank Transfer' ? bankAccountId : null,
+          transaction_number: paymentMode === 'Bank Transfer' ? transactionNumber.trim() : null,
+          transaction_datetime: paymentMode === 'Bank Transfer' && transactionDatetime
+            ? new Date(transactionDatetime).toISOString() : null,
+          // Date the receipt as entered, not by the UTC instant.
+          payment_date: paymentMode === 'Bank Transfer' && transactionDatetime ? transactionDatetime.slice(0, 10) : null,
+        };
+      }
+
+      const created = await raiseInvoice({ ...fields, work_order_id: workOrderId, payment });
+      void auditActions.invoiceCreated(
+        created.reference_number || created.id,
+        created.client_name ?? undefined,
+        Number(created.total_amount) || invoiceTotal,
+      );
+      return { reference_number: created.reference_number as string | null, paid: !!payment };
     },
-    onSuccess: () => {
+    onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ['receivables'] });
-      toast({ title: editEntry ? 'Invoice Updated' : 'Invoice Created', description: paymentStatus === 'paid' ? 'Invoice created and payment recorded.' : editEntry ? 'Invoice updated successfully.' : 'Invoice raised successfully.' });
+      const label = saved.reference_number ? `Invoice ${saved.reference_number}` : 'Invoice';
+      toast({
+        title: editEntry ? 'Invoice Updated' : 'Invoice Created',
+        description: editEntry
+          ? `${label} updated successfully.`
+          : saved.paid ? `${label} created and payment recorded.` : `${label} raised successfully.`,
+      });
       onSuccess();
     },
     onError: (error: any) => { toast({ title: 'Error', description: error.message, variant: 'destructive' }); },
@@ -921,7 +1020,18 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           <p className="text-sm text-muted-foreground ml-10">Fill in client and service details to create an invoice</p>
         </DialogHeader>
 
-        <div className="space-y-6 py-2">
+        {readOnly && (
+          <Alert>
+            <Info className="h-4 w-4" />
+            <AlertDescription className="text-sm">
+              Invoice {editEntry?.reference_number || ''} has been issued or paid, so it can no longer be edited.
+              To correct it, cancel it and raise a new invoice, or raise a credit or debit note.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* A disabled fieldset makes every control read-only for a frozen invoice. */}
+        <fieldset disabled={readOnly} className="space-y-6 py-2 min-w-0">
 
           {/* ── CUSTOMER TYPE TOGGLE ───────────────────────────────────── */}
           <section>
@@ -1111,10 +1221,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
             <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Invoice Details</h3>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
-                <Label>Invoice Number *</Label>
-                <Input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)} placeholder="Auto-generated" className="font-mono" />
-                {invoiceNumInfo?.isReused && (
-                  <p className="text-xs text-blue-600 flex items-center gap-1 mt-1"><Info className="h-3 w-3" /> Reusing cancelled invoice number</p>
+                <Label>Invoice Number</Label>
+                <Input value={invoiceNumber} readOnly placeholder="Assigned when saved" className="font-mono bg-muted/40" />
+                {!editEntry && (
+                  <p className="text-[11px] text-muted-foreground flex items-center gap-1 mt-1">
+                    <Info className="h-3 w-3" /> Provisional. The number is assigned in sequence when the invoice is saved,
+                    and the invoice is dated today.
+                  </p>
                 )}
               </div>
               <div className="space-y-1">
@@ -1437,9 +1550,23 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                   className="w-40 text-right"
                   placeholder="0"
                   value={previousDue}
-                  onChange={e => { setPreviousDue(e.target.value); if (!e.target.value) setOutstandingInvoices([]); }}
+                  onChange={e => setPreviousDue(e.target.value)}
                 />
               </div>
+
+              {/* How the previous due will be recorded (not shown for a frozen invoice) */}
+              {readOnly ? null : previousDueError ? (
+                <p className="text-[11px] font-medium text-red-600">{previousDueError}</p>
+              ) : prevDue > 0 && (
+                <p className="text-[11px] text-muted-foreground">
+                  {carriedInvoices.length > 0 && (
+                    <>₹{carriedTotal.toLocaleString('en-IN')} is still owed on the {carriedInvoices.length} ticked invoice{carriedInvoices.length !== 1 ? 's' : ''} below and stays owed there. </>
+                  )}
+                  {openingBalance > 0 && (
+                    <>₹{openingBalance.toLocaleString('en-IN')} becomes an opening balance owed on this invoice (dues with no invoice on file).</>
+                  )}
+                </p>
+              )}
 
               {/* Auto-fetched breakdown */}
               {outstandingInvoices.length > 0 && (
@@ -1449,12 +1576,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                       Outstanding invoices detected — {outstandingInvoices.length} unpaid
                     </span>
                     {(() => {
-                      const panelTotal = String(Math.round(outstandingInvoices.reduce((s, r) => s + r.amount, 0)));
-                      const alreadyIncluded = previousDue === panelTotal;
+                      const panelTotal = String(Math.round(includedPrevDue));
+                      const alreadyIncluded = previousDue === panelTotal
+                        || (prevDue > 0 && Math.abs(prevDue - includedPrevDue) < 0.005);
                       return (
                         <button
                           type="button"
-                          disabled={alreadyIncluded}
+                          disabled={alreadyIncluded || tickedInvoices.length === 0}
                           onClick={() => setPreviousDue(panelTotal)}
                           className={`text-[11px] px-2 py-0.5 rounded font-medium transition-colors ${
                             alreadyIncluded
@@ -1467,12 +1595,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                       );
                     })()}
                     <span className="text-[11px] font-bold text-amber-900 dark:text-amber-100">
-                      ₹{outstandingInvoices.reduce((s, r) => s + r.amount, 0).toLocaleString('en-IN')}
+                      ₹{sumOutstanding(outstandingInvoices).toLocaleString('en-IN')}
                     </span>
                   </div>
                   <Table className="text-[11px]">
                     <TableHeader>
                       <TableRow className="border-b border-amber-200 dark:border-amber-800">
+                        <TableHead className="h-auto w-8 px-3 py-1" />
                         <TableHead className="h-auto px-3 py-1 text-amber-700 dark:text-amber-300 font-semibold">Invoice #</TableHead>
                         <TableHead className="h-auto px-3 py-1 text-center text-amber-700 dark:text-amber-300 font-semibold">Due Date</TableHead>
                         <TableHead className="h-auto px-3 py-1 text-center text-amber-700 dark:text-amber-300 font-semibold">Status</TableHead>
@@ -1482,6 +1611,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                     <TableBody>
                       {outstandingInvoices.map((inv, i) => (
                         <TableRow key={i} className="border-b border-amber-100 dark:border-amber-900/50 last:border-0">
+                          <TableCell className="px-3 py-1">
+                            <Checkbox
+                              checked={includedKeys.includes(outstandingKey(inv))}
+                              onCheckedChange={(v) => toggleIncluded(inv, v === true)}
+                              aria-label={`Carry ${inv.ref} in the previous due`}
+                            />
+                          </TableCell>
                           <TableCell className="px-3 py-1 font-mono font-medium text-amber-900 dark:text-amber-100">{inv.ref}</TableCell>
                           <TableCell className="px-3 py-1 text-center text-amber-700 dark:text-amber-300">
                             {inv.due_date ? new Date(inv.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
@@ -1532,6 +1668,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                 <Label>Due Date</Label>
                 <Input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
               </div>
+              {/* Payments on an existing invoice are recorded against it, not by editing it. */}
+              {!editEntry && (
               <div className="space-y-1">
                 <Label>Invoice Status</Label>
                 <div className="grid grid-cols-2 gap-2 mt-1">
@@ -1547,13 +1685,22 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                   ))}
                 </div>
               </div>
+              )}
             </div>
           </section>
 
           {/* ── PAYMENT DETAILS ──────────────────────────────────────── */}
-          {paymentStatus === 'paid' && (
+          {paymentStatus === 'paid' && !editEntry && (
             <section className="space-y-3 p-4 rounded-lg border border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-800">
               <h3 className="text-xs font-semibold text-green-800 dark:text-green-200 uppercase tracking-wider">Payment Received Details</h3>
+              <p className="text-sm text-green-900 dark:text-green-100">
+                Amount received: <span className="font-semibold">₹{receiptCash.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                {carriedInvoices.length > 0 && (
+                  <span className="block text-[11px] text-green-800/80 dark:text-green-200/80">
+                    Also settles {carriedInvoices.map(i => i.ref).join(', ')} (oldest first), then this invoice.
+                  </span>
+                )}
+              </p>
               <div className="grid grid-cols-3 gap-2">
                 {['Cash', 'Cheque', 'Bank Transfer'].map(m => (
                   <button key={m} type="button" onClick={() => setPaymentMode(m)}
@@ -1573,11 +1720,22 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                 </div>
               )}
               {paymentMode === 'Cheque' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1"><Label className="text-xs">Cheque Number</Label>
-                    <Input value={chequeNumber} onChange={e => setChequeNumber(e.target.value)} placeholder="000456" /></div>
-                  <div className="space-y-1"><Label className="text-xs">Cheque Date</Label>
-                    <Input type="date" value={chequeDate} onChange={e => setChequeDate(e.target.value)} /></div>
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1"><Label className="text-xs">Cheque Number</Label>
+                      <Input value={chequeNumber} onChange={e => setChequeNumber(e.target.value)} placeholder="000456" /></div>
+                    <div className="space-y-1"><Label className="text-xs">Cheque Date</Label>
+                      <Input type="date" value={chequeDate} onChange={e => setChequeDate(e.target.value)} /></div>
+                  </div>
+                  <div className="space-y-1"><Label className="text-xs">Deposit to Bank Account</Label>
+                    <Select value={depositAccountId} onValueChange={setDepositAccountId}>
+                      <SelectTrigger><SelectValue placeholder="Select bank account" /></SelectTrigger>
+                      <SelectContent>
+                        {bankAccounts.length === 0 ? <div className="px-2 py-2 text-xs text-muted-foreground">No bank accounts found.</div>
+                          : bankAccounts.map(b => <SelectItem key={b.id} value={b.id}>{b.account_name} — {b.bank_name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
               )}
               {paymentMode === 'Bank Transfer' && (
@@ -1601,11 +1759,11 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
               )}
             </section>
           )}
-        </div>
+        </fieldset>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => createInvoice.mutate()} disabled={createInvoice.isPending}
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{readOnly ? 'Close' : 'Cancel'}</Button>
+          <Button onClick={() => createInvoice.mutate()} disabled={createInvoice.isPending || readOnly || !!previousDueError}
             className="bg-[#D71920] hover:bg-[#D71920]/90 text-white">
             {createInvoice.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             {createInvoice.isPending ? 'Saving...' : editEntry ? 'Save Changes' : paymentStatus === 'paid' ? 'Create & Record Payment' : 'Create Invoice'}

@@ -2,6 +2,7 @@
 
 import { useClientProfile, useClientInvoices, useClientPosts, useClientIncidents } from '../hooks/useClientData';
 import { FileText, Users, AlertTriangle, IndianRupee } from 'lucide-react';
+import { amountDue, isPartlyPaid, sumMoney, LEDGER_EPSILON } from '@/lib/invoice/ledger';
 
 export default function ClientDashboard() {
   const { data: profile, isLoading: profileLoading } = useClientProfile();
@@ -11,15 +12,14 @@ export default function ClientDashboard() {
 
   const isLoading = profileLoading || invoicesLoading || postsLoading || incidentsLoading;
 
-  // Any invoice that is not paid or cancelled still owes a balance.
-  const isUnpaidInvoice = (inv: any) => inv.status !== 'received' && inv.status !== 'cancelled';
+  // What an invoice still owes comes from its ledger columns (payments recorded
+  // by Accounts), so a part-paid invoice counts only its balance.
+  const isUnpaidInvoice = (inv: any) => amountDue(inv) > LEDGER_EPSILON;
   // Past the due date and still unpaid = overdue (derived, not stored).
   const isOverdueInvoice = (inv: any) =>
     isUnpaidInvoice(inv) && inv.due_date && new Date(inv.due_date) < new Date();
 
-  const totalDue = invoices
-    ?.filter(isUnpaidInvoice)
-    .reduce((sum: number, inv: any) => sum + (inv.total_amount || 0), 0) || 0;
+  const totalDue = sumMoney((invoices || []).map((inv: any) => amountDue(inv)));
 
   const overdueCount = invoices?.filter(isOverdueInvoice).length || 0;
   const activePosts = posts?.filter((p: any) => p.status === 'active').length || 0;
@@ -124,10 +124,14 @@ export default function ClientDashboard() {
                   <p className="text-sm font-semibold text-foreground dark:text-white">
                     ₹{(inv.total_amount || 0).toLocaleString('en-IN')}
                   </p>
+                  {isPartlyPaid(inv) && (
+                    <p className="text-[11px] text-amber-600">₹{amountDue(inv).toLocaleString('en-IN')} due</p>
+                  )}
                   {(() => {
                     const label = inv.status === 'received' ? 'received'
                       : inv.status === 'cancelled' ? 'cancelled'
                       : isOverdueInvoice(inv) ? 'overdue'
+                      : isPartlyPaid(inv) ? 'part paid'
                       : inv.status === 'issued' ? 'issued'
                       : inv.status === 'open' ? 'open'
                       : 'created';
@@ -138,6 +142,7 @@ export default function ClientDashboard() {
                         label === 'cancelled' ? 'bg-gray-100 text-gray-500' :
                         label === 'issued' ? 'bg-sky-100 text-sky-700' :
                         label === 'created' ? 'bg-slate-100 text-slate-600' :
+                        label === 'part paid' ? 'bg-blue-100 text-blue-700' :
                         'bg-yellow-100 text-yellow-700'
                       }`}>
                         {label}

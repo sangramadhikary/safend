@@ -10,7 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Download, Upload, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 // Deferred: XLSX is large (~300KB) and only needed when user triggers import/export
 const getXLSX = () => import("xlsx");
-import { supabaseClient } from "@/integrations/supabase/client";
+import { importInvoices, type ImportInvoiceRow } from "@/services/invoiceLedgerService";
 import { getBranchScope } from "@/utils/branchScope";
 
 interface InvoiceImportDialogProps {
@@ -73,6 +73,16 @@ const HEADER_ALIASES: Record<string, string> = {
 
 type ImportStatus = "idle" | "preview" | "importing" | "done";
 
+/** A row the database refused, with its spreadsheet row number. */
+interface FailedImportRow {
+  row: number;
+  reference_number: string | null;
+  error: string;
+}
+
+/** Rows sent per import_invoices call. Each row is saved or refused on its own. */
+const IMPORT_CHUNK = 100;
+
 interface ParsedInvoice {
   row: number;
   valid: boolean;
@@ -87,6 +97,7 @@ interface ParsedInvoice {
     balance_due: number;
     due_date: string | null;
     status: "pending" | "received" | "overdue" | "cancelled";
+    client_gstin: string | null;
     notes: string | null;
   };
 }
@@ -94,7 +105,7 @@ interface ParsedInvoice {
 export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceImportDialogProps) {
   const [status, setStatus] = useState<ImportStatus>("idle");
   const [parsedData, setParsedData] = useState<ParsedInvoice[]>([]);
-  const [importResults, setImportResults] = useState<{ success: number; failed: number }>({ success: 0, failed: 0 });
+  const [importResults, setImportResults] = useState<{ success: number; failed: FailedImportRow[] }>({ success: 0, failed: [] });
   const [fileName, setFileName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
@@ -175,6 +186,7 @@ export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceI
           const statusText = String(get(row, "status") ?? "").trim();
           const description = String(get(row, "description") ?? "").trim();
 
+          if (!reference_number) errors.push("Invoice No is missing");
           if (!total_amount || total_amount <= 0) errors.push("Total Amount must be greater than 0");
 
           const notesParts: string[] = [];
@@ -196,6 +208,7 @@ export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceI
               balance_due,
               due_date: due_date || null,
               status: mapStatus(statusText, balance_due, total_amount),
+              client_gstin: gstin ? gstin.toUpperCase() : null,
               notes: notesParts.length ? notesParts.join(" | ") : null,
             },
           });
@@ -227,34 +240,38 @@ export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceI
     const scope = getBranchScope();
     const branch_id = scope.id || scope.code || null;
 
-    const payload = validRows.map((r) => ({
-      category: "Invoices",
-      description: r.data.description,
+    // import_invoices keeps each invoice's original number and date, stores the
+    // GST-inclusive total (the export has no tax split) and records the amount
+    // already received as a payment, so balances come from the ledger.
+    const rows: ImportInvoiceRow[] = validRows.map((r) => ({
+      reference_number: r.data.reference_number,
       client_name: r.data.client_name,
-      // Vyapar only exports the GST-inclusive total (no taxable/GST split),
-      // so we store the total as the amount with no separate tax line.
-      amount: r.data.total_amount,
-      gst_amount: 0,
+      client_gstin: r.data.client_gstin,
+      description: r.data.description,
       total_amount: r.data.total_amount,
+      received_amount: r.data.received_amount,
+      invoice_date: r.data.invoice_date || null,
       due_date: r.data.due_date,
-      reference_number: r.data.reference_number || null,
-      notes: r.data.notes,
       status: r.data.status,
-      // Preserve the original Vyapar invoice date (shown as "Invoice Date").
-      ...(r.data.invoice_date ? { created_at: `${r.data.invoice_date}T00:00:00.000Z` } : {}),
-      ...(branch_id ? { branch_id } : {}),
+      notes: r.data.notes,
+      branch_id,
     }));
 
     let success = 0;
-    let failed = 0;
-    const CHUNK = 50;
-    for (let i = 0; i < payload.length; i += CHUNK) {
-      const chunk = payload.slice(i, i + CHUNK);
-      const { data, error } = await supabaseClient.from("receivables").insert(chunk).select("id");
-      if (error) {
-        failed += chunk.length;
-      } else {
-        success += data?.length ?? chunk.length;
+    const failed: FailedImportRow[] = [];
+    for (let i = 0; i < rows.length; i += IMPORT_CHUNK) {
+      const chunk = rows.slice(i, i + IMPORT_CHUNK);
+      // Spreadsheet row of the n-th (1-based) row in this chunk.
+      const sheetRow = (n: number) => validRows[i + n - 1]?.row ?? i + n;
+      try {
+        const result = await importInvoices(chunk);
+        success += result.imported;
+        for (const f of result.failed) {
+          failed.push({ row: sheetRow(f.row), reference_number: f.reference_number, error: f.error });
+        }
+      } catch (err: any) {
+        const error = err?.message || "Import failed";
+        chunk.forEach((r, n) => failed.push({ row: sheetRow(n + 1), reference_number: r.reference_number, error }));
       }
     }
 
@@ -263,14 +280,14 @@ export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceI
     onImported?.();
     toast({
       title: "Import Complete",
-      description: `${success} invoice(s) imported${failed > 0 ? `, ${failed} failed` : ""}.`,
+      description: `${success} invoice(s) imported${failed.length > 0 ? `, ${failed.length} failed` : ""}.`,
     });
   };
 
   const handleClose = () => {
     setStatus("idle");
     setParsedData([]);
-    setImportResults({ success: 0, failed: 0 });
+    setImportResults({ success: 0, failed: [] });
     setFileName("");
     onOpenChange(false);
   };
@@ -336,7 +353,7 @@ export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceI
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription className="text-xs">
-                <strong>How it maps:</strong> Invoice No → Invoice number, Party Name → Client, Date → Invoice date, Due Date → Due date, Total Amount → Amount. The status maps to Received / Overdue / Pending. Exports include only the GST-inclusive total (no tax split), so the full total is stored as the invoice amount.
+                <strong>How it maps:</strong> Invoice No → Invoice number, Party Name → Client, Date → Invoice date, Due Date → Due date, Total Amount → Amount, Received/Paid Amount → payment received before import. Exports include only the GST-inclusive total (no tax split), so the full total is stored as the invoice amount. Invoice numbers already on file are not imported again.
               </AlertDescription>
             </Alert>
           </div>
@@ -409,12 +426,34 @@ export function InvoiceImportDialog({ open, onOpenChange, onImported }: InvoiceI
               <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 text-sm px-3 py-1">
                 {importResults.success} imported
               </Badge>
-              {importResults.failed > 0 && (
+              {importResults.failed.length > 0 && (
                 <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 text-sm px-3 py-1">
-                  {importResults.failed} failed
+                  {importResults.failed.length} failed
                 </Badge>
               )}
             </div>
+            {importResults.failed.length > 0 && (
+              <ScrollArea className="mt-4 h-[200px] w-full border rounded-lg">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/30">
+                      <TableHead className="w-16">Row</TableHead>
+                      <TableHead>Invoice No.</TableHead>
+                      <TableHead>Not imported because</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {importResults.failed.map((f, i) => (
+                      <TableRow key={`${f.row}-${i}`}>
+                        <TableCell className="text-xs">{f.row}</TableCell>
+                        <TableCell className="font-mono text-xs whitespace-nowrap">{f.reference_number || "—"}</TableCell>
+                        <TableCell className="text-xs text-red-600">{f.error}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            )}
           </div>
         )}
 

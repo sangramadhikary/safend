@@ -29,8 +29,10 @@
  * invoice value. `alreadyPaid` is the sum of prior payments' `(cash + tds)`.
  */
 
+import { fromPaise, LEDGER_EPSILON, toPaise } from './ledger';
+
 /** Rounding tolerance: balances within one paisa are treated as cleared. */
-export const SETTLEMENT_EPSILON = 0.01;
+export const SETTLEMENT_EPSILON = LEDGER_EPSILON;
 
 export interface SettlementInput {
   /** Invoice's own total (GST-inclusive), excluding carried-forward previous balance. */
@@ -54,9 +56,12 @@ export interface SettlementResult {
   balanceAmount: number;
   /** True iff the collected money clears the payable within SETTLEMENT_EPSILON. */
   fullyPaid: boolean;
+  /**
+   * Money credited beyond the payable. record_receipt refuses an overpayment,
+   * so a caller must treat excess > 0 as an error, not as a settled invoice.
+   */
+  excess: number;
 }
-
-const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /**
  * Compute the balance and settlement status for a receipt.
@@ -67,16 +72,16 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
  * payment is full only if it actually covers what is owed.
  */
 export function computeSettlement(input: SettlementInput): SettlementResult {
-  const totalAmount = Number(input.totalAmount) || 0;
-  const previousDue = Number(input.previousDue) || 0;
-  const alreadyPaid = Number(input.alreadyPaid) || 0;
-  const amount = Number(input.amount) || 0;
-  const tds = Number(input.tds) || 0;
+  // Integer paise, rounded like the database, so no sub-paisa drift.
+  const payable = Math.max(0, toPaise(input.totalAmount) + toPaise(input.previousDue));
+  const credited = toPaise(input.alreadyPaid) + toPaise(input.amount) + toPaise(input.tds);
+  const balance = Math.max(0, payable - credited);
 
-  const totalPayable = round2(Math.max(0, totalAmount + previousDue));
-  const newTotalPaid = round2(alreadyPaid + amount + tds);
-  const balanceAmount = round2(Math.max(0, totalPayable - newTotalPaid));
-  const fullyPaid = balanceAmount <= SETTLEMENT_EPSILON;
-
-  return { totalPayable, newTotalPaid, balanceAmount, fullyPaid };
+  return {
+    totalPayable: fromPaise(payable),
+    newTotalPaid: fromPaise(credited),
+    balanceAmount: fromPaise(balance),
+    fullyPaid: fromPaise(balance) <= SETTLEMENT_EPSILON,
+    excess: fromPaise(Math.max(0, credited - payable)),
+  };
 }

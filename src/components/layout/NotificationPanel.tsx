@@ -29,6 +29,7 @@ import {
   subscribeToInvoiceDeleteRequests,
   approveInvoiceDeleteRequest,
   rejectInvoiceDeleteRequest,
+  describeReviewOutcome,
   invoiceRequestLabel,
   InvoiceDeleteRequest,
 } from "@/services/supabase/InvoiceDeleteRequestService";
@@ -241,7 +242,7 @@ export function NotificationPanel() {
     setProcessingId(request.id);
 
     // First, perform the actual deletion based on item type
-    let deleteResult: { success: boolean; error?: string } = { success: false, error: "" };
+    let deleteResult: { success: boolean; error?: string; deletedCounts?: Record<string, number> } = { success: false, error: "" };
 
     switch (request.itemType) {
       case "lead":
@@ -346,9 +347,15 @@ export function NotificationPanel() {
           true // approved
         );
 
+        // Invoices are statutory records: a deleted work order's invoices stay on
+        // record, detached from it.
+        const keptInvoices = deleteResult.deletedCounts?.invoices_retained ?? 0;
         toast({
           title: "Deletion Approved",
-          description: `${itemTypeLabels[request.itemType]} "${request.clientName}" has been deleted.`,
+          description: `${itemTypeLabels[request.itemType]} "${request.clientName}" has been deleted.`
+            + (keptInvoices === 1 ? ' Its invoice stays on record, no longer linked to a work order.'
+              : keptInvoices > 1 ? ` Its ${keptInvoices} invoices stay on record, no longer linked to a work order.`
+              : ''),
         });
       }
     } else {
@@ -394,7 +401,8 @@ export function NotificationPanel() {
     setProcessingId(null);
   };
 
-  // Handle approve invoice deletion — deletes the receivable, then closes the request
+  // Handle approve invoice deletion. The database decides what happens: a draft
+  // that was never issued is deleted; an issued invoice is cancelled instead.
   const handleApproveInvoiceDeletion = async (request: InvoiceDeleteRequest) => {
     if (!request.id) return;
 
@@ -403,32 +411,30 @@ export function NotificationPanel() {
     const label = invoiceRequestLabel(request);
     const result = await approveInvoiceDeleteRequest(request, userName || "Admin");
 
-    if (result.success) {
-      // Drop it locally rather than waiting for the realtime event, so the queue
-      // still clears if this table is not in the realtime publication.
+    if (result.success && result.action) {
+      // The database closes every pending request for this invoice. Drop them
+      // locally too, so the queue clears even without a realtime event.
       setInvoiceDeleteRequests((prev) =>
         prev.filter((r) => r.receivableId !== request.receivableId)
       );
+      const outcome = describeReviewOutcome(result.action, label);
 
       // `requestedBy` is already an auth user id, so it can be notified directly
       // rather than resolved from a display name.
       await addNotification({
         userId: request.requestedBy,
-        title: "Deletion Approved",
-        message: `Your request to delete Invoice #${label} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")}) has been approved. The invoice has been deleted.`,
+        title: `Deletion Approved: ${outcome.title}`,
+        message: `Your request to delete Invoice #${label} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")}) has been approved. ${outcome.message}`,
         type: "success",
         relatedItemType: "accounts",
         relatedItemId: request.receivableId,
       });
 
-      toast({
-        title: "Deletion Approved",
-        description: `Invoice #${label} has been deleted.`,
-      });
+      toast({ title: outcome.title, description: outcome.message });
     } else {
       toast({
         title: "Error",
-        description: result.error || "Failed to delete the invoice",
+        description: result.error || "Failed to review the delete request",
         variant: "destructive",
       });
     }
@@ -692,8 +698,9 @@ export function NotificationPanel() {
                 ) : (
                   <>
                     {/* Invoice delete requests (Accounts → receivables).
-                        Approving hard-deletes a tax invoice, so it is confirmed
-                        before it runs and labelled distinctly from sales items. */}
+                        Approving deletes a never-issued draft or cancels an issued
+                        invoice, so it is confirmed before it runs and labelled
+                        distinctly from sales items. */}
                     {pendingInvoiceDeletions.map((request) => (
                       <div
                         key={request.id}
@@ -738,7 +745,7 @@ export function NotificationPanel() {
                                 onClick={() => {
                                   if (
                                     window.confirm(
-                                      `Permanently delete Invoice #${invoiceRequestLabel(request)} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")})? This cannot be undone.`
+                                      `Approve the request to delete Invoice #${invoiceRequestLabel(request)} (${request.clientName || "Unknown"}, ₹${request.amount.toLocaleString("en-IN")})?\n\nA draft that was never issued is deleted. An issued invoice is cancelled instead and keeps its number. This cannot be undone.`
                                     )
                                   ) {
                                     handleApproveInvoiceDeletion(request);

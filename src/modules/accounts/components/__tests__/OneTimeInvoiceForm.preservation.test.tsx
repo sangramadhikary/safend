@@ -11,25 +11,18 @@ import * as fc from 'fast-check';
  * **Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6**
  *
  * These tests lock in behaviors of `OneTimeInvoiceForm` that MUST NOT change
- * once the cross-work-order scoping fix (task 3) lands:
+ * while work-order scoping and explicit previous-balance opt-in are enforced:
  *   - The Net Payable formula: invoiceTotal − tdsAmt + previousDue.
  *   - New-client mode: no outstanding-balance query runs, `previousDue` is
  *     never touched by `handleSelectWorkOrder`.
  *   - Edit-invoice mode: `previousDue` is pre-filled from the `notes` field,
  *     not from a query.
- *   - Legacy rows (no work-order scoping in the unfixed query) for the same
- *     client remain visible in the outstanding-invoices panel and their
- *     total is still what populates `previousDue` today (this specific
- *     auto-fill-on-legacy-rows behavior is the unfixed baseline being
- *     recorded here; task 3.2/3.3 changes *how* previousDue gets set for
- *     work-order selections generally, but must keep these same-client,
- *     unscoped rows visible in the panel per Requirement 3.6).
+ *   - Legacy rows for the same client remain visible in the
+ *     outstanding-invoices panel, while `previousDue` stays empty until the
+ *     user clicks Include previous balance.
  *
- * Observation-first methodology: every property below was first exercised
- * against the CURRENT (unfixed) code to observe actual behavior, then
- * encoded here. All properties in this file are expected to PASS on
- * unfixed code — this file is the preservation/regression baseline that
- * task 3's fix must not break (re-run verbatim in task 3.7).
+ * These are regression properties for the current intended behavior. They
+ * should remain passing as the carry-forward implementation evolves.
  */
 
 // ---- Supabase mock --------------------------------------------------------

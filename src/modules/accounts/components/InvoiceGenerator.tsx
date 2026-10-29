@@ -8,85 +8,26 @@
  * the PDF route also implemented, and an editing surface whose edits were never
  * persisted anywhere.
  *
- * It is now a thin shell: it resolves the document (snapshot when the invoice was
- * issued with one, recomputed otherwise), then hands it to <InvoiceDocument/>,
- * which owns the layout. Editing belongs in OneTimeInvoiceForm, which is the
- * actual entry point and does persist.
+ * It is now a thin shell: it resolves the document with documentFromViewData,
+ * the same builder the PDF route uses (snapshot when the invoice was issued
+ * with one, the recorded figures otherwise), then hands it to
+ * <InvoiceDocument/>, which owns the layout. Build `initialData` with
+ * buildInvoiceViewData(row, payments, carried). Editing belongs in
+ * OneTimeInvoiceForm, which is the actual entry point and does persist.
  */
 
 import { useState, useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Printer, X, AlertTriangle } from 'lucide-react';
 import { supabaseClient } from '@/integrations/supabase/client';
-import {
-  INVOICE_LABELS,
-  type InvoiceLineItem,
-  type PreviousBalanceEntry,
-  type InvoiceCopyType,
-} from '@/lib/invoice/calculations';
-import {
-  resolveInvoiceDocument,
-  SAFEND_BANK,
-  SAFEND_SUPPLIER,
-  type BuildDocumentInput,
-} from '@/lib/invoice/document';
+import { type InvoiceCopyType } from '@/lib/invoice/calculations';
+import { SAFEND_BANK } from '@/lib/invoice/document';
+import { documentFromViewData, type InvoiceData } from '@/lib/invoice/document-input';
 import { InvoiceDocument } from './invoice/InvoiceDocument';
 
-export interface PaymentRecord {
-  id: string;
-  amount: number;
-  mode: string;
-  received_by: string | null;
-  cheque_number: string | null;
-  cheque_date: string | null;
-  bank_account_id: string | null;
-  transaction_number: string | null;
-  transaction_datetime: string | null;
-  is_partial: boolean;
-  balance_amount: number;
-  balance_handling: string | null;
-  balance_due_date: string | null;
-  notes: string | null;
-  created_at: string;
-}
-
-/** Line item as supplied by callers — same shape as before, plus rate basis. */
-export interface InvoiceItem extends InvoiceLineItem {
-  id: number | string;
-  gstRate: number;
-}
-
-export interface InvoiceData {
-  companyInfo?: Partial<{
-    name: string; addressLine1: string; addressLine2: string; phone: string;
-    email: string; tagline: string; gstin: string; state: string; pan: string; cin: string;
-  }>;
-  invoiceDetails?: Partial<{
-    invoiceNo: string; date: string; dueDate: string; placeOfSupply: string;
-    workOrderNo: string; workOrderDate: string;
-    irn: string; irnQr: string; irnAckNo: string; irnAckDate: string;
-    servicePeriodStart: string; servicePeriodEnd: string;
-    copyType: InvoiceCopyType;
-  }>;
-  clientInfo?: Partial<{ name: string; address: string; contact: string; gstin: string; state: string }>;
-  items?: InvoiceItem[];
-  taxConfig?: Partial<{
-    gstRate: number; taxType: 'intra' | 'inter' | 'exempt';
-    sgstRate: number; cgstRate: number; igstRate: number;
-    tdsRate: number; received: number; previousBalance: number; ratePrecision: number;
-  }>;
-  /** Itemised previous outstanding, printed on the payment advice. */
-  previousEntries?: PreviousBalanceEntry[];
-  paymentDetails?: Partial<{
-    bankName: string; bankAccountNo: string; ifscCode: string; accountName: string; terms: string;
-  }>;
-  invoiceStatus?: string;
-  receivableId?: string;
-  payments?: PaymentRecord[];
-  gstTreatment?: 'forward' | 'rcm' | 'exempt' | null;
-  /** Frozen document from receivables.invoice_snapshot. Rendered verbatim when present. */
-  snapshot?: unknown;
-}
+// The input types live with the shared builder so the PDF route uses the same
+// ones; re-exported here for existing imports.
+export type { InvoiceData, InvoiceItem, PaymentRecord } from '@/lib/invoice/document-input';
 
 interface InvoiceGeneratorProps {
   onClose?: () => void;
@@ -127,42 +68,11 @@ export function InvoiceGenerator({ onClose, initialData }: InvoiceGeneratorProps
     })();
   }, [initialData?.paymentDetails?.bankAccountNo]);
 
-  const { doc, fromSnapshot } = useMemo(() => {
-    const d = initialData ?? {};
-    const meta = d.invoiceDetails ?? {};
-
-    const fallback: BuildDocumentInput = {
-      supplier: { ...SAFEND_SUPPLIER, ...d.companyInfo },
-      recipient: d.clientInfo ?? {},
-      meta: {
-        invoiceNo: meta.invoiceNo ?? '',
-        date:
-          meta.date ??
-          new Date().toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-        dueDate: meta.dueDate ?? null,
-        placeOfSupply: meta.placeOfSupply ?? SAFEND_SUPPLIER.state,
-        workOrderNo: meta.workOrderNo ?? null,
-        workOrderDate: meta.workOrderDate ?? null,
-        servicePeriodStart: meta.servicePeriodStart ?? null,
-        servicePeriodEnd: meta.servicePeriodEnd ?? null,
-        copyType,
-      },
-      items: (d.items ?? []) as InvoiceLineItem[],
-      taxConfig: d.taxConfig,
-      previousEntries: d.previousEntries,
-      bank: { ...bank, ...d.paymentDetails },
-      terms: d.paymentDetails?.terms || INVOICE_LABELS.defaultTerms,
-      gstTreatment: d.gstTreatment,
-      eInvoice: {
-        irn: meta.irn ?? null,
-        qr: meta.irnQr ?? null,
-        ackNo: meta.irnAckNo ?? null,
-        ackDate: meta.irnAckDate ?? null,
-      },
-    };
-
-    return resolveInvoiceDocument(d.snapshot, fallback);
-  }, [initialData, bank, copyType]);
+  // Same builder as the PDF route, so the screen and the download match.
+  const { doc, recomputed } = useMemo(
+    () => documentFromViewData(initialData ?? {}, { bank, copyType }),
+    [initialData, bank, copyType]
+  );
 
   return (
     <div className="min-h-screen bg-neutral-100 py-6 dark:bg-neutral-950 print:bg-white print:py-0">
@@ -214,7 +124,20 @@ export function InvoiceGenerator({ onClose, initialData }: InvoiceGeneratorProps
         </div>
       )}
 
-      <InvoiceDocument doc={doc} copyType={copyType} recomputed={!fromSnapshot} />
+      {doc.notices.length > 0 && (
+        <div className="mx-auto mb-4 w-[210mm] rounded-lg border border-amber-300 bg-amber-50 p-4 print:hidden">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+            <ul className="space-y-0.5 text-sm text-amber-800">
+              {doc.notices.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      <InvoiceDocument doc={doc} copyType={copyType} recomputed={recomputed} />
     </div>
   );
 }

@@ -35,6 +35,7 @@ import { getOperationalPosts } from '@/services/supabase/OperationalPostService'
 import type { OperationalPost } from '@/services/supabase/OperationalPostService';
 import { getClients, type Client } from '@/services/supabase/ClientService';
 import { clientKeyOf } from '@/utils/clientKey';
+import { amountDue, amountReceived, isPartlyPaid, round2, sumMoney } from '@/lib/invoice/ledger';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,7 +46,9 @@ export interface ClientInvoice {
   ref: string;
   description: string;
   total: number;
+  /** Still owed, from the ledger columns (amountDue). */
   outstanding: number;
+  /** Stored status, shown as 'partially_paid' for a part-paid invoice that is not overdue. */
   status: string;
   dueDate: string | null;
   createdAt: string | null;
@@ -88,7 +91,9 @@ export interface UnifiedClient {
   monthlyValue: number;
   /** Sum of every work order value ever raised. */
   contractValue: number;
+  /** Sum of invoice totals, cancelled invoices excluded. */
   lifetimeBilled: number;
+  /** Cash and TDS received across the client's invoices (credit notes excluded). */
   collected: number;
   outstanding: number;
   aging: AgingBuckets;
@@ -168,17 +173,6 @@ const DEAD_WO_STATUS = new Set(['Terminated', 'Cancelled', 'Termination Initiate
 /** Statuses that mean the paperwork is still in flight. */
 const ONBOARDING_WO_STATUS = new Set(['Draft', 'Pending', 'On Hold']);
 
-const UNPAID_INVOICE_STATUS = new Set(['pending', 'overdue', 'partially_paid']);
-
-/** Partial payments are recorded in `notes` as "Balance: ₹X" — honour it. */
-const invoiceOutstanding = (row: any): number => {
-  const status = String(row.status || '').toLowerCase();
-  if (!UNPAID_INVOICE_STATUS.has(status)) return 0;
-  const balanceMatch = String(row.notes || '').match(/Balance:\s*₹?([\d,]+(?:\.\d+)?)/);
-  if (balanceMatch) return Math.max(0, parseAmount(balanceMatch[1]));
-  return Math.max(0, parseAmount(row.total_amount));
-};
-
 const extractFromNotes = (notes: string, pattern: RegExp): string => {
   const m = String(notes || '').match(pattern);
   return m ? m[1].trim() : '';
@@ -189,10 +183,10 @@ const emptyAging = (): AgingBuckets => ({ d30: 0, d60: 0, d90: 0, d90plus: 0 });
 const addToAging = (aging: AgingBuckets, amount: number, reference: Date | null) => {
   if (amount <= 0) return;
   const days = reference ? Math.floor((Date.now() - reference.getTime()) / 86400000) : 0;
-  if (days <= 30) aging.d30 += amount;
-  else if (days <= 60) aging.d60 += amount;
-  else if (days <= 90) aging.d90 += amount;
-  else aging.d90plus += amount;
+  if (days <= 30) aging.d30 = round2(aging.d30 + amount);
+  else if (days <= 60) aging.d60 = round2(aging.d60 + amount);
+  else if (days <= 90) aging.d90 = round2(aging.d90 + amount);
+  else aging.d90plus = round2(aging.d90plus + amount);
 };
 
 // ─── Draft record used while folding ──────────────────────────────────────────
@@ -250,12 +244,13 @@ export function useClientDirectory() {
   const { followups } = useFollowupsData();
 
   // One-time invoices live in `receivables`; there is no `invoices` table.
+  // Balances come from the ledger columns the database maintains from payments.
   const { data: invoiceRows = [], isLoading: invoicesLoading } = useQuery<any[]>({
     queryKey: ['client_directory_invoices'],
     queryFn: async () => {
       const { data, error } = await supabaseClient
         .from('receivables')
-        .select('id, client_name, description, reference_number, amount, gst_amount, total_amount, status, due_date, notes, line_items, created_at')
+        .select('id, client_name, description, reference_number, category, amount, gst_amount, total_amount, opening_balance, paid_amount, tds_credited, credit_applied, status, due_date, notes, line_items, created_at')
         .eq('category', 'Invoices')
         .order('created_at', { ascending: false });
       if (error) {
@@ -418,8 +413,11 @@ export function useClientDirectory() {
       }
 
       const total = parseAmount(row.total_amount);
-      const outstanding = invoiceOutstanding(row);
+      const outstanding = amountDue(row);
       const created = toDate(row.created_at);
+      const cancelled = row.status === 'cancelled';
+      // Overdue stays the headline; otherwise a part-paid invoice says so.
+      const status = row.status !== 'overdue' && isPartlyPaid(row) ? 'partially_paid' : row.status || 'pending';
 
       client.invoices.push({
         id: row.id,
@@ -427,14 +425,16 @@ export function useClientDirectory() {
         description: row.description || '',
         total,
         outstanding,
-        status: row.status || 'pending',
+        status,
         dueDate: row.due_date ?? null,
         createdAt: row.created_at ?? null,
         lineItems: Array.isArray(row.line_items) ? row.line_items : [],
       });
 
-      client.lifetimeBilled += total;
-      client.outstanding += outstanding;
+      // A cancelled invoice is void: it was never billed and nothing was collected on it.
+      if (!cancelled) client.lifetimeBilled = round2(client.lifetimeBilled + total);
+      client.collected = round2(client.collected + amountReceived(row));
+      client.outstanding = round2(client.outstanding + outstanding);
       addToAging(client.aging, outstanding, toDate(row.due_date) || created);
       client.since = minDate(client.since, created);
       client.lastActivity = maxDate(client.lastActivity, created);
@@ -449,11 +449,6 @@ export function useClientDirectory() {
     for (const client of byKey.values()) {
       if (client.type !== 'occasional') continue;
       client.status = client.invoices.length > 1 ? 'Repeat' : 'One-time';
-    }
-
-    // Collected is derived so it always reconciles with billed − outstanding.
-    for (const client of byKey.values()) {
-      client.collected = Math.max(0, client.lifetimeBilled - client.outstanding);
     }
 
     // ── 3. Fold in every other related record ──────────────────────────────
@@ -540,7 +535,7 @@ export function useClientDirectory() {
       occasional: occasionalList.length,
       active: all.filter((c) => c.status === 'Active').length,
       monthlyValue: regularList.reduce((s, c) => s + c.monthlyValue, 0),
-      outstanding: all.reduce((s, c) => s + c.outstanding, 0),
+      outstanding: sumMoney(all.map((c) => c.outstanding)),
       expiring: regularList.filter((c) => c.isExpiring || c.isExpired).length,
       guards: all.reduce((s, c) => s + c.guardCount, 0),
       posts: all.reduce((s, c) => s + c.postCount, 0),

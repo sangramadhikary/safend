@@ -15,6 +15,7 @@ import { useQuery } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { applyBranchScope, getBranchScopeFilter } from '@/utils/branchScope';
 import { formatINRShort, formatINR } from '@/lib/format';
+import { amountDue, outstandingAmount, sumMoney, LEDGER_EPSILON } from '@/lib/invoice/ledger';
 
 export interface AccountsDashboardProps {
   filter: string;
@@ -72,17 +73,19 @@ export function AccountsDashboard({ filter }: AccountsDashboardProps) {
     },
   });
 
-  // Receivables summary
+  // Receivables summary: live balances from the ledger columns the database keeps
+  // from payment rows. Open credit notes are negative and net off the total.
   const { data: receivablesStats, isLoading: l5 } = useQuery({
     queryKey: ['accounts-dash', 'receivables-stats', branchKey],
     queryFn: async () => {
       const { data, error } = await supabaseClient
         .from('receivables')
-        .select('total_amount, status')
-        .in('status', ['pending', 'partially_paid', 'overdue']);
+        .select('id, category, status, total_amount, opening_balance, paid_amount, tds_credited, credit_applied')
+        .not('status', 'in', '(received,cancelled)');
       if (error) throw error;
-      const totalOutstanding = (data ?? []).reduce((s, r) => s + (r.total_amount || 0), 0);
-      const count = data?.length ?? 0;
+      const rows = data ?? [];
+      const totalOutstanding = sumMoney(rows.map((r) => outstandingAmount(r)));
+      const count = rows.filter((r) => amountDue(r) > LEDGER_EPSILON).length;
       return { totalOutstanding, count };
     },
   });

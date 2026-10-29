@@ -42,7 +42,10 @@ export function useClientProfile() {
 
 /**
  * Fetches invoices for the client (from receivables table matched by client_name).
- * Includes both Invoices and Debit Notes for full visibility.
+ * Includes Invoices and credit/debit notes for full visibility. All columns are
+ * selected so the ledger columns (paid_amount, opening_balance, tds_credited,
+ * credit_applied) are present: balances must be computed with the helpers in
+ * @/lib/invoice/ledger, never from total_amount or the notes text.
  */
 export function useClientInvoices(clientName: string | undefined) {
   return useQuery({

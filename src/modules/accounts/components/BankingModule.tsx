@@ -17,6 +17,7 @@ import { useToast } from '@/hooks/use-toast';
 import { formatIndianCurrency, formatIndianDate } from '@/utils/errorHandler';
 import { applyBranchScope } from '@/utils/branchScope';
 import { CountUp } from '@/components/dashboard/CountUp';
+import { bounceCheque } from '@/services/invoiceLedgerService';
 import {
   Landmark, CreditCard, Wallet, Plus, Search, FileText, Building2,
   Ban, CheckCircle2, Clock, AlertTriangle, ChevronLeft, ChevronRight,
@@ -181,6 +182,10 @@ export function BankingModule({ filter }: BankingModuleProps) {
   const [voidDialogOpen, setVoidDialogOpen] = useState(false);
   const [voidTarget, setVoidTarget] = useState<{ id: string; description: string } | null>(null);
   const [voidReason, setVoidReason] = useState('');
+  // Bouncing a received cheque reverses the receipt it paid (handleBounceReceivedCheque).
+  const [bounceTarget, setBounceTarget] = useState<ChequeEntry | null>(null);
+  const [bounceReason, setBounceReason] = useState('');
+  const [bouncing, setBouncing] = useState(false);
 
   // Form states
   const [newAccount, setNewAccount] = useState({
@@ -555,6 +560,40 @@ export function BankingModule({ filter }: BankingModuleProps) {
       if (newStatus === 'cleared') fetchAccounts(); // Balance may have changed
     } catch (err: any) {
       toast({ title: "Error", description: err?.message || "Failed to update cheque", variant: "destructive" });
+    }
+  };
+
+  /**
+   * A bounced received cheque never paid its invoice. bounce_cheque reverses the
+   * receipt the cheque paid, so the invoice reopens with its balance due, and sets
+   * the cheque to bounced with the reason, in one transaction. The cheque row is
+   * therefore not updated here.
+   */
+  const handleBounceReceivedCheque = async () => {
+    if (!bounceTarget) return;
+    const cheque = bounceTarget;
+    setBouncing(true);
+    try {
+      const { reversed } = await bounceCheque(cheque.id, bounceReason.trim() || null);
+      if (reversed > 0) {
+        toast({
+          title: "Cheque Bounced",
+          description: `Cheque #${cheque.cheque_number} is marked bounced. The receipt it paid was reversed, so the invoice is open again with its balance due.`,
+        });
+      } else {
+        toast({
+          title: "Cheque Bounced: no receipt found",
+          description: `Cheque #${cheque.cheque_number} is marked bounced, but no receipt linked to it was found. Accounts should check Receivables for the payment this cheque covered.`,
+          variant: "destructive",
+        });
+      }
+      setBounceTarget(null);
+      setBounceReason('');
+      fetchCheques();
+    } catch (err: any) {
+      toast({ title: "Error", description: err?.message || "Failed to mark the cheque as bounced", variant: "destructive" });
+    } finally {
+      setBouncing(false);
     }
   };
 
@@ -943,7 +982,9 @@ export function BankingModule({ filter }: BankingModuleProps) {
                                 Clear
                               </Button>
                               <Button variant="ghost" size="sm" className="h-7 text-xs text-red-600"
-                                onClick={() => handleChequeStatusChange(cheque.id, 'bounced')}>
+                                onClick={() => cheque.type === 'received'
+                                  ? setBounceTarget(cheque)
+                                  : handleChequeStatusChange(cheque.id, 'bounced')}>
                                 Bounce
                               </Button>
                             </div>
@@ -1161,6 +1202,35 @@ export function BankingModule({ filter }: BankingModuleProps) {
             <Button variant="outline" onClick={() => { setVoidDialogOpen(false); setVoidTarget(null); setVoidReason(''); }}>Cancel</Button>
             <Button variant="destructive" onClick={handleVoidTransaction} disabled={!voidReason.trim()}>
               <Ban className="h-4 w-4 mr-1" /> Void Transaction
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ============ BOUNCE RECEIVED CHEQUE DIALOG ============ */}
+      <Dialog open={!!bounceTarget} onOpenChange={(open) => { if (!open && !bouncing) { setBounceTarget(null); setBounceReason(''); } }}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle className="text-red-600">Mark Cheque as Bounced</DialogTitle>
+            <DialogDescription>
+              The receipt this cheque paid is reversed and the invoice it settled shows its balance as due again.
+              This cannot be undone; a replacement payment is recorded as a new receipt in Receivables.
+              {bounceTarget && (
+                <span className="block mt-2 font-medium text-foreground">
+                  Cheque #{bounceTarget.cheque_number} · {bounceTarget.party_name} · ₹{Number(bounceTarget.amount).toLocaleString('en-IN')}
+                </span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <label className="text-sm font-medium">Reason (optional)</label>
+            <Textarea className="mt-1" placeholder="e.g. Insufficient funds, signature mismatch" rows={3}
+              value={bounceReason} onChange={(e) => setBounceReason(e.target.value)} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={bouncing} onClick={() => { setBounceTarget(null); setBounceReason(''); }}>Cancel</Button>
+            <Button variant="destructive" onClick={handleBounceReceivedCheque} disabled={bouncing}>
+              <Ban className="h-4 w-4 mr-1" /> {bouncing ? 'Marking…' : 'Mark Bounced'}
             </Button>
           </DialogFooter>
         </DialogContent>

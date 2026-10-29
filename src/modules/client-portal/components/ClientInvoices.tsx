@@ -15,6 +15,7 @@ import {
 import {
   Search, Download, FileText, AlertTriangle
 } from 'lucide-react';
+import { amountDue, amountReceived, isPartlyPaid, round2, sumMoney } from '@/lib/invoice/ledger';
 
 interface Invoice {
   id: string;
@@ -35,7 +36,18 @@ interface Invoice {
   /** Proper DB column — 'cgst_sgst' | 'igst' | 'exempt'. Replaces notes string-sniffing. */
   gst_type?: 'cgst_sgst' | 'igst' | 'exempt' | null;
   place_of_supply?: string | null;
+  /** Ledger columns the database maintains from the recorded payments. */
+  opening_balance?: number | string | null;
+  paid_amount?: number | string | null;
+  tds_credited?: number | string | null;
+  credit_applied?: number | string | null;
 }
+
+/** The printed invoice terms ask for any discrepancy to be reported within 5 days. */
+const DISPUTE_WINDOW_DAYS = 5;
+
+/** The dispute window starts when the invoice was issued, or when it was raised if not yet issued. */
+const disputeWindowStart = (inv: Pick<Invoice, 'issued_at' | 'created_at'>) => inv.issued_at || inv.created_at;
 
 /**
  * Derive the display lifecycle status for an invoice:
@@ -88,12 +100,14 @@ export default function ClientInvoices() {
     return matchesSearch && matchesStatus;
   });
 
-  // Check if dispute can be raised (within 3 days of issue)
+  // A dispute can be raised up to 5 calendar days after the invoice is issued.
   const canRaiseDispute = (inv: Invoice) => {
-    const issueDate = new Date(inv.created_at);
-    const now = new Date();
-    const diffDays = (now.getTime() - issueDate.getTime()) / (1000 * 60 * 60 * 24);
-    return diffDays <= 3 && inv.status !== 'cancelled';
+    const start = new Date(disputeWindowStart(inv));
+    start.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.round((today.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+    return days <= DISPUTE_WINDOW_DAYS && inv.status !== 'cancelled';
   };
 
   // Parse description to get service name
@@ -113,27 +127,42 @@ export default function ClientInvoices() {
     return { amount: gst, pct: gstPct, isIGST };
   };
 
-  // Handle download invoice (placeholder — triggers print or PDF generation)
-  const handleDownload = (inv: Invoice) => {
-    // Open a printable view or trigger PDF download
-    const printContent = `
-      Invoice: ${inv.reference_number || 'N/A'}
-      Client: ${inv.client_name}
-      Service: ${getServiceName(inv.description)}
-      Amount: ₹${inv.amount?.toLocaleString('en-IN')}
-      GST: ₹${(inv.gst_amount || 0).toLocaleString('en-IN')}
-      Total: ₹${inv.total_amount?.toLocaleString('en-IN')}
-      Due Date: ${inv.due_date ? new Date(inv.due_date).toLocaleDateString('en-IN') : 'N/A'}
-      Status: ${inv.status}
-      Issue Date: ${new Date(inv.created_at).toLocaleDateString('en-IN')}
-    `;
-    const blob = new Blob([printContent], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Invoice_${inv.reference_number || inv.id.slice(0, 8)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+  // Download the tax invoice PDF. The route checks the session, serves only this
+  // client's invoices and reads every figure from the database.
+  const handleDownload = async (inv: Invoice) => {
+    try {
+      toast({ title: 'Preparing PDF...', description: 'Please wait' });
+      const { data: sessionData } = await getSupabaseClient().auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) {
+        throw new Error('Your session has expired. Sign in again to download the invoice.');
+      }
+
+      const response = await fetch('/api/invoice-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ receivableId: inv.id }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || 'Could not generate the invoice PDF.');
+      }
+
+      const fileName = `Invoice_${inv.reference_number || inv.id.slice(0, 8)}.pdf`;
+      const url = URL.createObjectURL(await response.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({ title: 'PDF downloaded', description: fileName });
+      // The first download marks the invoice issued; refresh the status shown.
+      queryClient.invalidateQueries({ queryKey: ['client-invoices'] });
+    } catch (err: any) {
+      toast({ title: 'Download failed', description: err?.message || 'Could not download the invoice.', variant: 'destructive' });
+    }
   };
 
   // Handle raise dispute
@@ -265,6 +294,11 @@ export default function ClientInvoices() {
                   {/* Amount */}
                   <div className="text-sm font-semibold text-gray-900 dark:text-white text-right tabular-nums">
                     ₹{inv.total_amount.toLocaleString('en-IN')}
+                    {isPartlyPaid(inv) && (
+                      <div className="text-[11px] font-normal text-amber-600">
+                        Part paid · ₹{amountDue(inv).toLocaleString('en-IN')} due
+                      </div>
+                    )}
                   </div>
 
                   {/* GST */}
@@ -324,7 +358,7 @@ export default function ClientInvoices() {
                         size="icon"
                         className="h-8 w-8 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
                         onClick={() => setDisputeInvoice(inv)}
-                        title="Raise Dispute (within 3 days of issue)"
+                        title={`Raise Dispute (within ${DISPUTE_WINDOW_DAYS} days of issue)`}
                       >
                         <AlertTriangle className="h-4 w-4" />
                       </Button>
@@ -345,10 +379,7 @@ export default function ClientInvoices() {
           </span>
           <div className="text-sm font-semibold text-gray-900 dark:text-white">
             Total Outstanding: ₹
-            {filtered
-              .filter((i: Invoice) => { const d = deriveDisplayStatus(i); return d !== 'received' && d !== 'cancelled'; })
-              .reduce((s: number, i: Invoice) => s + (i.total_amount || 0), 0)
-              .toLocaleString('en-IN')}
+            {sumMoney(filtered.map((i: Invoice) => amountDue(i))).toLocaleString('en-IN')}
           </div>
         </div>
       )}
@@ -382,7 +413,7 @@ export default function ClientInvoices() {
                   Invoice #{disputeInvoice.reference_number || 'N/A'}
                 </p>
                 <p className="text-xs text-amber-600 mt-1">
-                  Amount: ₹{disputeInvoice.total_amount.toLocaleString('en-IN')} · Issued: {new Date(disputeInvoice.created_at).toLocaleDateString('en-IN')}
+                  Amount: ₹{disputeInvoice.total_amount.toLocaleString('en-IN')} · Issued: {new Date(disputeWindowStart(disputeInvoice)).toLocaleDateString('en-IN')}
                 </p>
               </div>
 
@@ -399,7 +430,7 @@ export default function ClientInvoices() {
               </div>
 
               <p className="text-xs text-gray-400">
-                Disputes must be raised within 3 days of invoice issue date. Our accounts team will review and respond within 2 business days.
+                Disputes must be raised within {DISPUTE_WINDOW_DAYS} days of the invoice issue date, as stated in the invoice terms. Our accounts team will review and respond within 2 business days.
               </p>
 
               <div className="flex gap-3">
@@ -499,7 +530,14 @@ function InvoiceDetailContent({
 
   const displayStatus = deriveDisplayStatus(invoice);
   const isOverdue = displayStatus === 'overdue';
-  const isUnpaid = displayStatus !== 'received' && displayStatus !== 'cancelled';
+
+  // Payment figures come from the ledger columns, never from the notes text.
+  const balanceDue = amountDue(invoice);
+  const received = amountReceived(invoice);
+  const tdsDeducted = round2(invoice.tds_credited);
+  const creditApplied = round2(invoice.credit_applied);
+  const openingBalance = round2(invoice.opening_balance);
+  const partPaid = isPartlyPaid(invoice);
 
   return (
     <div className="space-y-5 pt-2">
@@ -525,6 +563,7 @@ function InvoiceDetailContent({
           </Badge>
           {displayStatus === 'received' && <span className="text-xs text-green-700">Payment received</span>}
           {isOverdue && <span className="text-xs text-red-600">Payment past due date</span>}
+          {partPaid && <span className="text-xs text-blue-700">Part paid · ₹{balanceDue.toLocaleString('en-IN')} due</span>}
         </div>
         <span className="text-2xl font-bold text-gray-900">₹{invoice.total_amount.toLocaleString('en-IN')}</span>
       </div>
@@ -633,19 +672,33 @@ function InvoiceDetailContent({
                 </div>
               )}
               <div className="flex justify-between text-base pt-2 border-t border-dashed border-gray-300 dark:border-gray-600">
-                <span className="font-bold text-gray-900 dark:text-white">Total Payable</span>
+                <span className="font-bold text-gray-900 dark:text-white">Invoice Total</span>
                 <span className="font-bold text-gray-900 dark:text-white tabular-nums">₹{invoice.total_amount.toLocaleString('en-IN')}</span>
               </div>
-              {invoice.status === 'received' && (
+              {openingBalance > 0 && (
                 <div className="flex justify-between text-sm pt-1">
-                  <span className="text-green-600 font-medium">Amount Paid</span>
-                  <span className="text-green-600 font-medium tabular-nums">₹{invoice.total_amount.toLocaleString('en-IN')}</span>
+                  <span className="text-gray-500">Earlier dues carried to this invoice</span>
+                  <span className="font-medium tabular-nums">₹{openingBalance.toLocaleString('en-IN')}</span>
                 </div>
               )}
-              {isUnpaid && (
+              {received > 0 && (
+                <div className="flex justify-between text-sm pt-1">
+                  <span className="text-green-600 font-medium">
+                    Amount Paid{tdsDeducted > 0 ? ` (incl. TDS ₹${tdsDeducted.toLocaleString('en-IN')})` : ''}
+                  </span>
+                  <span className="text-green-600 font-medium tabular-nums">₹{received.toLocaleString('en-IN')}</span>
+                </div>
+              )}
+              {creditApplied > 0 && (
+                <div className="flex justify-between text-sm pt-1">
+                  <span className="text-green-600 font-medium">Credit Note Applied</span>
+                  <span className="text-green-600 font-medium tabular-nums">₹{creditApplied.toLocaleString('en-IN')}</span>
+                </div>
+              )}
+              {balanceDue > 0 && (
                 <div className="flex justify-between text-sm pt-1">
                   <span className={`font-medium ${isOverdue ? 'text-red-600' : 'text-amber-600'}`}>Balance Due</span>
-                  <span className={`font-medium tabular-nums ${isOverdue ? 'text-red-600' : 'text-amber-600'}`}>₹{invoice.total_amount.toLocaleString('en-IN')}</span>
+                  <span className={`font-medium tabular-nums ${isOverdue ? 'text-red-600' : 'text-amber-600'}`}>₹{balanceDue.toLocaleString('en-IN')}</span>
                 </div>
               )}
             </div>
@@ -691,7 +744,7 @@ function InvoiceDetailContent({
         ) : invoice.status !== 'cancelled' && (
           <div className="flex-1 flex items-center justify-center">
             <p className="text-xs text-gray-400">
-              Dispute window expired (3 days from issue)
+              Dispute window expired ({DISPUTE_WINDOW_DAYS} days from issue)
             </p>
           </div>
         )}

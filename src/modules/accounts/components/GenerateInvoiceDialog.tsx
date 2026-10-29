@@ -18,9 +18,14 @@ import { ArrowLeft, Loader2, Zap, AlertCircle, CheckCircle2 } from 'lucide-react
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { getNextInvoiceNumber, peekNextInvoiceNumber } from '@/services/invoiceNumberService';
+import { peekNextInvoiceNumber } from '@/services/invoiceNumberService';
+import { createInvoice as raiseInvoice, INVOICE_NUMBER_PLACEHOLDER } from '@/services/invoiceLedgerService';
 import { fetchWorkOrderOutstandingInvoices, sumOutstanding, type OutstandingInvoice } from '@/lib/invoice/outstanding';
-import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY } from '@/lib/tax/gst';
+import { resolvePreviousDue, sumMoney } from '@/lib/invoice/ledger';
+import { computeInvoiceTotals, type InvoiceLineItem, type TaxType } from '@/lib/invoice/calculations';
+import { resolveRateBasis, type RateBasis } from '@/lib/invoice/rateBasis';
+import { resolveGstConfig, INDIAN_STATES, DEFAULT_PLACE_OF_SUPPLY, extractStateCode } from '@/lib/tax/gst';
+import { auditActions } from '@/utils/auditLog';
 
 interface GenerateInvoiceDialogProps {
   open: boolean;
@@ -46,23 +51,62 @@ interface DutySummaryItem {
   post_name: string;
   service_type_key: string;
   service_type_label: string;
+  sac: string;
   personnel: number;
   total_duties: number;
+  /** Contract price from the work order (monthly, or per duty for a per-duty contract). */
   monthly_rate: number;
-  per_day_rate: number;
-  amount: number;
-  /** The divisor used to derive per_day_rate from monthly_rate (26 or calendar days). */
+  /** Divisor from the work order's rate basis (resolveRateBasis); 0 = cannot be priced. */
   basis_divisor: number;
+  rate_basis: RateBasis | null;
+  basis_days: number | null;
 }
 
-const SERVICE_DESIGNATIONS: { key: string; label: string }[] = [
-  { key: 'unarmedGuards', label: 'Unarmed Guards' },
-  { key: 'armedGuards', label: 'Armed Guards' },
-  { key: 'supervisors', label: 'Supervisors' },
-  { key: 'patrolOfficers', label: 'Patrol Officers' },
-  { key: 'eventSecurity', label: 'Event Security' },
-  { key: 'personalSecurity', label: 'Personal Security' },
+/** Work-order terms the invoice needs: display number/date and the contracted rate basis. */
+interface WorkOrderTerms {
+  id: string;
+  work_order_id: string | null;
+  order_date: string | null;
+  rate_basis: RateBasis | null;
+  basis_days: number | null;
+}
+
+// All designations billed here are private security services (SAC 998525).
+const SERVICE_DESIGNATIONS: { key: string; label: string; sac: string }[] = [
+  { key: 'unarmedGuards', label: 'Unarmed Guards', sac: '998525' },
+  { key: 'armedGuards', label: 'Armed Guards', sac: '998525' },
+  { key: 'supervisors', label: 'Supervisors', sac: '998525' },
+  { key: 'patrolOfficers', label: 'Patrol Officers', sac: '998525' },
+  { key: 'eventSecurity', label: 'Event Security', sac: '998525' },
+  { key: 'personalSecurity', label: 'Personal Security', sac: '998525' },
 ];
+
+/**
+ * The stored line, in the shape the document engine reads. The divisor is
+ * fixed on the line (legacy `days` for calendar months, the basis itself for
+ * fixed-day and per-duty contracts), so every renderer prices it identically.
+ */
+function toLineItem(d: DutySummaryItem, gstRate: number): InvoiceLineItem {
+  const fixedBasis = d.rate_basis === 'fixed_days' || d.rate_basis === 'per_duty';
+  return {
+    service: d.service_type_label,
+    post: d.post_name,
+    sac: d.sac,
+    personnel: d.personnel,
+    woPrice: d.monthly_rate,
+    days: d.basis_divisor,
+    duties: d.total_duties,
+    gstRate,
+    ...(fixedBasis ? { rateBasis: d.rate_basis, basisDays: d.basis_days } : {}),
+  };
+}
+
+/** Standard 7-day payment term: today + 7 days (yyyy-mm-dd). */
+function defaultDueDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  return d.toISOString().split('T')[0];
+}
 
 const SHIFT_KEYS = ['day', 'afternoon', 'night'] as const;
 
@@ -126,19 +170,18 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   const [dutySummary, setDutySummary] = useState<DutySummaryItem[]>([]);
   const [isFetching, setIsFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [invoiceNumInfo, setInvoiceNumInfo] = useState<{ isReused: boolean; reusedFrom?: string } | null>(null);
   const [placeOfSupply, setPlaceOfSupply] = useState(DEFAULT_PLACE_OF_SUPPLY);
-  // Previous outstanding dues carried forward from this client's unpaid invoices.
+  // Work orders of the included posts, keyed by work_orders.id.
+  const [workOrders, setWorkOrders] = useState<Record<string, WorkOrderTerms>>({});
+  // Previous outstanding dues carried forward from this work order's unpaid invoices.
   const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
   const [previousDue, setPreviousDue] = useState(0);
 
-  // Auto-generate invoice number when moving to review step
+  // Preview the next invoice number on reaching the review step. It is
+  // provisional: create_invoice allocates the real number on save.
   useEffect(() => {
     if (step === 'review' && !invoiceNumber) {
-      peekNextInvoiceNumber().then(({ number }) => {
-        setInvoiceNumber(number);
-        setInvoiceNumInfo(null);
-      }).catch(() => {});
+      peekNextInvoiceNumber().then(({ number }) => setInvoiceNumber(number)).catch(() => {});
     }
   }, [step]);
 
@@ -248,10 +291,21 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     setDutySummary([]);
 
     try {
-      const fromDate = new Date(billingFrom);
-      const daysInMonth = new Date(fromDate.getFullYear(), fromDate.getMonth() + 1, 0).getDate();
-
       const postIds = includedPosts.map(p => p.id);
+
+      // The contracted rate basis (how a monthly price becomes a per-duty
+      // rate) is a work-order term, so load it with the work order details.
+      const woIds = [...new Set(includedPosts.map(p => p.work_order_id).filter((id): id is string => !!id))];
+      const woById: Record<string, WorkOrderTerms> = {};
+      if (woIds.length > 0) {
+        const { data: woRows, error: woError } = await supabaseClient
+          .from('work_orders')
+          .select('id, work_order_id, order_date, rate_basis, basis_days')
+          .in('id', woIds);
+        if (woError) throw new Error(`Failed to load the work order terms: ${woError.message}`);
+        for (const w of (woRows ?? []) as WorkOrderTerms[]) woById[w.id] = w;
+      }
+      setWorkOrders(woById);
 
       // Fetch attendance for ALL posts of this client in one query
       const { data: attendanceData, error: attError } = await supabaseClient
@@ -280,6 +334,14 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
         const rateMap = extractBillingRates(post);
         const guardCounts = extractGuardCounts(post);
         const postAttendance = attendanceByPost[post.id] || [];
+        // No basis on the work order = legacy calendar month of the billed period.
+        const wo = post.work_order_id ? woById[post.work_order_id] : undefined;
+        const basis = resolveRateBasis({
+          basis: wo?.rate_basis ?? null,
+          basisDays: wo?.basis_days ?? null,
+          periodStart: billingFrom,
+          invoiceDate: billingFrom,
+        });
 
         // Aggregate duties per designation + shift for this post
         const dutyMap: Record<string, Record<string, number>> = {};
@@ -292,7 +354,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
           dutyMap[key][shift] = (dutyMap[key][shift] || 0) + dutyValue;
         });
 
-        for (const { key, label } of SERVICE_DESIGNATIONS) {
+        for (const { key, label, sac } of SERVICE_DESIGNATIONS) {
           const shiftDuties = dutyMap[key];
           if (!shiftDuties) continue;
 
@@ -305,20 +367,21 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
             buckets[rate] = (buckets[rate] || 0) + duties;
           }
 
+          // Rates and amounts are priced by the shared engine (see `totals`).
           for (const rateStr of Object.keys(buckets)) {
             const monthlyRate = Number(rateStr);
             const duties = buckets[monthlyRate];
-            const perDay = daysInMonth > 0 ? monthlyRate / daysInMonth : 0;
             summary.push({
               post_name: post.post_name,
               service_type_key: key,
               service_type_label: label,
+              sac,
               personnel: guardCounts[key] || 0,
               total_duties: round2(duties),
               monthly_rate: monthlyRate,
-              per_day_rate: round2(perDay),
-              amount: round2(duties * perDay),
-              basis_divisor: daysInMonth,
+              basis_divisor: basis.divisor,
+              rate_basis: wo?.rate_basis ?? null,
+              basis_days: wo?.basis_days ?? null,
             });
           }
         }
@@ -335,6 +398,8 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
       }
 
       setDutySummary(summary);
+      // Standard 7-day payment term unless a due date was already chosen.
+      setDueDate(prev => prev || defaultDueDate());
       setStep('review');
     } catch (err: any) {
       setFetchError(err.message || 'An error occurred while fetching data.');
@@ -343,92 +408,90 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     }
   };
 
-  // Computed totals
-  const subTotal = useMemo(() => dutySummary.reduce((sum, item) => sum + item.amount, 0), [dutySummary]);
+  // Totals from the shared engine, over exactly the lines that are stored, so
+  // amount / gst_amount / total_amount equal what the PDF and the screen view
+  // compute from the same row. No period/date options: each line carries its
+  // own divisor.
   const gstPercent = selectedClientInfo?.gst_exempt ? 0 : (selectedClientInfo?.gst_percentage ?? 18);
-  const gstAmount = Math.round(subTotal * (gstPercent / 100) * 100) / 100;
-  const totalAmount = Math.round((subTotal + gstAmount) * 100) / 100;
+  const { gstType } = resolveGstConfig(placeOfSupply, gstPercent);
+  const taxType: TaxType = gstType === 'igst' ? 'inter' : gstType === 'exempt' ? 'exempt' : 'intra';
+  const lineItems = useMemo(() => dutySummary.map(d => toLineItem(d, gstPercent)), [dutySummary, gstPercent]);
+  const totals = useMemo(
+    () => computeInvoiceTotals(lineItems, { gstRate: gstPercent, taxType }),
+    [lineItems, gstPercent, taxType],
+  );
+  const subTotal = totals.subTotal;
+  const gstAmount = totals.totalTax;
+  const totalAmount = totals.invoiceTotal;
+  const blockedError = totals.blockedLines.length > 0
+    ? `${totals.blockedLines.map(l => `${l.service} at ${l.post}`).join(', ')} cannot be priced: the work order's rate basis is fixed days but no basis days are set. Set them on the work order first.`
+    : null;
+  // Every listed invoice of the work order is carried. They keep their own
+  // balances; anything beyond them would be an opening balance on this invoice.
+  const carriedTotal = sumOutstanding(outstandingInvoices);
+  const { openingBalance, error: previousDueError } = resolvePreviousDue(previousDue, carriedTotal);
 
   // Create the invoice
   const createInvoice = useMutation({
     mutationFn: async () => {
       if (!selectedClientName) throw new Error('No client selected.');
-      if (!invoiceNumber.trim()) throw new Error('Invoice number is required.');
+      if (blockedError) throw new Error(blockedError);
+      if (previousDueError) throw new Error(previousDueError);
 
-      // Allocate the real invoice number atomically at save time (not on form open).
-      // The number shown on the form was a preview from peekNextInvoiceNumber.
-      const allocated = await getNextInvoiceNumber();
-      const finalInvoiceNumber = allocated.number;
-      setInvoiceNumber(finalInvoiceNumber);
-
-      // Lookup the work order display ID and date from the work_orders table
-      let woDisplayId = '';
-      let woDate = '';
-      const woUuid = includedPosts[0]?.work_order_id;
-      if (woUuid) {
-        const { data: woData } = await supabaseClient
-          .from('work_orders')
-          .select('work_order_id, order_date')
-          .eq('id', woUuid)
-          .maybeSingle();
-        if (woData) {
-          woDisplayId = woData.work_order_id || '';
-          woDate = woData.order_date || '';
-        }
-      }
-
-      const fromDate = new Date(billingFrom);
-      const calendarDays = new Date(fromDate.getFullYear(), fromDate.getMonth() + 1, 0).getDate();
+      // Work order display number and date (loaded with the duty data).
+      const woUuid = includedPosts[0]?.work_order_id ?? null;
+      const woDisplayId = (woUuid && workOrders[woUuid]?.work_order_id) || '';
+      const woDate = (woUuid && workOrders[woUuid]?.order_date) || '';
 
       const description = dutySummary
         .map(d => `${d.post_name} - ${d.service_type_label}: ${d.total_duties} duties`)
         .join(', ');
 
-      // Structured breakdown with post info — each line uses its own basis_divisor
-      const lineItems = dutySummary.map(d => ({
-        service: d.service_type_label,
-        post: d.post_name,
-        personnel: d.personnel,
-        monthlyRate: d.monthly_rate,
-        days: d.basis_divisor,
-        duties: d.total_duties,
-        perDayRate: d.per_day_rate,
-        gstRate: gstPercent,
-        amount: d.amount,
+      // The engine's lines as stored: the inputs it read plus the rate and
+      // amount it derived (perDayRate kept for readers of the older shape).
+      const storedLines = totals.lines.map((l, i) => ({
+        ...lineItems[i],
+        perDayRate: l.rate,
+        amount: l.amount,
       }));
+      const clientAddress = (() => {
+        const loc = includedPosts[0]?.location as any;
+        const parts = loc ? [loc.address, loc.city, loc.state, loc.pincode].filter(Boolean) : [];
+        return parts.join(', ');
+      })();
+      const posCode = extractStateCode(placeOfSupply);
+      const posState = posCode ? INDIAN_STATES.find(s => s.code === posCode) : null;
 
       const postNames = [...new Set(dutySummary.map(d => d.post_name))].join(', ');
       const serviceNames = [...new Set(dutySummary.map(d => d.service_type_label))].join(', ');
 
-      const baseRow = {
-        category: 'Invoices',
-        description: `${serviceNames} | Inv#: ${finalInvoiceNumber}`,
+      const previousBalance = sumMoney([carriedTotal, openingBalance]);
+      // create_invoice allocates the number (replacing the placeholder), sets
+      // status 'created' and dates the invoice today.
+      const created = await raiseInvoice({
+        description: `${serviceNames} | Inv#: ${INVOICE_NUMBER_PLACEHOLDER}`,
         client_name: selectedClientName,
         amount: subTotal,
         gst_amount: gstAmount || null,
         total_amount: totalAmount,
-        due_date: dueDate || null,
-        reference_number: finalInvoiceNumber,
+        due_date: dueDate || defaultDueDate(),
+        line_items: storedLines,
+        client_gstin: selectedClientInfo?.gst_number?.trim().toUpperCase() || null,
+        client_address: clientAddress || null,
         // Persist the work order so previous-due carry-forward is scoped
         // correctly (per work order, not per client) on future invoices.
-        work_order_id: includedPosts[0]?.work_order_id ?? null,
-        // Lifecycle starts at 'created'; downloading the PDF promotes to 'issued'.
-        status: 'created',
-        // ── GST engine: persist place_of_supply + gst_type as proper columns ──
-        place_of_supply: placeOfSupply,
-        gst_type: resolveGstConfig(placeOfSupply, gstPercent).gstType,
-        // Carry forward this client's outstanding dues so the payment advice
-        // shows previous balance + current invoice. total_amount stays the
-        // current invoice's own total; previous_balance is tracked separately.
-        previous_balance: previousDue > 0 ? previousDue : null,
-        previous_balance_breakdown:
-          previousDue > 0 && outstandingInvoices.length > 0
-            ? outstandingInvoices.map(i => ({
-                referenceNumber: i.ref,
-                date: i.due_date || null,
-                amount: i.amount,
-              }))
-            : null,
+        work_order_id: woUuid,
+        place_of_supply: posState ? `${posState.code}-${posState.name}` : placeOfSupply,
+        gst_type: gstType,
+        service_period_start: billingFrom,
+        service_period_end: billingTo,
+        // Informational ("Previous Due" on the advice): the carried invoices
+        // keep their own balances; only opening_balance is owed on this one.
+        previous_balance: previousBalance > 0 ? previousBalance : null,
+        previous_balance_breakdown: previousDue > 0 && outstandingInvoices.length > 0
+          ? outstandingInvoices.map(i => ({ id: i.id, referenceNumber: i.ref, date: i.due_date || null, amount: i.amount }))
+          : null,
+        opening_balance: openingBalance,
         notes: [
           `Billing Period: ${billingFrom} to ${billingTo}`,
           `GST: ${gstPercent}%`,
@@ -437,40 +500,25 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
             ? `Outstanding: ${outstandingInvoices.map(i => `${i.ref} (₹${i.amount.toLocaleString('en-IN')})`).join(', ')}`
             : '',
           selectedClientInfo?.gst_number ? `Client GSTIN: ${selectedClientInfo.gst_number.toUpperCase()}` : '',
-          (() => {
-            const firstPost = includedPosts[0];
-            const loc = firstPost?.location as any;
-            if (!loc) return '';
-            const parts = [loc.address, loc.city, loc.state, loc.pincode].filter(Boolean);
-            return parts.length > 0 ? `Client Address: ${parts.join(', ')}` : '';
-          })(),
-          includedPosts[0]?.work_order_id ? `Work Order UUID: ${includedPosts[0].work_order_id}` : '',
+          clientAddress ? `Client Address: ${clientAddress}` : '',
+          woUuid ? `Work Order UUID: ${woUuid}` : '',
           woDisplayId ? `Work Order No: ${woDisplayId}` : '',
           woDate ? `Work Order Date: ${woDate}` : '',
           `Posts: ${postNames}`,
           `Services: ${description}`,
         ].filter(Boolean).join(' | '),
-      };
-
-      let result = await supabaseClient
-        .from('receivables')
-        .insert({ ...baseRow, line_items: lineItems })
-        .select()
-        .single();
-
-      if (result.error && /line_items/i.test(result.error.message)) {
-        result = await supabaseClient.from('receivables').insert(baseRow).select().single();
-      }
-      if (result.error) throw new Error(result.error.message);
-      return result.data;
+      });
+      void auditActions.invoiceCreated(created.reference_number || created.id, selectedClientName, totalAmount);
+      return created;
     },
-    onSuccess: () => {
+    onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ['receivables'] });
+      const ref = created.reference_number;
       toast({
         title: 'Invoice Generated',
         description: previousDue > 0
-          ? `Invoice ${invoiceNumber} created for ₹${totalAmount.toLocaleString('en-IN')} + ₹${previousDue.toLocaleString('en-IN')} previous due (₹${(totalAmount + previousDue).toLocaleString('en-IN')} payable).`
-          : `Invoice ${invoiceNumber} created for ₹${totalAmount.toLocaleString('en-IN')}.`,
+          ? `Invoice ${ref} created for ₹${totalAmount.toLocaleString('en-IN')} + ₹${previousDue.toLocaleString('en-IN')} previous due (₹${(totalAmount + previousDue).toLocaleString('en-IN')} payable).`
+          : `Invoice ${ref} created for ₹${totalAmount.toLocaleString('en-IN')}.`,
       });
       onSuccess();
     },
@@ -662,8 +710,8 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                       <TableCell className="text-center">{item.personnel || '—'}</TableCell>
                       <TableCell className="text-right">₹{item.monthly_rate.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
                       <TableCell className="text-center">{item.total_duties}</TableCell>
-                      <TableCell className="text-right">₹{item.per_day_rate.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
-                      <TableCell className="text-right font-medium">₹{item.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
+                      <TableCell className="text-right">₹{(totals.lines[idx]?.rate ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
+                      <TableCell className="text-right font-medium">₹{(totals.lines[idx]?.amount ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -716,11 +764,17 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                       </div>
                       <div className="flex justify-between text-xs text-muted-foreground pl-4">
                         <span>SGST ({gstPercent / 2}%) + CGST ({gstPercent / 2}%)</span>
-                        <span>₹{(gstAmount / 2).toLocaleString('en-IN', { minimumFractionDigits: 2 })} + ₹{(gstAmount / 2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                        <span>₹{totals.sgst.toLocaleString('en-IN', { minimumFractionDigits: 2 })} + ₹{totals.cgst.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                       </div>
                     </>
                   );
                 })()}
+                {totals.roundOff !== 0 && (
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Round off</span>
+                    <span>{totals.roundOff > 0 ? '+' : '−'} ₹{Math.abs(totals.roundOff).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-base font-bold border-t pt-2 mt-2">
                   <span>Total Amount</span>
                   <span className="text-safend-red">₹{totalAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
@@ -792,16 +846,16 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Invoice Details</h3>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <Label>Invoice Number *</Label>
+                  <Label>Invoice Number</Label>
                   <Input
                     value={invoiceNumber}
-                    onChange={(e) => setInvoiceNumber(e.target.value)}
-                    placeholder="Auto-generated"
-                    className="font-mono"
+                    readOnly
+                    placeholder="Assigned when saved"
+                    className="font-mono bg-muted/40"
                   />
-                  {invoiceNumInfo?.isReused && (
-                    <p className="text-xs text-blue-600 mt-1">↻ Reusing cancelled invoice number (priority fill)</p>
-                  )}
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Provisional. The number is assigned in sequence when the invoice is saved, and the invoice is dated today.
+                  </p>
                 </div>
                 <div className="space-y-1">
                   <Label>Due Date</Label>
@@ -810,11 +864,18 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
               </div>
             </div>
 
+            {(blockedError || previousDueError) && (
+              <div className="flex items-start gap-2 p-3 rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/20 dark:border-red-800">
+                <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 shrink-0" />
+                <p className="text-sm text-red-800 dark:text-red-200">{blockedError || previousDueError}</p>
+              </div>
+            )}
+
             <DialogFooter className="pt-2">
               <Button variant="outline" onClick={handleReset}>← Back to Selection</Button>
               <Button
                 onClick={() => createInvoice.mutate()}
-                disabled={createInvoice.isPending || !invoiceNumber.trim()}
+                disabled={createInvoice.isPending || !!blockedError || !!previousDueError}
                 className="bg-safend-red hover:bg-safend-red/90 text-white"
               >
                 {createInvoice.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}

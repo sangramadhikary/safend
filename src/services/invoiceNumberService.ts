@@ -6,22 +6,20 @@
  *          (FY 2026-27 → "2627", rolling over on 1 April)
  *   SSSS = zero-padded sequential number starting at 0001
  *
+ *   Above 9999 the sequence is printed in plain digits (2627 + 10000 → "262710000").
+ *
  * Rule 46(b) requires a consecutive serial number, unique within a financial
- * year. Three things previously broke that:
+ * year. The number is allocated by the database inside create_invoice, in the
+ * same transaction as the insert, so concurrent saves cannot share a serial and
+ * a failed save does not burn one. The prefix comes from today's date in India
+ * (the invoice date is always the creation date). Numbers only move forward:
+ * cancelled or deleted invoices leave a gap and are never reissued, and serials
+ * already on file (e.g. imported) are skipped.
  *
- *   1. The prefix came from `new Date()` rather than the invoice date, so an
- *      invoice dated either side of 1 April was filed under the wrong FY.
- *   2. Allocation was "read the highest, add one" from the client with no lock,
- *      so two concurrent users were handed the same number.
- *   3. Cancelled numbers were recycled out of `deleted_invoice_numbers`, so a
- *      cancelled document and a live one shared a serial.
+ * The app never allocates numbers itself (next_invoice_number is not callable
+ * by users); it can only preview the next one with peekNextInvoiceNumber.
  *
- * Now: the prefix is derived from the invoice date, allocation goes through the
- * atomic `next_invoice_number()` database function, and numbers are never
- * reused — a cancelled invoice leaves a gap and its value is reversed by credit
- * note, which is the correct treatment.
- *
- * See supabase/migrations/20260802000000_invoice_compliance.sql.
+ * See supabase/migrations/20261029000000_invoice_ledger_integrity.sql.
  */
 
 import { supabaseClient } from '@/integrations/supabase/client';
@@ -74,98 +72,58 @@ export function getCurrentFYDates(): { start: string; end: string } {
   return getFYDates();
 }
 
-export interface AllocatedInvoiceNumber {
-  number: string;
-  fyPrefix: string;
-  /** Always false. Retained so existing call sites keep type-checking. */
-  isReused: false;
-  reusedFrom?: undefined;
+/** Today's date in India (yyyy-mm-dd), the date create_invoice numbers invoices by. */
+export function indiaToday(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
-/**
- * Allocates the next invoice number for the financial year containing
- * `invoiceDate`.
- *
- * The allocation is atomic and server-side: `next_invoice_number()` performs an
- * `INSERT … ON CONFLICT DO UPDATE … RETURNING` against a counter row, so
- * concurrent callers are serialised by Postgres rather than racing.
- *
- * Allocation CONSUMES a serial. Call it when the invoice is actually being
- * saved, not to populate a preview — an abandoned form would otherwise burn a
- * number and leave a gap.
- */
-export async function getNextInvoiceNumber(
-  invoiceDate?: string | Date | null
-): Promise<AllocatedInvoiceNumber> {
-  const prefix = getFYPrefixForDate(parseInvoiceDate(invoiceDate) ?? new Date());
-
-  const { data, error } = await supabaseClient.rpc('next_invoice_number', {
-    p_fy_prefix: prefix,
-  });
-
-  if (error || !data) {
-    throw new Error(
-      `Could not allocate an invoice number for FY ${prefix}: ${
-        error?.message ?? 'no number returned'
-      }. Invoice numbers must be issued in sequence, so the invoice was not saved.`
-    );
-  }
-
-  return { number: String(data), fyPrefix: prefix, isReused: false };
+/** Serial as the database formats it: prefix + 4-digit sequence, plain digits above 9999. */
+export function formatInvoiceSerial(fyPrefix: string, seq: number): string {
+  return `${fyPrefix}${seq > 9999 ? String(seq) : String(seq).padStart(4, '0')}`;
 }
 
-/**
- * Peeks at the number that would be allocated next, WITHOUT consuming it.
- *
- * For previews only. The displayed value is advisory: another user may take it
- * first, and the number actually written is the one returned by
- * getNextInvoiceNumber() at save time.
- *
- * Now accounts for gap-filling: if a serial in [1..lastSeq] has no matching
- * invoice in receivables, the peek returns that gap (matching the DB function).
- */
-export async function peekNextInvoiceNumber(
-  invoiceDate?: string | Date | null
-): Promise<{ number: string; fyPrefix: string; provisional: true }> {
-  const prefix = getFYPrefixForDate(parseInvoiceDate(invoiceDate) ?? new Date());
+/** Serials checked per round trip while skipping numbers already on file. */
+const PEEK_BATCH = 50;
 
-  // Read the current high-water mark
-  const { data: counterData } = await supabaseClient
+/**
+ * The number create_invoice would allocate next, WITHOUT consuming it.
+ *
+ * Mirrors next_invoice_number: the counter's last_seq + 1 for today's FY prefix
+ * in India, skipping serials that already exist (e.g. imported). No gap filling:
+ * numbers of cancelled or deleted invoices are never reused.
+ *
+ * Provisional, for display only: another user may save first, and the number
+ * the invoice actually gets is the one create_invoice returns.
+ */
+export async function peekNextInvoiceNumber(): Promise<{ number: string; fyPrefix: string; provisional: true }> {
+  const fyPrefix = getFYPrefixForDate(parseInvoiceDate(indiaToday()) ?? new Date());
+
+  const { data: counter, error: counterError } = await supabaseClient
     .from('invoice_number_counters')
     .select('last_seq')
-    .eq('fy_prefix', prefix)
+    .eq('fy_prefix', fyPrefix)
     .maybeSingle();
+  if (counterError) throw new Error(counterError.message);
 
-  const lastSeq = Number(counterData?.last_seq) || 0;
-
-  if (lastSeq === 0) {
-    // No counter exists — first invoice for this FY
-    return { number: `${prefix}0001`, fyPrefix: prefix, provisional: true };
+  let seq = Number(counter?.last_seq) || 0;
+  for (let round = 0; round < 20; round++) {
+    const candidates = Array.from({ length: PEEK_BATCH }, (_, i) => formatInvoiceSerial(fyPrefix, seq + 1 + i));
+    const { data: taken, error: takenError } = await supabaseClient
+      .from('receivables')
+      .select('reference_number')
+      .eq('category', 'Invoices')
+      .in('reference_number', candidates);
+    if (takenError) throw new Error(takenError.message);
+    const used = new Set((taken ?? []).map((r: { reference_number: string | null }) => r.reference_number));
+    const free = candidates.find((c) => !used.has(c));
+    if (free) return { number: free, fyPrefix, provisional: true };
+    seq += PEEK_BATCH;
   }
-
-  // Check for gaps: find the lowest serial in [1..lastSeq] that doesn't exist
-  // in receivables. Query existing invoice numbers for this prefix.
-  const { data: existingInvoices } = await supabaseClient
-    .from('receivables')
-    .select('reference_number')
-    .eq('category', 'Invoices')
-    .like('reference_number', `${prefix}%`);
-
-  const existingNumbers = new Set(
-    (existingInvoices ?? []).map((r: any) => r.reference_number)
-  );
-
-  // Find first gap
-  for (let seq = 1; seq <= lastSeq; seq++) {
-    const candidate = `${prefix}${String(seq).padStart(4, '0')}`;
-    if (!existingNumbers.has(candidate)) {
-      return { number: candidate, fyPrefix: prefix, provisional: true };
-    }
-  }
-
-  // No gap — next is lastSeq + 1
-  const next = lastSeq + 1;
-  return { number: `${prefix}${String(next).padStart(4, '0')}`, fyPrefix: prefix, provisional: true };
+  throw new Error(`No free invoice number found after ${formatInvoiceSerial(fyPrefix, seq)}.`);
 }
 
 /**

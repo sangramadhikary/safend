@@ -4,24 +4,28 @@ import { useMemo } from 'react';
 import { useClientProfile, useClientInvoices } from '../hooks/useClientData';
 import { CreditCard, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { amountDue, amountReceived, isPartlyPaid, sumMoney, LEDGER_EPSILON } from '@/lib/invoice/ledger';
 
 export default function ClientPayments() {
   const { data: profile } = useClientProfile();
   const { data: invoices, isLoading } = useClientInvoices(profile?.client_name);
 
-  // Unpaid = anything not yet paid or cancelled (created / issued / open / overdue).
+  // Pending = still owes money, from the ledger columns (paid_amount etc.), so a
+  // part-paid invoice shows only its balance.
   const pendingInvoices = useMemo(
-    () => (invoices || []).filter((inv: any) => inv.status !== 'received' && inv.status !== 'cancelled'),
+    () => (invoices || []).filter((inv: any) => amountDue(inv) > LEDGER_EPSILON),
     [invoices]
   );
 
+  // Fully settled invoices and debit notes (credit notes carry a negative total).
   const paidInvoices = useMemo(
-    () => (invoices || []).filter((inv: any) => inv.status === 'received'),
+    () => (invoices || []).filter((inv: any) => inv.status === 'received' && Number(inv.total_amount) > 0),
     [invoices]
   );
 
-  const totalDue = pendingInvoices.reduce((s: number, inv: any) => s + (inv.total_amount || 0), 0);
-  const totalPaid = paidInvoices.reduce((s: number, inv: any) => s + (inv.total_amount || 0), 0);
+  const totalDue = sumMoney(pendingInvoices.map((inv: any) => amountDue(inv)));
+  // Everything received so far (cash and TDS), including part payments.
+  const totalPaid = sumMoney((invoices || []).map((inv: any) => amountReceived(inv)));
 
   if (isLoading) {
     return (
@@ -84,6 +88,7 @@ export default function ClientPayments() {
           <div className="divide-y divide-gray-100 dark:divide-gray-700">
             {pendingInvoices.map((inv: any) => {
               const isOverdue = inv.status === 'overdue' || (inv.due_date && new Date(inv.due_date) < new Date());
+              const partPaid = isPartlyPaid(inv);
               return (
                 <div key={inv.id} className="px-4 py-4 flex items-center justify-between">
                   <div className="flex-1 min-w-0">
@@ -96,6 +101,11 @@ export default function ClientPayments() {
                           OVERDUE
                         </span>
                       )}
+                      {partPaid && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                          PART PAID
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-muted-foreground truncate">{inv.description}</p>
                     {inv.due_date && (
@@ -106,8 +116,13 @@ export default function ClientPayments() {
                   </div>
                   <div className="text-right ml-4">
                     <p className="text-base font-bold text-foreground dark:text-white">
-                      ₹{(inv.total_amount || 0).toLocaleString('en-IN')}
+                      ₹{amountDue(inv).toLocaleString('en-IN')}
                     </p>
+                    {partPaid && (
+                      <p className="text-xs text-green-600">
+                        ₹{amountReceived(inv).toLocaleString('en-IN')} received
+                      </p>
+                    )}
                   </div>
                 </div>
               );

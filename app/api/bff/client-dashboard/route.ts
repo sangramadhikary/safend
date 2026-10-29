@@ -63,7 +63,9 @@ export async function GET(request: NextRequest) {
           .from('receivables')
           .select('*')
           .in('category', ['Invoices', 'Invoice Adjustments'])
-          .ilike('client_name', clientName)
+          // Case-insensitive equality: escape LIKE wildcards so a name containing
+          // % or _ cannot match another client's invoices (service-role query).
+          .ilike('client_name', String(clientName).replace(/[\\%_]/g, (c) => `\\${c}`))
           .order('created_at', { ascending: false })
           .limit(20)
       : Promise.resolve({ data: [], error: null }),
