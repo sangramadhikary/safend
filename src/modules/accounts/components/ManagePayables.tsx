@@ -20,7 +20,7 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
-import { Plus, Search, Download, IndianRupee, Loader2, Info, ShoppingCart, CheckCircle, XCircle, Clock, Banknote, FileText, ArrowRight, Upload, ChevronDown, ChevronRight, Undo2 } from 'lucide-react';
+import { Search, Download, IndianRupee, Loader2, Info, ShoppingCart, CheckCircle, XCircle, Clock, Banknote, FileText, ArrowRight, Upload, ChevronDown, ChevronRight, Undo2 } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { applyBranchScope, getBranchScopeFilter, onBranchScopeChange, getBranchScope } from '@/utils/branchScope';
@@ -31,7 +31,7 @@ import { useVendorStore } from '@/modules/office-admin/components/vendors/vendor
 import { PO_STATUS_LABELS, PurchaseOrder } from '@/modules/office-admin/components/vendors/types';
 import { Separator } from '@/components/ui/separator';
 import { format } from 'date-fns';
-import { PAYABLE_CATEGORIES, NO_ADD_CATEGORIES } from '@/modules/accounts/constants/payableCategories';
+import { PAYABLE_CATEGORIES } from '@/modules/accounts/constants/payableCategories';
 import { useGstLiability } from '@/modules/accounts/hooks/useGstLiability';
 import { uploadDocument } from '@/lib/r2-storage';
 import { useStaffMembers } from '@/modules/operations/hooks/useStaffMembers';
@@ -2033,22 +2033,6 @@ export function ManagePayables({ filter }: PayablesProps) {
     }
   };
 
-  const getAddButtonLabel = () => {
-    switch (filter) {
-      case 'Vendor & Supplies': return 'Record Payment';
-      case 'Rent & Utilities': return 'Record Rent/Utility';
-      case 'Reimbursements': return 'Record Reimbursement';
-      case 'Statutory & Taxes': return 'Record Tax Payment';
-      case 'EPF & ESIC': return 'Record Contribution';
-      case 'Compliance & Licenses': return 'Record Fee';
-      case 'Other Expenses': return 'Record Expense';
-      default: return 'New Entry';
-    }
-  };
-
-  // Should show "Add Entry" button?
-  const showAddButton = !NO_ADD_CATEGORIES.includes(filter);
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -2059,12 +2043,6 @@ export function ManagePayables({ filter }: PayablesProps) {
           </h2>
           <p className="text-sm text-muted-foreground">{getCategoryDescription()}</p>
         </div>
-        {showAddButton && (
-          <Button onClick={() => { setFormData({}); setVoucherFile(null); setProofFile(null); setShowAddForm(true); }}>
-            <Plus className="h-4 w-4 mr-2" />
-            {getAddButtonLabel()}
-          </Button>
-        )}
       </div>
 
       {/* Salary approvals — approve payroll runs sent from HR; applies advance recoveries */}
@@ -2318,7 +2296,6 @@ export function ManagePayables({ filter }: PayablesProps) {
             <div className="text-center py-12 text-muted-foreground">
               <IndianRupee className="h-10 w-10 mx-auto mb-3 opacity-30" />
               <p>No entries found{filter !== 'All' ? ` for "${filter}"` : ''}.</p>
-              {showAddButton && <p className="text-xs mt-1">Click &quot;{getAddButtonLabel()}&quot; to create one.</p>}
             </div>
           ) : (
             <Table>
