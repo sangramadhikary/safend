@@ -194,7 +194,7 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       // notes a positive one — both must be pulled in so the summed output tax nets correctly.
       const { data, error } = await supabaseClient
         .from('receivables')
-        .select('id, description, client_name, client_gstin, amount, gst_amount, total_amount, status, created_at, gst_treatment, gst_type, reference_number, line_items, notes')
+        .select('id, description, client_name, client_gstin, amount, gst_amount, total_amount, status, created_at, gst_treatment, gst_type, reference_number, line_items, notes, adjustment_type')
         .or('gst_amount.gt.0,gst_amount.lt.0,gst_treatment.eq.rcm')
         // Cancelled invoices create no GST liability, so keep them out of every
         // GST computation (GSTR-1, GSTR-3B, ITC, ledger).

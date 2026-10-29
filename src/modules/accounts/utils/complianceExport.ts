@@ -152,6 +152,8 @@ export interface Gstr1InvoiceRow {
   client_gstin: string | null;       // present = B2B; absent = B2C
   gst_type: string | null;           // 'igst' = inter-state | 'cgst_sgst' = intra-state
   gst_treatment: string | null;      // 'forward' | 'rcm' | 'exempt'
+  /** 'credit' | 'debit' for category 'Invoice Adjustments'; null for real invoices. */
+  adjustment_type?: string | null;
   description: string | null;
   notes: string | null;
   /** Stored JSON array of line items — each has sac, service, gstRate, amount, personnel, duties etc. */
@@ -397,6 +399,21 @@ function sortDocNumbers(nums: string[]): string[] {
   return [...nums].sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 }
 
+/** How a row is classified for GSTR-1 reporting. */
+export type Gstr1DocKind = 'invoice' | 'credit_note' | 'debit_note';
+
+/**
+ * Classify a receivable for GSTR-1. Credit notes reduce supply (CDNR/CDNUR and
+ * netted in B2CS/HSN); debit notes increase supply and are reported as their
+ * own document type. Determined by adjustment_type first (authoritative when a
+ * note was raised against an invoice), then by sign of gst/amount.
+ */
+export function gstr1DocKind(r: Gstr1InvoiceRow): Gstr1DocKind {
+  if (r.adjustment_type === 'credit') return 'credit_note';
+  if (r.adjustment_type === 'debit') return 'debit_note';
+  return ((r.gst_amount || 0) < 0 || (r.amount || 0) < 0) ? 'credit_note' : 'invoice';
+}
+
 /** A document cancelled in the return period: its number stays in the Table 13 range. */
 export interface Gstr1CancelledDoc {
   reference_number: string | null;
@@ -450,9 +467,12 @@ export function exportGSTR1_JSON(
   const supplierState = stateCodeFromGstin(supplierGstin);
   const docNo = (row: Gstr1InvoiceRow) => (row.reference_number || row.id).trim();
 
-  const isNote = (r: Gstr1InvoiceRow) => (r.gst_amount || 0) < 0 || (r.amount || 0) < 0;
-  const invoices = rows.filter(r => !isNote(r));
-  const notes    = rows.filter(isNote);
+  const isCredit = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'credit_note';
+  const isDebit  = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'debit_note';
+  const isNote   = isCredit;
+  const invoices = rows.filter((r) => gstr1DocKind(r) === 'invoice');
+  const notes    = rows.filter(isCredit);
+  const debitNotes = rows.filter(isDebit);
   const isB2B    = (r: Gstr1InvoiceRow) => !!r.client_gstin?.trim();
   const isB2CL   = (r: Gstr1InvoiceRow) =>
     !isB2B(r) && isInterStateRow(r) && Math.abs(r.total_amount || 0) > B2CL_THRESHOLD;
@@ -494,10 +514,11 @@ export function exportGSTR1_JSON(
   }));
 
   // ── B2CS (Table 7) — consolidated by supply type + POS + rate ──────────
-  // Credit notes to small B2C buyers are netted here (they never go to CDNUR).
+  // Credit notes net off; debit notes add to supply (all kinds reported net).
   const b2csMap = new Map<string, { sply_ty: string; pos: string; rt: number; txval: number; iamt: number; camt: number; samt: number }>();
   for (const row of rows.filter(r => !isB2B(r) && !isB2CL(r))) {
-    const sign = isNote(row) ? -1 : 1;
+    const kind = gstr1DocKind(row);
+    const sign = kind === 'credit_note' ? -1 : 1;
     const inter = isInterStateRow(row);
     const sply_ty = inter ? 'INTER' : 'INTRA';
     for (const a of allocateInvoice(row)) {
@@ -556,6 +577,26 @@ export function exportGSTR1_JSON(
     itms:   buildItms(row, true),
   }));
 
+  // ── Debit notes (Table 9C) — to registered buyers ────────────────────────
+  const cdnbMap = new Map<string, Gstr1InvoiceRow[]>();
+  for (const row of debitNotes.filter(isB2B)) {
+    const ctin = row.client_gstin!.trim().toUpperCase();
+    cdnbMap.set(ctin, [...(cdnbMap.get(ctin) ?? []), row]);
+  }
+  const cdnb = Array.from(cdnbMap.entries()).map(([ctin, nts]) => ({
+    ctin,
+    nt: nts.map(row => ({
+      ntty:    'D',
+      nt_num:  docNo(row),
+      nt_dt:   toGstnDate(row.created_at),
+      val:     r2(Math.abs(row.total_amount || 0)),
+      pos:     stateCodeFromGstin(row.client_gstin),
+      rchrg:   row.gst_treatment === 'rcm' ? 'Y' : 'N',
+      inv_typ: 'R',
+      itms:    buildItms(row),
+    })),
+  }));
+
   // ── HSN summary (Table 12) — split B2B / B2C ───────────────────────────
   const hsn = buildHsnSummary(rows);
 
@@ -564,9 +605,12 @@ export function exportGSTR1_JSON(
     const s = gstr1DocSummary(list.map(r => r.reference_number), cancelledList.map(d => d.reference_number));
     return s ? { doc_num, doc_typ, docs: [{ num: 1, ...s }] } : null;
   };
+  const isCancelledDebitNote = (d: Gstr1CancelledDoc) =>
+    d.category === 'Invoice Adjustments' && (d.adjustment_type === 'debit' || (d.adjustment_type == null && (d.total_amount || 0) > 0));
   const doc_det = [
     docRange(1, 'Invoices for outward supply', invoices, cancelled.filter(d => d.category === 'Invoices')),
     docRange(5, 'Credit Note', notes, cancelled.filter(isCancelledCreditNote)),
+    docRange(6, 'Debit Note', debitNotes, cancelled.filter(isCancelledDebitNote)),
   ].filter(Boolean);
 
   // ── Assemble in the same key order as the GST offline tool ─────────────
@@ -581,6 +625,7 @@ export function exportGSTR1_JSON(
   if (b2cs.length)  payload.b2cs  = b2cs;
   if (cdnr.length)  payload.cdnr  = cdnr;
   if (cdnur.length) payload.cdnur = cdnur;
+  if (cdnb.length)  payload.cdnur_b2b = cdnb;
   if (hsn.hsn_b2b.length || hsn.hsn_b2c.length) payload.hsn = hsn;
   if (doc_det.length) payload.doc_issue = { doc_det };
 
@@ -612,7 +657,9 @@ export function exportGSTR1_CSV(
   lines.push('');
 
   // Same classification as the JSON export, so the two always reconcile.
-  const isNote = (r: Gstr1InvoiceRow) => (r.gst_amount || 0) < 0 || (r.amount || 0) < 0;
+  const isCredit = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'credit_note';
+  const isDebit  = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'debit_note';
+  const isNote   = isCredit;
   const isB2B  = (r: Gstr1InvoiceRow) => !!r.client_gstin?.trim();
   const isB2CL = (r: Gstr1InvoiceRow) =>
     !isB2B(r) && isInterStateRow(r) && Math.abs(r.total_amount || 0) > B2CL_THRESHOLD;
@@ -626,8 +673,9 @@ export function exportGSTR1_CSV(
       return [...lead, f2(d.rt), f2(d.txval), f2(d.iamt), f2(d.camt ?? 0), f2(d.samt ?? 0), '0.00'].join(',');
     });
 
-  const invoices = rows.filter(r => !isNote(r));
-  const notes    = rows.filter(isNote);
+  const invoices = rows.filter((r) => gstr1DocKind(r) === 'invoice');
+  const notes    = rows.filter(isCredit);
+  const debitNotes = rows.filter(isDebit);
 
   // Table 4A — B2B
   lines.push('Table 4A — B2B Invoices (Sales to Registered Buyers)');
@@ -668,7 +716,7 @@ export function exportGSTR1_CSV(
   lines.push('Type,Place Of Supply,Supply Type,Rate,Taxable Value,Integrated Tax,Central Tax,State/UT Tax,Cess Amount');
   const b2csMap = new Map<string, { sply_ty: string; rt: number; txval: number; iamt: number; camt: number; samt: number }>();
   for (const row of rows.filter(r => !isB2B(r) && !isB2CL(r))) {
-    const sign = isNote(row) ? -1 : 1;
+    const sign = gstr1DocKind(row) === 'credit_note' ? -1 : 1;
     const inter = isInterStateRow(row);
     const sply_ty = inter ? 'INTER' : 'INTRA';
     for (const a of allocateInvoice(row)) {
@@ -726,6 +774,26 @@ export function exportGSTR1_CSV(
   if (!cdnurRows.length) lines.push('(No credit notes against B2CL invoices)');
   lines.push('');
 
+  // Table 9C — Debit notes (registered buyers)
+  if (debitNotes.length > 0) {
+    lines.push('Table 9C — Debit Notes to Registered Buyers');
+    lines.push('GSTIN/UIN of Recipient,Receiver Name,Note Number,Note Date,Note Type,Note Value,Place Of Supply,Reverse Charge,Note Supply Type,Rate,Taxable Value,Integrated Tax,Central Tax,State/UT Tax,Cess Amount');
+    for (const row of debitNotes.filter(isB2B)) {
+      lines.push(...itemLines(row, [
+        escapeCSV(row.client_gstin!.trim().toUpperCase()),
+        escapeCSV(row.client_name || ''),
+        escapeCSV(row.reference_number || row.id),
+        toGstnDate(row.created_at),
+        'Debit Note',
+        f2(Math.abs(row.total_amount || 0)),
+        stateCodeFromGstin(row.client_gstin),
+        row.gst_treatment === 'rcm' ? 'Y' : 'N',
+        'Regular',
+      ]));
+    }
+    lines.push('');
+  }
+
   // Table 12 — HSN summary, B2B and B2C
   const hsn = buildHsnSummary(rows);
   const hsnHeader = 'HSN,Description,UQC,Total Quantity,Rate,Taxable Value,Integrated Tax Amount,Central Tax Amount,State/UT Tax Amount,Cess Amount';
@@ -751,8 +819,11 @@ export function exportGSTR1_CSV(
     const s = gstr1DocSummary(list.map(r => r.reference_number), cancelledList.map(d => d.reference_number));
     if (s) lines.push([escapeCSV(label), s.from, s.to, s.totnum, s.cancel, s.net_issue].join(','));
   };
+  const isCancelledDebitNote = (d: Gstr1CancelledDoc) =>
+    d.category === 'Invoice Adjustments' && (d.adjustment_type === 'debit' || (d.adjustment_type == null && (d.total_amount || 0) > 0));
   docLine('Invoices for outward supply', invoices, cancelled.filter(d => d.category === 'Invoices'));
   docLine('Credit Note', notes, cancelled.filter(isCancelledCreditNote));
+  docLine('Debit Note', debitNotes, cancelled.filter(isCancelledDebitNote));
 
   const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
   triggerDownload(blob, filename);
