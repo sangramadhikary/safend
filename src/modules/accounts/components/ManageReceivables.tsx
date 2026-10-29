@@ -32,6 +32,7 @@ import { OneTimeInvoiceForm } from './OneTimeInvoiceForm';
 import { InvoiceImportDialog } from './InvoiceImportDialog';
 import { PayrollReceivablesSection } from './PayrollReceivablesSection';
 import { ReceivePaymentDialog } from './ReceivePaymentDialog';
+import { AdjustmentNoteDialog } from './AdjustmentNoteDialog';
 import { addNotification } from '@/services/supabase/NotificationService';
 import { checkAndAssignOverdueCollections } from '@/services/collections/OverdueCollectionService';
 import { type GstType } from '@/lib/tax/gst';
@@ -185,6 +186,10 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   /** Invoice the Cancel dialog is open for, and the reason being typed. */
   const [cancelEntry, setCancelEntry] = useState<ReceivableEntry | null>(null);
   const [cancelReason, setCancelReason] = useState('');
+  /** Credit / debit note dialog, optionally preset to an invoice. */
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteInvoice, setNoteInvoice] = useState<ReceivableEntry | null>(null);
+  const openNoteDialog = (inv: ReceivableEntry | null) => { setNoteInvoice(inv); setNoteOpen(true); };
 
   // New: Status filter, sorting, pagination, bulk selection
   const [statusFilter, setStatusFilter] = useState<'all' | 'created' | 'issued' | 'open' | 'overdue' | 'received' | 'cancelled'>('all');
@@ -526,36 +531,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
 
   // ─── FORM SUBMISSIONS ─────────────────────────────────────────────
 
-  const handleAdjustmentSubmit = () => {
-    const { adjustment_type, client_name, adj_number, reason, amount, gst_amount, date } = formData;
-    const type = (adjustment_type === 'credit' ? 'credit' : 'debit') as 'credit' | 'debit';
-    if (!client_name || !adj_number || !amount || !reason) {
-      toast({ title: "Validation Error", description: "All required fields must be filled.", variant: "destructive" });
-      return;
-    }
-    const amt = parseFloat(amount);
-    const gst = gst_amount ? parseFloat(gst_amount) : null;
-    const gross = amt + (gst || 0);
-    // Credit note reduces the receivable (contra → negative); debit note increases it.
-    // The GST component must carry the same sign so that GSTR-1 / GSTR-3B output tax
-    // is reduced by credit notes and increased by debit notes.
-    const signed = type === 'credit' ? -gross : gross;
-    const signedGst = gst === null ? null : (type === 'credit' ? -gst : gst);
-    const label = type === 'credit' ? 'Credit Note' : 'Debit Note';
-    createReceivable.mutate({
-      category: 'Invoice Adjustments',
-      adjustment_type: type,
-      description: `${label}: ${reason} | ${type === 'credit' ? 'CN' : 'DN'}#: ${adj_number}`,
-      client_name,
-      amount: type === 'credit' ? -amt : amt,
-      gst_amount: signedGst,
-      total_amount: signed,
-      due_date: date || null,
-      reference_number: adj_number,
-      notes: `${label} | Reason: ${reason}`,
-    });
-  };
-
   const handleEventLetterSubmit = () => {
     const { client_name, event_name, event_date, guards_required, rate_per_guard, duration_hours } = formData;
     if (!client_name || !event_name || !event_date || !guards_required || !rate_per_guard) {
@@ -645,7 +620,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       // Tax invoices are raised only through the invoice forms, which let the
       // database allocate the number (create_invoice).
       case 'Invoices': setShowAddForm(false); setRaiseInvoiceOpen(true); return;
-      case 'Invoice Adjustments': return handleAdjustmentSubmit();
+      // Notes are raised against an invoice so they are numbered and applied to it.
+      case 'Invoice Adjustments': setShowAddForm(false); openNoteDialog(null); return;
       case 'Event Letters': return handleEventLetterSubmit();
       case 'Taxes (ITC/TDS)': return handleTaxesSubmit();
       case 'Other Income': return handleOtherIncomeSubmit();
@@ -654,48 +630,6 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
   };
 
   // ─── FORM RENDERERS ──────────────────────────────────────────────────
-
-  const renderAdjustmentForm = () => {
-    const type = formData.adjustment_type === 'credit' ? 'credit' : 'debit';
-    return (
-      <div className="space-y-4">
-        {/* Credit vs Debit toggle */}
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => updateField('adjustment_type', 'debit')}
-            className={`h-11 rounded-lg text-sm font-medium border transition-all ${type === 'debit' ? 'bg-red-500 text-white border-transparent' : 'border-gray-200 dark:border-white/10 text-muted-foreground'}`}
-          >
-            Debit Note <span className="text-[11px] font-normal">(client owes more +)</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => updateField('adjustment_type', 'credit')}
-            className={`h-11 rounded-lg text-sm font-medium border transition-all ${type === 'credit' ? 'bg-green-600 text-white border-transparent' : 'border-gray-200 dark:border-white/10 text-muted-foreground'}`}
-          >
-            Credit Note <span className="text-[11px] font-normal">(client owes less −)</span>
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-1"><Label>Client Name*</Label><Input value={formData.client_name || ''} onChange={(e) => updateField('client_name', e.target.value)} /></div>
-          <div className="space-y-1"><Label>{type === 'credit' ? 'Credit' : 'Debit'} Note Number*</Label><Input value={formData.adj_number || ''} onChange={(e) => updateField('adj_number', e.target.value)} placeholder={type === 'credit' ? 'CN-001' : 'DN-001'} /></div>
-        </div>
-        <div className="space-y-1"><Label>Reason*</Label><Input value={formData.reason || ''} onChange={(e) => updateField('reason', e.target.value)} placeholder={type === 'credit' ? 'e.g. Service shortfall, overbilling correction' : 'e.g. Extra guards, overtime'} /></div>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-1"><Label>Amount (₹)*</Label><Input type="number" min="0" value={formData.amount || ''} onChange={(e) => updateField('amount', e.target.value)} /></div>
-          <div className="space-y-1"><Label>GST Amount (₹)</Label><Input type="number" min="0" value={formData.gst_amount || ''} onChange={(e) => updateField('gst_amount', e.target.value)} /></div>
-        </div>
-        <div className="space-y-1"><Label>Date</Label><Input type="date" value={formData.date || ''} onChange={(e) => updateField('date', e.target.value)} /></div>
-        <p className="text-[11px] text-muted-foreground">
-          {type === 'credit'
-            ? 'A credit note reduces what the client owes (posted as a contra/negative entry).'
-            : 'A debit note increases what the client owes.'}
-          {' '}The credit/debit type is preserved for GST reporting.
-        </p>
-      </div>
-    );
-  };
 
   const renderEventLetterForm = () => {
     const guards = formData.guards_required ? parseInt(formData.guards_required) : 0;
@@ -766,7 +700,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           <Select value={formData.category || ''} onValueChange={(v) => updateField('category', v)}>
             <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
             <SelectContent>
-              {RECEIVABLE_CATEGORIES.filter(c => c !== 'Invoices').map(c => (<SelectItem key={c} value={c}>{c}</SelectItem>))}
+              {RECEIVABLE_CATEGORIES.filter(c => c !== 'Invoices' && c !== 'Invoice Adjustments').map(c => (<SelectItem key={c} value={c}>{c}</SelectItem>))}
             </SelectContent>
           </Select>
         </div>
@@ -791,7 +725,11 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
           Tax invoices are raised with New Invoice, so each one gets the next number in sequence.
         </p>
       );
-      case 'Invoice Adjustments': return renderAdjustmentForm();
+      case 'Invoice Adjustments': return (
+        <p className="text-sm text-muted-foreground">
+          Credit and debit notes are raised against a tax invoice with New Adjustment, so each one gets the next CN/DN number.
+        </p>
+      );
       case 'Event Letters': return renderEventLetterForm();
       case 'Taxes (ITC/TDS)': return renderTaxesForm();
       case 'Other Income': return renderOtherIncomeForm();
@@ -1353,6 +1291,8 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <Button onClick={() => {
               if (filter === 'Invoices') {
                 setRaiseInvoiceOpen(true);
+              } else if (filter === 'Invoice Adjustments') {
+                openNoteDialog(null);
               } else {
                 setFormData({});
                 setShowAddForm(true);
@@ -1498,7 +1438,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
               <IndianRupee className="h-10 w-10 mx-auto mb-3 opacity-30" />
               <p>No entries found{statusFilter !== 'all' ? ` with status "${statusFilter}"` : filter !== 'All Receivables' ? ` for "${filter}"` : ''}.</p>
               {showAddButton && statusFilter === 'all' && (
-                <Button variant="link" className="mt-2" onClick={() => filter === 'Invoices' ? setRaiseInvoiceOpen(true) : setShowAddForm(true)}>
+                <Button variant="link" className="mt-2" onClick={() => filter === 'Invoices' ? setRaiseInvoiceOpen(true) : filter === 'Invoice Adjustments' ? openNoteDialog(null) : setShowAddForm(true)}>
                   <Plus className="h-4 w-4 mr-1" /> {getAddButtonLabel()}
                 </Button>
               )}
@@ -1648,7 +1588,13 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                               if (entry.status !== 'received' && entry.status !== 'cancelled' && amountDue(entry) > 0.01) {
                                 tiles.push({ key: 'pay', icon: <CheckCircle2 className="h-5 w-5 text-green-600" />, label: 'Record Payment', onClick: () => openReceiveAmount(entry) });
                               }
-                              tiles.push({ key: 'duplicate', icon: <Copy className="h-5 w-5 text-indigo-600" />, label: 'Duplicate', onClick: () => handleDuplicate(entry) });
+                              // Corrections to an issued invoice go by credit / debit note.
+                              if (entry.category === 'Invoices' && entry.status !== 'cancelled' && !isDraftInvoice(entry)) {
+                                tiles.push({ key: 'note', icon: <FileText className="h-5 w-5 text-rose-600" />, label: 'Credit / Debit Note', onClick: () => openNoteDialog(entry) });
+                              }
+                              if (entry.category !== 'Invoice Adjustments') {
+                                tiles.push({ key: 'duplicate', icon: <Copy className="h-5 w-5 text-indigo-600" />, label: 'Duplicate', onClick: () => handleDuplicate(entry) });
+                              }
                               if (entry.category === 'Invoices' || entry.category === 'Invoice Adjustments') {
                                 tiles.push({ key: 'print', icon: <Printer className="h-5 w-5 text-blue-600" />, label: 'Print', onClick: () => handleDownloadInvoice(entry) });
                               }
@@ -1897,6 +1843,14 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
         />
       )}
 
+
+      {/* Credit / debit note against a tax invoice (create_adjustment_note) */}
+      <AdjustmentNoteDialog
+        open={noteOpen}
+        onOpenChange={(v) => { setNoteOpen(v); if (!v) setNoteInvoice(null); }}
+        invoice={noteInvoice}
+        onCreated={() => queryClient.invalidateQueries({ queryKey: ['receivables'] })}
+      />
 
       {/* Record Payment: one receipt, allocated oldest invoice first (record_receipt) */}
       <ReceivePaymentDialog

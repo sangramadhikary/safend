@@ -139,3 +139,22 @@ export const refreshCollectionTasks = () => call<number>('refresh_collection_tas
 export function isDraftInvoice(row: { status?: string | null; issued_at?: string | null; paid_amount?: number | string | null }): boolean {
   return row.status === 'created' && !row.issued_at && !(Number(row.paid_amount) > 0);
 }
+
+export interface CreateAdjustmentNoteInput {
+  /** The tax invoice the note adjusts. */
+  against_id: string;
+  type: 'credit' | 'debit';
+  /** Taxable value before GST (> 0). GST is added at the invoice's rate. */
+  taxable_value: number;
+  reason: string;
+  /** Debit notes only: when the extra amount is due. */
+  due_date?: string | null;
+}
+
+/**
+ * Raise a credit or debit note against a tax invoice (create_adjustment_note).
+ * Numbered CN/… or DN/… in sequence; a credit note is applied against the
+ * invoice at once, a debit note becomes its own receivable.
+ */
+export const createAdjustmentNote = (p: CreateAdjustmentNoteInput) =>
+  call<Record<string, any> & { id: string; reference_number: string; total_amount: number }>('create_adjustment_note', { p });

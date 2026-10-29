@@ -567,6 +567,11 @@ BEGIN
       RAISE EXCEPTION 'An invoice becomes Received only when its payments are recorded.' USING ERRCODE = 'P0001';
     END IF;
   END IF;
+  -- Notes come only from record_receipt / create_adjustment_note (20261029040000).
+  IF NEW.category = 'Invoice Adjustments' AND current_user IN ('authenticated', 'anon') THEN
+    RAISE EXCEPTION 'Credit and debit notes are raised against an invoice (Credit / Debit Note), so they are numbered in sequence and applied to it.'
+      USING ERRCODE = 'P0001';
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -1062,6 +1067,10 @@ BEGIN
   FOR v_inv IN SELECT * FROM public.receivables WHERE id = ANY(v_ids) ORDER BY created_at, reference_number FOR UPDATE LOOP
     IF lower(btrim(coalesce(v_inv.client_name, ''))) <> lower(btrim(coalesce(v_target.client_name, ''))) THEN
       RAISE EXCEPTION 'Invoice % belongs to a different client.', coalesce(v_inv.reference_number, '');
+    END IF;
+    IF v_inv.work_order_id IS DISTINCT FROM v_target.work_order_id THEN
+      RAISE EXCEPTION 'Invoices % and % belong to different work orders. A receipt is applied within one work order; record a separate receipt for each.',
+        coalesce(v_inv.reference_number, '?'), coalesce(v_target.reference_number, '?') USING ERRCODE = 'P0001';
     END IF;
     IF v_inv.status = 'cancelled' OR coalesce(v_inv.total_amount, 0) <= 0
        OR v_inv.category NOT IN ('Invoices', 'Invoice Adjustments') THEN
