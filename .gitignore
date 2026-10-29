@@ -59,3 +59,8 @@ cloud.env
 
 .env*.local
 .env*
+
+# GST return files downloaded from the portal (client GSTINs and invoice values; the repo is public)
+*_GSTR1_*.json
+*_GSTR3B_*.json
+*_GSTR2B_*.json

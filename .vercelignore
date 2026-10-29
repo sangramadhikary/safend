@@ -21,3 +21,8 @@ server/node_modules/
 supabase/.temp/
 *.log
 .DS_Store
+
+# GST return files from the portal (client GSTINs) — never upload
+*_GSTR1_*.json
+*_GSTR3B_*.json
+*_GSTR2B_*.json
