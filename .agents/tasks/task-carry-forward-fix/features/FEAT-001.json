@@ -1,0 +1,28 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Add a client-name fallback path to fetchWorkOrderOutstandingInvoices so invoices with work_order_id = NULL (created before migration 20260802200000) are included in carry-forward calculations when a clientName is supplied. Update callers in GenerateInvoiceDialog.tsx and OneTimeInvoiceForm.tsx to pass clientName. Independent of FEAT-002.",
+  "status": "pending",
+  "steps": [
+    "1. In src/lib/invoice/outstanding.ts — add optional fourth parameter `clientName?: string | null` to fetchWorkOrderOutstandingInvoices. Current signature: `(supabase, workOrderId, excludeRef?)`. New signature: `(supabase, workOrderId, excludeRef?, clientName?)`. TypeScript type: `clientName?: string | null`.",
+    "2. In outstanding.ts — after the existing `if (!woId) return []` guard, add a new fallback branch: when `!woId` AND `clientName` is a non-blank string, execute a client-name query instead of returning `[]`. The client-name query: `supabase.from('receivables').select('reference_number, total_amount, previous_balance, previous_balance_breakdown, due_date, status, notes').eq('category', 'Invoices').in('status', UNPAID_STATUSES).eq('client_name', clientName.trim()).order('due_date', { ascending: true })`. If the query errors or returns no data, return `[]`. Pass the result to `computeOutstandingFromRows(data, excludeRef)` exactly as the work_order_id path does.",
+    "3. Keep the existing work_order_id path completely unchanged — the fallback only fires when `woId` is blank.",
+    "4. In src/modules/accounts/components/GenerateInvoiceDialog.tsx — the call site is at line ~224: `fetchWorkOrderOutstandingInvoices(supabaseClient, reviewWorkOrderId)`. Update to: `fetchWorkOrderOutstandingInvoices(supabaseClient, reviewWorkOrderId, null, selectedClientName)`. The `selectedClientName` state variable already exists (useState at line ~119).",
+    "5. In src/modules/accounts/components/OneTimeInvoiceForm.tsx — there are TWO call sites. First at line ~353 (edit-mode effect): `fetchWorkOrderOutstandingInvoices(supabaseClient, editEntry.work_order_id, editEntry.reference_number || null)` — update to `fetchWorkOrderOutstandingInvoices(supabaseClient, editEntry.work_order_id, editEntry.reference_number || null, editEntry.client_name || null)`. Second at line ~679 (handleSelectWorkOrder): `fetchWorkOrderOutstandingInvoices(supabaseClient, woId, editEntry?.reference_number || null)` — update to `fetchWorkOrderOutstandingInvoices(supabaseClient, woId, editEntry?.reference_number || null, clientName)`. The `clientName` state variable is already set before this call (line ~553: `setClientName(wo.clientName)` followed by the handleSelectWorkOrder body).",
+    "6. In src/lib/invoice/outstanding.test.ts — add a new describe block 'fetchWorkOrderOutstandingInvoices (client-name fallback)' with two tests: (a) when workOrderId is null and clientName is supplied, the function executes a query with eq('client_name', ...) and returns the rows; (b) when workOrderId is null and clientName is also blank/null, still returns []. Use the existing mockClient helper — note that the mock builder records calls keyed as `eq:<col>`, so assert `calls['eq:client_name']` equals the supplied name for test (a)."
+  ],
+  "acceptance_criteria": [
+    "fetchWorkOrderOutstandingInvoices(client, null, null, 'H H ENTERPRISES') executes a Supabase query with .eq('client_name', 'H H ENTERPRISES') instead of returning [].",
+    "fetchWorkOrderOutstandingInvoices(client, null, null, '') still returns [].",
+    "fetchWorkOrderOutstandingInvoices(client, null, null, null) still returns [].",
+    "fetchWorkOrderOutstandingInvoices(client, 'WO-123', null, 'AnyName') still uses the work_order_id path (eq:work_order_id === 'WO-123'), not the clientName path.",
+    "The existing outstanding.test.ts tests all continue to pass.",
+    "npx tsc --noEmit exits 0 with no new errors in outstanding.ts, GenerateInvoiceDialog.tsx, or OneTimeInvoiceForm.tsx."
+  ],
+  "verification": [
+    "npx tsc --noEmit (run from x:\\Safend\\project\\main — must exit 0)",
+    "npm run test (all tests pass, including the two new ones in outstanding.test.ts)"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

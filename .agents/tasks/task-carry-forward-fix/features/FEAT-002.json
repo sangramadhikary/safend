@@ -1,0 +1,29 @@
+{
+  "id": "FEAT-002",
+  "type": "fix",
+  "description": "After a payment is recorded (or undone) on invoice A, propagate the updated remaining balance to any newer invoice B whose previous_balance_breakdown references A. This fixes the stale previous_balance column that causes payment advice to overstate what is owed. Independent of FEAT-001 (different files, different code path).",
+  "status": "pending",
+  "steps": [
+    "1. In src/modules/accounts/components/ManageReceivables.tsx — add a standalone async helper function `propagateBalanceUpdate` ABOVE the component function (or as a module-level function after imports). Signature: `async function propagateBalanceUpdate(supabase: typeof supabaseClient, paidRefNumber: string, newBalanceAmount: number): Promise<void>`. This function is the best-effort propagation engine; all errors are caught internally.",
+    "2. Inside propagateBalanceUpdate — find all invoices B that reference paidRefNumber in their previous_balance_breakdown. Because the JSONB uses BOTH `referenceNumber` and `reference_number` key names (confirmed in ReceivableEntry interface at line ~83-88), issue TWO separate queries and merge results by id: Query 1: `.from('receivables').select('id, previous_balance, previous_balance_breakdown, total_amount, notes, reference_number').filter('previous_balance_breakdown', 'cs', JSON.stringify([{ referenceNumber: paidRefNumber }]))`. Query 2: `.from('receivables').select('id, previous_balance, previous_balance_breakdown, total_amount, notes, reference_number').filter('previous_balance_breakdown', 'cs', JSON.stringify([{ reference_number: paidRefNumber }]))`. Merge into a Map<string, any> keyed by id (deduplication). Wrap both queries in a single try/catch; if either throws, return early silently.",
+    "3. Inside propagateBalanceUpdate — for each invoice B in the merged results, recompute its correct previous_balance: iterate over B's previous_balance_breakdown array. For each breakdown entry, determine its ref: `const ref = entry.referenceNumber ?? entry.reference_number`. Fetch the current remaining balance of that original invoice row: `const { data: origRows } = await supabase.from('receivables').select('total_amount, notes').eq('reference_number', ref).single()`. Parse its balance note using the SAME regex as parseBalanceFromNotes: `/Balance:\\s*₹?([\\d,]+(?:\\.\\d+)?)/`. If a balance note exists, use that value. Otherwise use `origRow.total_amount`. This is the current remaining balance for that entry.",
+    "4. Inside propagateBalanceUpdate — build the updated breakdown array: for each original breakdown entry, replace `amount` with the fetched remaining balance (do NOT mutate other fields like referenceNumber/reference_number/date). Sum all updated amounts to compute the new `previous_balance` for invoice B. Round to 2dp (Math.round(sum * 100) / 100).",
+    "5. Inside propagateBalanceUpdate — update invoice B: `await supabase.from('receivables').update({ previous_balance: newPreviousBalance, previous_balance_breakdown: updatedBreakdown }).eq('id', B.id)`. If the update errors, log to console.warn but continue to the next invoice B. Wrap the per-invoice logic in its own try/catch.",
+    "6. In the recordReceivedAmount mutation (line ~767 — immediately after `const { error } = await supabaseClient.from('receivables').update(updateData).eq('id', entry.id); if (error) throw new Error(error.message);`) — add the propagation call: `if (entry.reference_number) { try { await propagateBalanceUpdate(supabaseClient, entry.reference_number, balanceAmount); } catch { /* best-effort: never block payment flow */ } }`. The call goes AFTER the primary update succeeds and BEFORE the logChange call.",
+    "7. In the undoLastPayment mutation (line ~422 — immediately after the primary `const { error } = await supabaseClient.from('receivables').update({ status: newStatus, notes: updatedNotes }).eq('id', entry.id); if (error) throw error;`) — add the propagation call: `if (entry.reference_number) { try { await propagateBalanceUpdate(supabaseClient, entry.reference_number, entry.total_amount); } catch { /* best-effort */ } }`. When a payment is undone, the restored balance is `entry.total_amount` (the full invoice amount, as if no payment were recorded). Note: the undoLastPayment mutation also has a fallback branch for legacy invoices (the `else` block at line ~434); add the same propagation call there too, using `entry.total_amount` as the restored balance.",
+    "8. TypeScript: the `supabaseClient` import already exists at line 25. The `propagateBalanceUpdate` function takes it as a parameter typed as `typeof supabaseClient` to avoid circular dependency issues. Do NOT import any server-side Supabase client."
+  ],
+  "acceptance_criteria": [
+    "After recordReceivedAmount succeeds on invoice A (reference_number = A_ref), any invoice B with A_ref in its previous_balance_breakdown gets its previous_balance column updated to reflect A's new remaining balance.",
+    "The primary payment record is never blocked — if propagateBalanceUpdate throws at any point, the error is caught and payment succeeds anyway.",
+    "After undoLastPayment on invoice A, any invoice B referencing A gets its previous_balance updated to reflect A's full total_amount (restored balance).",
+    "Both referenceNumber and reference_number JSONB key variants are handled — the function queries for both and deduplicates by row id.",
+    "npx tsc --noEmit exits 0 with no new type errors in ManageReceivables.tsx."
+  ],
+  "verification": [
+    "npx tsc --noEmit (run from x:\\Safend\\project\\main — must exit 0)",
+    "npm run test (all existing tests pass — ManageReceivables has no unit tests, so TypeScript check is the primary gate)"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

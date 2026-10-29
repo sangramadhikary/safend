@@ -1,0 +1,23 @@
+{
+  "project_type": "Next.js 15 app (see AGENTS.md — treat as unknown version, read node_modules/next/dist/docs/ before any Next.js-specific code). Supabase backend. TypeScript throughout.",
+  "language": "TypeScript / TSX",
+  "build_system": "next build (npm run build). No custom bundler quirks beyond standard Next.js.",
+  "test_framework": "vitest — command: npm run test (alias: vitest --run). Test files co-located with source, e.g. src/lib/invoice/outstanding.test.ts.",
+  "build_command": "npx tsc --noEmit",
+  "test_command": "npm run test",
+  "verification_instructions": "1. Run `npx tsc --noEmit` from x:\\Safend\\project\\main — must exit 0. 2. Run `npm run test` — all tests must pass. 3. No new type errors introduced.",
+  "snapshot_or_generated_files": null,
+  "environment_constraints": "Use supabaseClient (imported from @/integrations/supabase/client) throughout ManageReceivables.tsx — NOT the server client. Never restart the dev server. Windows shell — use PowerShell syntax.",
+  "contribution_requirements": "AGENTS.md says this is a non-standard Next.js version — read node_modules/next/dist/docs/ before adding any Next.js API calls. Do NOT change payment-settlement.ts or calculations.ts.",
+  "key_patterns": "Supabase queries use chained builder: .from('receivables').select(...).eq(...).in(...). JSONB containment filter: .filter('previous_balance_breakdown', 'cs', JSON.stringify([{key: val}])). Balance notes parsed with regex /Balance:\\s*₹?([\\d,]+(?:\\.\\d+)?)/ (see parseBalanceFromNotes in outstanding.ts). Both referenceNumber and reference_number key names appear in previous_balance_breakdown JSONB — must handle both. Error-wrapping pattern: wrap best-effort work in try/catch; never block primary flow.",
+  "relevant_files": [
+    "src/lib/invoice/outstanding.ts",
+    "src/lib/invoice/outstanding.test.ts",
+    "src/modules/accounts/components/ManageReceivables.tsx",
+    "src/modules/accounts/components/GenerateInvoiceDialog.tsx",
+    "src/modules/accounts/components/OneTimeInvoiceForm.tsx",
+    "src/lib/invoice/payment-settlement.ts",
+    "src/lib/invoice/calculations.ts"
+  ],
+  "directory_structure": "src/lib/invoice/ — pure TS calculation/query helpers (outstanding.ts, payment-settlement.ts, calculations.ts, rateBasis.ts). src/modules/accounts/components/ — React components for accounts module. app/api/invoice-pdf/route.ts — server-side PDF generation. supabase/migrations/ — schema history."
+}

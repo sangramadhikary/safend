@@ -1,0 +1,7 @@
+{
+  "task_id": "task-carry-forward-fix",
+  "task_description": "Fix two confirmed bugs in the invoice carry-forward system: (1) fetchWorkOrderOutstandingInvoices siloes invoices with null work_order_id; (2) previous_balance on newer invoices is never updated when a partial payment is recorded on an older linked invoice.",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}
