@@ -279,6 +279,12 @@ async function loadInvoiceDocument(receivableId: string, actor: Actor): Promise<
   if (!canReadInvoice(actor, row.client_name)) {
     return { status: 403, error: 'You are not permitted to view this invoice.' };
   }
+  // Clients see an invoice once it is issued, never a draft Accounts can still
+  // change (same rule as the receivables_select_client policy).
+  const isDraft = row.status === 'created' && !row.issued_at && !(Number(row.paid_amount) > 0);
+  if (!isInvoiceStaff(actor) && isDraft) {
+    return { status: 404, error: 'Invoice not found.' };
+  }
 
   // Payment rows supply the receipt details. If they fail to load the statement
   // still adds up: it falls back to the row's trigger-maintained paid, TDS and
