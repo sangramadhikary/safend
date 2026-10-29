@@ -221,6 +221,19 @@ ALTER TABLE public.receivable_payments ADD COLUMN IF NOT EXISTS reversed_at     
 ALTER TABLE public.receivable_payments ADD COLUMN IF NOT EXISTS reversal_reason     text;
 ALTER TABLE public.receivable_payments ADD COLUMN IF NOT EXISTS created_by          uuid;
 
+-- Some installs carry CHECK constraints created outside the migration set
+-- that allow only mode Cash / Cheque / Bank Transfer and balance_handling
+-- due_date / credit_note. Allocation rows also use mode 'Credit Note',
+-- 'Imported', 'Adjustment' and 'Legacy', and balance_handling 'keep' /
+-- 'promise'. amount > 0 stays: every allocation row credits something.
+ALTER TABLE public.receivable_payments DROP CONSTRAINT IF EXISTS receivable_payments_mode_check;
+ALTER TABLE public.receivable_payments ADD CONSTRAINT receivable_payments_mode_check
+  CHECK (mode IS NULL OR mode = ANY (ARRAY['Cash', 'Cheque', 'Bank Transfer', 'Imported', 'Adjustment',
+                                           'Credit Note', 'Legacy']));
+ALTER TABLE public.receivable_payments DROP CONSTRAINT IF EXISTS receivable_payments_balance_handling_check;
+ALTER TABLE public.receivable_payments ADD CONSTRAINT receivable_payments_balance_handling_check
+  CHECK (balance_handling IS NULL OR balance_handling = ANY (ARRAY['keep', 'promise', 'credit_note', 'due_date']));
+
 CREATE INDEX IF NOT EXISTS idx_receivable_payments_receivable ON public.receivable_payments (receivable_id);
 CREATE INDEX IF NOT EXISTS idx_receivable_payments_receipt    ON public.receivable_payments (receipt_id);
 CREATE INDEX IF NOT EXISTS idx_receivable_payments_cheque     ON public.receivable_payments (cheque_register_id);
@@ -910,6 +923,36 @@ BEGIN
 END;
 $$;
 
+-- Reverse a register entry a receipt posted. Tables with an is_void column are
+-- voided, so the register keeps the entry (some installs forbid deleting bank
+-- transactions); otherwise the row is deleted.
+CREATE OR REPLACE FUNCTION public.ledger_reverse_row(p_table text, p_id uuid, p_reason text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cols text[];
+  v_sets text[] := ARRAY['is_void = true'];
+BEGIN
+  IF p_id IS NULL OR p_table NOT IN ('bank_transactions', 'cash_register', 'cheque_register')
+     OR to_regclass('public.' || p_table) IS NULL THEN
+    RETURN;
+  END IF;
+  SELECT array_agg(column_name::text) INTO v_cols
+    FROM information_schema.columns WHERE table_schema = 'public' AND table_name = p_table;
+  IF 'is_void' = ANY(v_cols) THEN
+    IF 'void_reason' = ANY(v_cols) THEN v_sets := v_sets || format('void_reason = %L', p_reason); END IF;
+    IF 'voided_at' = ANY(v_cols) THEN v_sets := v_sets || 'voided_at = now()'::text; END IF;
+    IF 'voided_by' = ANY(v_cols) THEN v_sets := v_sets || 'voided_by = auth.uid()'::text; END IF;
+    EXECUTE format('UPDATE public.%I SET %s WHERE id = $1', p_table, array_to_string(v_sets, ', ')) USING p_id;
+  ELSE
+    EXECUTE format('DELETE FROM public.%I WHERE id = $1', p_table) USING p_id;
+  END IF;
+END;
+$$;
+
 -- Record one receipt and allocate it across invoices of one client.
 --
 -- p: { target_id, carried_ids[], cash_amount, tds: { "<invoice id>": amount },
@@ -1247,6 +1290,7 @@ BEGIN
 
   FOR v_cn IN SELECT credit_note_id FROM public.receivable_payments
                WHERE id = ANY(v_ids) AND credit_note_id IS NOT NULL LOOP
+    -- (credit notes the receipt raised are cancelled; their numbers stay retired)
     PERFORM set_config('app.bypass_invoice_guards', 'on', true);
     UPDATE public.receivables
        SET status = 'cancelled', cancelled_at = now(), cancel_reason = 'Receipt undone'
@@ -1257,18 +1301,12 @@ BEGIN
   DELETE FROM public.receivable_payments WHERE id = ANY(v_ids);
   GET DIAGNOSTICS v_count = ROW_COUNT;
 
-  IF v_bank IS NOT NULL AND to_regclass('public.bank_transactions') IS NOT NULL THEN
-    EXECUTE 'DELETE FROM public.bank_transactions WHERE id = $1' USING v_bank;
-  END IF;
-  IF v_cash IS NOT NULL AND to_regclass('public.cash_register') IS NOT NULL THEN
-    EXECUTE 'DELETE FROM public.cash_register WHERE id = $1' USING v_cash;
-  END IF;
+  PERFORM public.ledger_reverse_row('bank_transactions', v_bank, 'Receipt undone');
+  PERFORM public.ledger_reverse_row('cash_register', v_cash, 'Receipt undone');
   IF v_cheque IS NOT NULL AND to_regclass('public.cheque_register') IS NOT NULL THEN
     EXECUTE 'SELECT linked_transaction_id FROM public.cheque_register WHERE id = $1' INTO v_linked USING v_cheque;
-    IF v_linked IS NOT NULL THEN
-      EXECUTE 'DELETE FROM public.bank_transactions WHERE id = $1' USING v_linked;
-    END IF;
-    EXECUTE 'DELETE FROM public.cheque_register WHERE id = $1' USING v_cheque;
+    PERFORM public.ledger_reverse_row('bank_transactions', v_linked, 'Receipt undone');
+    PERFORM public.ledger_reverse_row('cheque_register', v_cheque, 'Receipt undone');
   END IF;
 
   -- Rows recorded before this migration carry no ledger link. Remove the
@@ -1280,7 +1318,7 @@ BEGIN
                 WHERE reference_number = $1 AND type = ''credit'' AND round(amount::numeric, 2) = $2'
         INTO v_matches USING v_last.transaction_number, v_receipt_cash;
       IF cardinality(v_matches) = 1 THEN
-        EXECUTE 'DELETE FROM public.bank_transactions WHERE id = $1' USING v_matches[1];
+        PERFORM public.ledger_reverse_row('bank_transactions', v_matches[1], 'Receipt undone');
       ELSE
         v_warnings := v_warnings || format('The bank entry for UTR %s was not removed automatically; check Banking.', v_last.transaction_number);
       END IF;
@@ -1290,7 +1328,7 @@ BEGIN
                   AND transaction_date::date = $2 AND description LIKE ''Receipt:%'''
         INTO v_matches USING v_receipt_cash, v_last.created_at::date;
       IF cardinality(v_matches) = 1 THEN
-        EXECUTE 'DELETE FROM public.cash_register WHERE id = $1' USING v_matches[1];
+        PERFORM public.ledger_reverse_row('cash_register', v_matches[1], 'Receipt undone');
       ELSE
         v_warnings := v_warnings || 'The cash register entry was not removed automatically; check the cash register.'::text;
       END IF;
@@ -1300,7 +1338,7 @@ BEGIN
                 WHERE cheque_number = $1 AND type = ''received'' AND round(amount::numeric, 2) = $2'
         INTO v_matches USING v_last.cheque_number, v_receipt_cash;
       IF cardinality(v_matches) = 1 THEN
-        EXECUTE 'DELETE FROM public.cheque_register WHERE id = $1' USING v_matches[1];
+        PERFORM public.ledger_reverse_row('cheque_register', v_matches[1], 'Receipt undone');
       ELSE
         v_warnings := v_warnings || format('Cheque %s was not removed from the cheque register automatically.', v_last.cheque_number);
       END IF;
@@ -1870,6 +1908,7 @@ REVOKE ALL ON FUNCTION public.next_invoice_number(text)          FROM PUBLIC, an
 REVOKE ALL ON FUNCTION public.next_credit_note_number(text)      FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.receivables_apply_ledger(uuid)     FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.ledger_insert_row(text, jsonb)     FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.ledger_reverse_row(text, uuid, text) FROM PUBLIC, anon, authenticated;
 
 -- Used inside RLS policies, so the invoking role needs EXECUTE.
 REVOKE ALL ON FUNCTION public.app_user_inactive(uuid)            FROM PUBLIC, anon;

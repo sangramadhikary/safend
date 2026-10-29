@@ -100,6 +100,16 @@ BEGIN
           v_take := least(v_left, round(p.amount - coalesce(p.tds_amount, 0), 2));
           CONTINUE WHEN v_take <= 0;
           v_receipt := coalesce(p.receipt_id, gen_random_uuid());
+          v_left := round(v_left - v_take, 2);
+          -- The whole row belongs to the carried invoice: move it (payment rows
+          -- must keep a positive amount, so it is not split into a ₹0 row).
+          IF v_take >= p.amount THEN
+            UPDATE public.receivable_payments
+               SET receivable_id = c.id, receipt_id = v_receipt, allocation_source = 'reallocated-legacy',
+                   notes = 'Carried due paid through invoice ' || coalesce(o.reference_number, '') || ' (re-attributed by the 2026-10-29 ledger script)'
+             WHERE id = p.id;
+            CONTINUE;
+          END IF;
           UPDATE public.receivable_payments
              SET amount = round(amount - v_take, 2), receipt_id = v_receipt
            WHERE id = p.id;
@@ -113,7 +123,6 @@ BEGIN
             coalesce(p.payment_date, p.created_at::date), 'reallocated-legacy',
             'Carried due paid through invoice ' || coalesce(o.reference_number, '') || ' (re-attributed by the 2026-10-29 ledger script)',
             p.created_by, p.created_at);
-          v_left := round(v_left - v_take, 2);
         END LOOP;
         IF v_left > 0.005 THEN
           RAISE EXCEPTION 'Invoice %: only part of the ₹% to move to % was found in its payment rows; nothing was changed.',
