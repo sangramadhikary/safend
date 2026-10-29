@@ -40,7 +40,7 @@ export interface EmployeeComplianceEntry {
 
 // ─── HELPERS ────────────────────────────────────────────────────────────────
 
-function triggerDownload(blob: Blob, filename: string): void {
+export function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -159,7 +159,7 @@ export interface Gstr1InvoiceRow {
 }
 
 /** Format a date as DD-MM-YYYY required by GSTN portal */
-function toGstnDate(isoDate: string): string {
+export function toGstnDate(isoDate: string): string {
   const d = new Date(isoDate);
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -172,7 +172,7 @@ function stateCodeFromGstin(gstin?: string | null): string {
   return g.length >= 2 ? g.slice(0, 2) : '00';
 }
 
-const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+export const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /** B2C inter-state invoices above this value go to B2CL (₹1 lakh since 1 Aug 2024). */
 const B2CL_THRESHOLD = 100000;
@@ -216,13 +216,26 @@ function toGstnJson(payload: unknown): string {
   ).replace(/"__GSTN__(-?\d+\.\d{2})__GSTN__"/g, '$1');
 }
 
-function isInterStateRow(row: Gstr1InvoiceRow): boolean {
+/**
+ * Buyer GSTIN for a receivable. The `client_gstin` column wins; otherwise it is
+ * read from the notes blob, where the invoice forms have historically written
+ * it as "GSTIN: …" (one-time / imported) or "Client GSTIN: …" (generated).
+ * Returns null for unregistered buyers.
+ */
+export function resolveBuyerGstin(row: { client_gstin?: string | null; notes?: string | null }): string | null {
+  const col = (row.client_gstin || '').trim().toUpperCase();
+  if (col) return col;
+  const m = typeof row.notes === 'string' ? row.notes.match(/(?:Client\s+)?GSTIN:\s*([0-9A-Za-z]{15})\b/i) : null;
+  return m ? m[1].toUpperCase() : null;
+}
+
+export function isInterStateRow(row: Gstr1InvoiceRow): boolean {
   if (row.gst_type) return row.gst_type === 'igst';
   return typeof row.notes === 'string' && row.notes.toLowerCase().includes('igst');
 }
 
 /** Split a tax amount into IGST, or into equal CGST/SGST halves. */
-function splitTax(tax: number, inter: boolean): { iamt: number; camt: number; samt: number } {
+export function splitTax(tax: number, inter: boolean): { iamt: number; camt: number; samt: number } {
   const t = r2(tax);
   if (inter) return { iamt: t, camt: 0, samt: 0 };
   const camt = r2(t / 2);
@@ -249,7 +262,7 @@ interface InvoiceAllocation { sac: string; rt: number; txval: number; tax: numbe
  * RCM supplies store gst_amount = 0 (the recipient pays), but GSTR-1 still
  * reports the tax on them, so it is computed from the rate.
  */
-function allocateInvoice(row: Gstr1InvoiceRow): InvoiceAllocation[] {
+export function allocateInvoice(row: Gstr1InvoiceRow): InvoiceAllocation[] {
   const txTotal = r2(Math.abs(row.amount || 0));
   const lines = Array.isArray(row.line_items) ? row.line_items : [];
 

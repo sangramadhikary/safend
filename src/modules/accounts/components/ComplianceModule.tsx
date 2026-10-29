@@ -26,7 +26,8 @@ import { Plus, Search, Download, IndianRupee, Loader2, FileText, AlertTriangle, 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV } from '../utils/complianceExport';
+import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV, resolveBuyerGstin } from '../utils/complianceExport';
+import { exportGSTR1_SalesRegisterXLSX, exportGSTR1_SalesRegisterPDF } from '../utils/gstr1SalesRegister';
 import { SAFEND_SUPPLIER } from '@/lib/invoice/document';
 import { CountUp } from '@/components/dashboard/CountUp';
 import { formatINRShort } from '@/lib/format';
@@ -200,7 +201,9 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
         .neq('status', 'cancelled')
         .order('created_at', { ascending: false });
       if (error) { console.warn('Failed to fetch GST outward:', error.message); return []; }
-      return data ?? [];
+      // Most invoices carry the buyer GSTIN only in `notes`; resolve it once here
+      // so GSTR-1 B2B/B2C classification and every export see the real GSTIN.
+      return (data ?? []).map((r: any) => ({ ...r, client_gstin: resolveBuyerGstin(r) }));
     },
     enabled: activeSection === 'gst',
   });
@@ -666,8 +669,8 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
   const handleExport = (format: 'csv' | 'xlsx' | 'json' | 'pdf') => {
     const dateSuffix = new Date().toISOString().slice(0, 10);
 
-    // ── GSTR-1: use portal-compliant export functions ─────────────────────
-    if (activeSection === 'gst' && gstSubTab === 'gstr1' && (format === 'csv' || format === 'json')) {
+    // ── GSTR-1: portal JSON/CSV, and the CA's sales register as Excel/PDF ─
+    if (activeSection === 'gst' && gstSubTab === 'gstr1') {
       if (gstPeriod === 'all') {
         toast({
           title: "Select a Return Period",
@@ -684,7 +687,18 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       const [y, m] = gstPeriod.split('-');
       const baseFilename = `GSTR1_${SAFEND_SUPPLIER.gstin}_${m}${y}_${dateSuffix}`;
 
-      if (format === 'json') {
+      if (format === 'xlsx' || format === 'pdf') {
+        const run = format === 'xlsx' ? exportGSTR1_SalesRegisterXLSX : exportGSTR1_SalesRegisterPDF;
+        run(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER, `${baseFilename}.${format}`)
+          .then(() => toast({
+            title: `GSTR-1 ${format === 'xlsx' ? 'Excel' : 'PDF'} exported`,
+            description: "Details of sale for the month, in the CA's register format.",
+          }))
+          .catch((err) => {
+            console.error('GSTR-1 sales register export failed:', err);
+            toast({ title: "Export failed", description: "Could not generate the GSTR-1 file. Please try again.", variant: "destructive" });
+          });
+      } else if (format === 'json') {
         exportGSTR1_JSON(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.json`);
         toast({ title: "GSTR-1 JSON exported", description: "Upload this file at GST Portal → Returns Dashboard → GSTR-1 → Prepare Offline." });
       } else {
@@ -922,6 +936,9 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent>
+                {gstSubTab === 'gstr1' && (
+                  <DropdownMenuItem onClick={() => handleExport('xlsx')}>Excel</DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={() => handleExport('csv')}>CSV</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('json')}>JSON</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('pdf')}>PDF</DropdownMenuItem>
