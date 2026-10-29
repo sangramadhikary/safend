@@ -26,7 +26,7 @@ import { Plus, Search, Download, IndianRupee, Loader2, FileText, AlertTriangle, 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV, resolveBuyerGstin } from '../utils/complianceExport';
+import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV, resolveBuyerGstin, type Gstr1CancelledDoc } from '../utils/complianceExport';
 import { exportGSTR1_SalesRegisterXLSX, exportGSTR1_SalesRegisterPDF } from '../utils/gstr1SalesRegister';
 import { SAFEND_SUPPLIER } from '@/lib/invoice/document';
 import { CountUp } from '@/components/dashboard/CountUp';
@@ -204,6 +204,22 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       // Most invoices carry the buyer GSTIN only in `notes`; resolve it once here
       // so GSTR-1 B2B/B2C classification and every export see the real GSTIN.
       return (data ?? []).map((r: any) => ({ ...r, client_gstin: resolveBuyerGstin(r) }));
+    },
+    enabled: activeSection === 'gst',
+  });
+
+  // Cancelled invoices and notes carry no tax, but GSTR-1 Table 13 must still
+  // count their numbers (serial range, total, cancelled, net issued).
+  const { data: gstCancelledDocs = [] } = useQuery<Array<Gstr1CancelledDoc & { created_at: string }>>({
+    queryKey: ['compliance', 'gst-cancelled-docs'],
+    queryFn: async () => {
+      const { data, error } = await supabaseClient
+        .from('receivables')
+        .select('reference_number, category, adjustment_type, total_amount, created_at')
+        .in('category', ['Invoices', 'Invoice Adjustments'])
+        .eq('status', 'cancelled');
+      if (error) { console.warn('Failed to fetch cancelled documents:', error.message); return []; }
+      return (data ?? []) as any;
     },
     enabled: activeSection === 'gst',
   });
@@ -699,10 +715,10 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
             toast({ title: "Export failed", description: "Could not generate the GSTR-1 file. Please try again.", variant: "destructive" });
           });
       } else if (format === 'json') {
-        exportGSTR1_JSON(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.json`);
+        exportGSTR1_JSON(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.json`, gstCancelledDocs.filter(inPeriod));
         toast({ title: "GSTR-1 JSON exported", description: "Upload this file at GST Portal → Returns Dashboard → GSTR-1 → Prepare Offline." });
       } else {
-        exportGSTR1_CSV(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.csv`);
+        exportGSTR1_CSV(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `${baseFilename}.csv`, gstCancelledDocs.filter(inPeriod));
         toast({ title: "GSTR-1 CSV exported", description: "Use this with the GSTN Offline Tool to review and generate the upload JSON." });
       }
       return;

@@ -397,6 +397,33 @@ function sortDocNumbers(nums: string[]): string[] {
   return [...nums].sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 }
 
+/** A document cancelled in the return period: its number stays in the Table 13 range. */
+export interface Gstr1CancelledDoc {
+  reference_number: string | null;
+  /** 'Invoices' or 'Invoice Adjustments'. */
+  category: string;
+  adjustment_type?: string | null;
+  total_amount?: number | null;
+}
+
+/** Credit notes among the cancelled documents (adjustment type, else negative value). */
+export const isCancelledCreditNote = (d: Gstr1CancelledDoc) =>
+  d.category === 'Invoice Adjustments' && (d.adjustment_type === 'credit' || (d.adjustment_type == null && (d.total_amount || 0) < 0));
+
+/**
+ * Table 13 figures for one document type. Cancelled numbers are part of the
+ * serial range and of the total, and are reported as cancelled, so
+ * net issued = total − cancelled.
+ */
+export function gstr1DocSummary(issued: Array<string | null | undefined>, cancelled: Array<string | null | undefined>) {
+  const clean = (list: Array<string | null | undefined>) =>
+    list.map((n) => n?.trim()).filter((n): n is string => !!n);
+  const cancelledNums = [...new Set(clean(cancelled))];
+  const all = sortDocNumbers([...new Set([...clean(issued), ...cancelledNums])]);
+  if (!all.length) return null;
+  return { from: all[0], to: all[all.length - 1], totnum: all.length, cancel: cancelledNums.length, net_issue: all.length - cancelledNums.length };
+}
+
 /**
  * Generates the GSTN-portal-compliant JSON for GSTR-1.
  *
@@ -415,6 +442,8 @@ export function exportGSTR1_JSON(
   periodKey: string,
   supplierGstin: string,
   filename: string,
+  /** Invoices and notes cancelled in the period (Table 13). */
+  cancelled: Gstr1CancelledDoc[] = [],
 ): void {
   const [year, month] = periodKey.split('-');
   const fp = `${month}${year}`; // MMYYYY
@@ -530,26 +559,14 @@ export function exportGSTR1_JSON(
   // ── HSN summary (Table 12) — split B2B / B2C ───────────────────────────
   const hsn = buildHsnSummary(rows);
 
-  // ── Documents issued (Table 13) ─────────────────────────────────────────
-  const docRange = (doc_num: number, doc_typ: string, list: Gstr1InvoiceRow[]) => {
-    const nums = sortDocNumbers(list.map(r => r.reference_number?.trim()).filter((n): n is string => !!n));
-    if (!nums.length) return null;
-    return {
-      doc_num,
-      doc_typ,
-      docs: [{
-        num:       1,
-        from:      nums[0],
-        to:        nums[nums.length - 1],
-        totnum:    nums.length,
-        cancel:    0,
-        net_issue: nums.length,
-      }],
-    };
+  // ── Documents issued (Table 13), cancelled numbers counted ─────────────
+  const docRange = (doc_num: number, doc_typ: string, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
+    const s = gstr1DocSummary(list.map(r => r.reference_number), cancelledList.map(d => d.reference_number));
+    return s ? { doc_num, doc_typ, docs: [{ num: 1, ...s }] } : null;
   };
   const doc_det = [
-    docRange(1, 'Invoices for outward supply', invoices),
-    docRange(5, 'Credit Note', notes),
+    docRange(1, 'Invoices for outward supply', invoices, cancelled.filter(d => d.category === 'Invoices')),
+    docRange(5, 'Credit Note', notes, cancelled.filter(isCancelledCreditNote)),
   ].filter(Boolean);
 
   // ── Assemble in the same key order as the GST offline tool ─────────────
@@ -580,6 +597,8 @@ export function exportGSTR1_CSV(
   periodKey: string,
   supplierGstin: string,
   filename: string,
+  /** Invoices and notes cancelled in the period (Table 13). */
+  cancelled: Gstr1CancelledDoc[] = [],
 ): void {
   const [year, month] = periodKey.split('-');
   const periodLabel = new Date(Number(year), Number(month) - 1, 1)
@@ -728,12 +747,12 @@ export function exportGSTR1_CSV(
   // Table 13 — Documents issued
   lines.push('Table 13 — Documents Issued');
   lines.push('Nature of Document,Sr. No. From,Sr. No. To,Total Number,Cancelled,Net Issued');
-  const docLine = (label: string, list: Gstr1InvoiceRow[]) => {
-    const nums = sortDocNumbers(list.map(r => r.reference_number?.trim()).filter((n): n is string => !!n));
-    if (nums.length) lines.push([escapeCSV(label), nums[0], nums[nums.length - 1], nums.length, 0, nums.length].join(','));
+  const docLine = (label: string, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
+    const s = gstr1DocSummary(list.map(r => r.reference_number), cancelledList.map(d => d.reference_number));
+    if (s) lines.push([escapeCSV(label), s.from, s.to, s.totnum, s.cancel, s.net_issue].join(','));
   };
-  docLine('Invoices for outward supply', invoices);
-  docLine('Credit Note', notes);
+  docLine('Invoices for outward supply', invoices, cancelled.filter(d => d.category === 'Invoices'));
+  docLine('Credit Note', notes, cancelled.filter(isCancelledCreditNote));
 
   const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
   triggerDownload(blob, filename);
