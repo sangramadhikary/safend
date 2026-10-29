@@ -54,6 +54,9 @@ const nextConfig = {
   // Cache Components: explicit opt-in caching with "use cache" directive + PPR
   cacheComponents: true,
 
+  // Use the App Shell for shared link prefetches with Cache Components.
+  partialPrefetching: true,
+
   experimental: {
     // Turbopack file system caching: faster dev restarts by persisting compiler artifacts
     turbopackFileSystemCacheForDev: true,
