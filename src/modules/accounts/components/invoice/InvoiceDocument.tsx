@@ -1,7 +1,10 @@
 'use client';
 
 /**
- * The Safend tax invoice — A4, print-exact, brand-consistent.
+ * The Safend tax invoice — A4, print-exact, brand-consistent. Credit and debit
+ * notes (CGST Rule 53) render through the same layout with their own title and
+ * labels (documentHeadings), the original invoice and the reason; a credit
+ * note prints no bank details, terms or statement of account.
  *
  * Presentational only: it renders an `InvoiceDocumentModel` and computes nothing.
  * All arithmetic lives in src/lib/invoice/calculations.ts and is frozen into the
@@ -33,13 +36,16 @@
 
 import {
   INVOICE_LABELS as L,
+  NOTE_LABELS as N,
   formatNumber,
   invoiceCopyLabel,
   type InvoiceCopyType,
 } from '@/lib/invoice/calculations';
 import {
   DOCUMENT_LABELS as D,
+  documentHeadings,
   formatServicePeriod,
+  frozenNotice,
   type InvoiceDocumentModel,
 } from '@/lib/invoice/document';
 
@@ -77,6 +83,10 @@ function SectionRule({ label }: { label: string }) {
 
 export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
   const { supplier, recipient, meta, taxInvoice: ti, statement, bank, eInvoice } = doc;
+  // Title and figure labels: TAX INVOICE, CREDIT NOTE or DEBIT NOTE (Rule 53).
+  const H = documentHeadings(doc.documentType);
+  const note = doc.note;
+  const frozen = frozenNotice(doc);
   const copy = copyType ?? meta.copyType ?? 'recipient';
   const period = formatServicePeriod(meta.servicePeriodStart, meta.servicePeriodEnd);
   const isInter = ti.taxType === 'inter';
@@ -107,6 +117,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
           <span className="text-[7pt] font-semibold uppercase tracking-[0.18em] text-neutral-400">
             {invoiceCopyLabel(copy)}
           </span>
+          {frozen && <span className="text-[6.5pt] italic text-neutral-400">{frozen}</span>}
           {recomputed && (
             <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[6.5pt] font-semibold uppercase tracking-wide text-amber-700 print:hidden">
               {ti.linesReconciled ? D.recomputedLegacy : D.recomputedLines}
@@ -148,7 +159,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                 className="font-montserrat text-[17pt] font-bold uppercase leading-none tracking-[0.12em]"
                 style={{ color: BRAND }}
               >
-                {L.documentTitle}
+                {H.title}
               </h1>
               <dl className="mt-2 inline-grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 rounded border border-neutral-200 bg-neutral-50 px-2.5 py-1.5 text-left">
                 <Field label="GSTIN" value={supplier.gstin} />
@@ -187,24 +198,38 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
           <div className="rounded border border-neutral-300">
             <div className="border-b border-neutral-300 bg-neutral-50 px-2.5 py-1">
               <h3 className="text-[7.5pt] font-bold uppercase tracking-wide" style={{ color: BRAND }}>
-                {L.invoiceDetailsHead}
+                {H.detailsHead}
               </h3>
             </div>
             <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1 p-2.5">
-              <dt className="text-[7.5pt] font-semibold uppercase tracking-wide text-neutral-500">Invoice No.</dt>
+              <dt className="text-[7.5pt] font-semibold uppercase tracking-wide text-neutral-500">{H.numberLabel}</dt>
               <dd className="font-montserrat text-[11pt] font-bold leading-none" style={{ color: BRAND }}>
                 {meta.invoiceNo || '\u2014'}
               </dd>
               <Field label="Date" value={meta.date} />
-              <Field label="Due Date" value={meta.dueDate} />
+              {note && (
+                <>
+                  <Field label={N.originalInvoice} value={note.originalInvoiceNo || N.originalNotLinked} />
+                  {note.originalInvoiceNo && <Field label={N.originalInvoiceDate} value={note.originalInvoiceDate} />}
+                </>
+              )}
+              {H.showDueDate && <Field label="Due Date" value={meta.dueDate} />}
               {/* Service period: a duty-based monthly invoice is unreadable without it. */}
-              <Field label={L.servicePeriod} value={period} />
+              {(!note || period) && <Field label={L.servicePeriod} value={period} />}
               <Field label="Place of Supply" value={meta.placeOfSupply} />
               {meta.workOrderNo && <Field label="Work Order" value={meta.workOrderNo} />}
               {meta.workOrderDate && <Field label="W.O. Date" value={meta.workOrderDate} />}
             </dl>
           </div>
         </section>
+
+        {/* ── Credit/debit note: reason (Rule 53) ───────────────────────── */}
+        {note && (
+          <section className="avoid-break mt-3 rounded border border-neutral-300 bg-neutral-50 px-2.5 py-1.5 text-[8pt] text-neutral-700">
+            <span className="font-semibold uppercase tracking-wide text-neutral-500">{N.reason}: </span>
+            {note.reason || '\u2014'}
+          </section>
+        )}
 
         {/* ── e-Invoice strip (Rule 48(4)) — only once an IRN exists ─────── */}
         {eInvoice.irn && (
@@ -350,20 +375,23 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
               </div>
             )}
 
-            <div className="avoid-break rounded border border-neutral-200 bg-neutral-50 p-3">
-              <SectionRule label={L.bankDetails} />
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-                <Field label="Bank" value={bank.bankName} />
-                <Field label="A/c Number" value={bank.bankAccountNo} />
-                <Field label="IFSC" value={bank.ifscCode} />
-                <Field label="Beneficiary" value={bank.accountName} />
-              </dl>
-            </div>
+            {/* Nothing is payable on a credit note, so no bank details. */}
+            {H.showPaymentDetails && (
+              <div className="avoid-break mb-3 rounded border border-neutral-200 bg-neutral-50 p-3">
+                <SectionRule label={L.bankDetails} />
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                  <Field label="Bank" value={bank.bankName} />
+                  <Field label="A/c Number" value={bank.bankAccountNo} />
+                  <Field label="IFSC" value={bank.ifscCode} />
+                  <Field label="Beneficiary" value={bank.accountName} />
+                </dl>
+              </div>
+            )}
 
             {/* Words track the INVOICE VALUE, which is the statutory figure.
                 The payable figure gets its own words in the statement below. */}
-            <div className="avoid-break mt-3 rounded-r border-l-2 bg-neutral-50 px-3 py-2" style={{ borderColor: BRAND }}>
-              <p className="text-[7pt] font-bold uppercase tracking-[0.14em] text-neutral-500">{L.totalAmountWords}</p>
+            <div className="avoid-break rounded-r border-l-2 bg-neutral-50 px-3 py-2" style={{ borderColor: BRAND }}>
+              <p className="text-[7pt] font-bold uppercase tracking-[0.14em] text-neutral-500">{H.totalAmountWords}</p>
               <p className="mt-0.5 text-[9.5pt] font-extrabold leading-snug text-neutral-900">{ti.invoiceTotalWords}</p>
             </div>
           </div>
@@ -373,7 +401,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
             <table className="w-full text-[8.5pt]">
               <tbody className="tabular-nums">
                 <tr className="border-b border-neutral-200 bg-neutral-50">
-                  <td className="px-3 py-2 font-bold text-neutral-800">{ti.taxableLabel || L.taxableValue}</td>
+                  <td className="px-3 py-2 font-bold text-neutral-800">{ti.taxableLabel || H.taxableValue}</td>
                   <td className="px-3 py-2 text-right font-bold text-neutral-900">{money(ti.taxableValue)}</td>
                 </tr>
                 {ti.taxNote ? (
@@ -382,22 +410,22 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                   </tr>
                 ) : isExempt ? (
                   <tr className="border-b border-neutral-100">
-                    <td className="px-3 py-1.5 text-neutral-600">GST</td>
+                    <td className="px-3 py-1.5 text-neutral-600">{H.taxHead('GST')}</td>
                     <td className="px-3 py-1.5 text-right text-neutral-600">Exempt / Nil-rated</td>
                   </tr>
                 ) : isInter ? (
                   <tr className="border-b border-neutral-100">
-                    <td className="px-3 py-1.5 text-neutral-600">IGST @ {ti.igstRate}%</td>
+                    <td className="px-3 py-1.5 text-neutral-600">{H.taxHead('IGST', ti.igstRate)}</td>
                     <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatNumber(ti.igst)}</td>
                   </tr>
                 ) : (
                   <>
                     <tr className="border-b border-neutral-100">
-                      <td className="px-3 py-1.5 text-neutral-600">CGST @ {ti.cgstRate}%</td>
+                      <td className="px-3 py-1.5 text-neutral-600">{H.taxHead('CGST', ti.cgstRate)}</td>
                       <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatNumber(ti.cgst)}</td>
                     </tr>
                     <tr className="border-b border-neutral-100">
-                      <td className="px-3 py-1.5 text-neutral-600">SGST @ {ti.sgstRate}%</td>
+                      <td className="px-3 py-1.5 text-neutral-600">{H.taxHead('SGST', ti.sgstRate)}</td>
                       <td className="px-3 py-1.5 text-right font-medium text-neutral-700">{formatNumber(ti.sgst)}</td>
                     </tr>
                   </>
@@ -413,7 +441,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                 )}
                 <tr className="border-y-2 border-neutral-900 bg-white">
                   <td className="px-3 py-2.5">
-                    <span className="font-montserrat text-[11pt] font-extrabold text-neutral-900">{L.invoiceTotal}</span>
+                    <span className="font-montserrat text-[11pt] font-extrabold text-neutral-900">{H.totalValue}</span>
                     <div className="text-[6.5pt] uppercase tracking-wide text-neutral-400">{L.invoiceTotalNote}</div>
                   </td>
                   <td className="px-3 py-2.5 text-right font-montserrat text-[13pt] font-extrabold text-neutral-900">
@@ -494,9 +522,14 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
         <footer className="avoid-break mt-4 border-t-2 pt-3" style={{ borderColor: BRAND }}>
           <div className="flex items-start justify-between gap-8">
             <div className="max-w-[60%] flex-1">
-              <SectionRule label={L.termsAndConditions} />
-              <p className="whitespace-pre-line text-[7pt] leading-[1.6] text-neutral-500">{doc.terms}</p>
-              <p className="mt-2 text-[7pt] leading-snug text-neutral-600">{doc.declaration}</p>
+              {/* Payment terms do not apply to a credit note. */}
+              {H.showPaymentDetails && (
+                <>
+                  <SectionRule label={L.termsAndConditions} />
+                  <p className="mb-2 whitespace-pre-line text-[7pt] leading-[1.6] text-neutral-500">{doc.terms}</p>
+                </>
+              )}
+              <p className="text-[7pt] leading-snug text-neutral-600">{doc.declaration}</p>
             </div>
             <div className="w-[46mm] text-center">
               <p className="text-[7pt] text-neutral-500">For</p>
@@ -514,7 +547,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
             </div>
           </div>
           <p className="mt-3 border-t border-neutral-200 pt-2 text-center text-[6.5pt] text-neutral-400">
-            {L.pageFooterNote}
+            {H.pageFooterNote}
           </p>
         </footer>
       </div>

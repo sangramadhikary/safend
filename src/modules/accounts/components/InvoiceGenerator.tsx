@@ -12,7 +12,8 @@
  * the same builder the PDF route uses (snapshot when the invoice was issued
  * with one, the recorded figures otherwise), then hands it to
  * <InvoiceDocument/>, which owns the layout. Build `initialData` with
- * buildInvoiceViewData(row, payments, carried). Editing belongs in
+ * buildInvoiceViewData(row, payments, carried, { original }) — `original` is
+ * the original invoice of a credit/debit note. Editing belongs in
  * OneTimeInvoiceForm, which is the actual entry point and does persist.
  */
 
@@ -112,7 +113,7 @@ export function InvoiceGenerator({ onClose, initialData }: InvoiceGeneratorProps
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
             <div className="text-sm">
               <p className="font-semibold text-amber-800">
-                This invoice is not ready to issue
+                This {doc.documentType === 'credit_note' ? 'credit note' : doc.documentType === 'debit_note' ? 'debit note' : 'invoice'} is not ready to issue
               </p>
               <ul className="mt-1 list-inside list-disc space-y-0.5 text-amber-700">
                 {doc.blockedReasons.map((r) => (

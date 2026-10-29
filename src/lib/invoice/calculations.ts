@@ -457,6 +457,40 @@ export const INVOICE_LABELS = {
     '4. Cash Payment Pay To Company Authorized Person Only.',
 };
 
+/**
+ * Wording of credit and debit notes (CGST Rule 53). Amounts on a note print
+ * positive; these labels say which way they move the original invoice.
+ */
+export const NOTE_LABELS = {
+  credit: {
+    documentTitle: 'CREDIT NOTE',
+    detailsHead: 'CREDIT NOTE DETAILS',
+    numberLabel: 'Credit Note No.',
+    taxableValue: 'Taxable value reduced',
+    taxHead: (head: string) => `${head} reversed`,
+    totalValue: 'Credit Note Value',
+    totalAmountWords: 'CREDIT NOTE VALUE (IN WORDS)',
+    pageFooterNote:
+      'Computer-generated credit note, valid without a physical signature. \u00B7 Subject to Cuttack Jurisdiction.',
+  },
+  debit: {
+    documentTitle: 'DEBIT NOTE',
+    detailsHead: 'DEBIT NOTE DETAILS',
+    numberLabel: 'Debit Note No.',
+    taxableValue: 'Additional taxable value',
+    taxHead: (head: string) => `Additional ${head}`,
+    totalValue: 'Debit Note Value',
+    totalAmountWords: 'DEBIT NOTE VALUE (IN WORDS)',
+    pageFooterNote:
+      'Computer-generated debit note, valid without a physical signature. \u00B7 Subject to Cuttack Jurisdiction.',
+  },
+  originalInvoice: 'Original Invoice',
+  originalInvoiceDate: 'Original Inv. Date',
+  originalNotLinked: 'Original invoice: not linked',
+  reason: 'Reason',
+  frozenFromRecorded: (date: string) => `Frozen on ${date} from the recorded figures`,
+};
+
 /** Which copy of the invoice is being rendered (Rule 46(o) / Rule 48(1)). */
 export type InvoiceCopyType = 'recipient' | 'supplier';
 

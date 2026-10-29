@@ -47,7 +47,9 @@ import {
   type BankDetails,
   type BuildDocumentInput,
   type DocumentLineInput,
+  type DocumentType,
   type InvoiceDocumentModel,
+  type NoteDetails,
   type StatementOfAccount,
   type StatementRow,
   type StoredInvoiceFigures,
@@ -127,6 +129,10 @@ export interface InvoiceData {
   statement?: StatementOfAccount | null;
   /** receivables.issued_at; an issued row without a snapshot is marked as recomputed. */
   issuedAt?: string | null;
+  /** Tax invoice, credit note or debit note. Defaults to tax invoice. */
+  documentType?: DocumentType;
+  /** Original invoice and reason of a credit or debit note. */
+  note?: NoteDetails | null;
 }
 
 export interface ViewDataOptions {
@@ -134,6 +140,12 @@ export interface ViewDataOptions {
   now?: Date;
   /** Annual MSME interest rate; defaults to msmeInterestRate(). null switches the line off. */
   msmeRate?: number | null;
+  /**
+   * The original tax invoice of a credit or debit note (receivables row,
+   * select '*'), found with originalInvoiceLookup(). Ignored for tax invoices,
+   * and when it is not the invoice the note names or belongs to another client.
+   */
+  original?: Record<string, any> | null;
 }
 
 type Row = Record<string, any>;
@@ -252,7 +264,8 @@ export function mapStoredLineItems(lineItems: unknown, defaultGstRate = 0): Invo
  */
 export function isImportedInvoice(row: Row): boolean {
   if (row?.source === 'import') return true;
-  if (row?.source) return false;
+  // Credit/debit notes keyed in without GST are not imports.
+  if (row?.source || row?.category === 'Invoice Adjustments') return false;
   return jsonArray(row?.line_items).length === 0
     && toPaise(row?.gst_amount) === 0
     && toPaise(row?.total_amount) > 0
@@ -293,9 +306,9 @@ export function storedFigures(row: Row): StoredInvoiceFigures {
   };
 }
 
-/** Description without the "| Inv#: …" suffix the forms append. */
+/** Description without the "| Inv#: …" / "| CN#: …" / "| DN#: …" suffix the forms append. */
 function describe(row: Row): string {
-  const text = String(row.description ?? '').replace(/\s*\|\s*Inv#:.*$/i, '').trim();
+  const text = String(row.description ?? '').replace(/\s*\|\s*(?:Inv|CN|DN)#:.*$/i, '').trim();
   return /^\d+\s+services?$/i.test(text) ? '' : text;
 }
 
@@ -324,6 +337,67 @@ function documentLines(row: Row, stored: StoredInvoiceFigures): InvoiceItem[] {
   const lines = mapStoredLineItems(row.line_items, stored.gstRate);
   // No breakdown on file: one line at the recorded taxable value.
   return lines.length > 0 ? lines : [{ ...lumpSumLine(row, stored.taxableValue, null), sac: DEFAULT_SAC_SECURITY }];
+}
+
+/** tax_invoice, or credit_note / debit_note for an 'Invoice Adjustments' row. */
+export function noteDocumentType(row: Row): DocumentType {
+  if (row?.category !== 'Invoice Adjustments') return 'tax_invoice';
+  if (row.adjustment_type === 'credit') return 'credit_note';
+  if (row.adjustment_type === 'debit') return 'debit_note';
+  return toPaise(row.total_amount) < 0 ? 'credit_note' : 'debit_note';
+}
+
+/** "Against Invoice: <no>" written into the notes of credit notes raised by record_receipt. */
+export function againstInvoiceNumber(row: Row): string | null {
+  return String(row?.notes ?? '').match(/Against Invoice:\s*([^|]+)/i)?.[1]?.trim() || null;
+}
+
+function noteReason(row: Row): string | null {
+  return String(row?.notes ?? '').match(/Reason:\s*(.+)$/i)?.[1]?.trim() || null;
+}
+
+/**
+ * How to find the original invoice of a credit or debit note: by
+ * credit_note_against_id, else by the invoice number in its notes (same
+ * client). Null for tax invoices and unlinked notes.
+ */
+export function originalInvoiceLookup(
+  row: Row
+): { id: string } | { referenceNumber: string; clientName: string } | null {
+  if (noteDocumentType(row) === 'tax_invoice') return null;
+  if (row.credit_note_against_id) return { id: String(row.credit_note_against_id) };
+  const ref = againstInvoiceNumber(row);
+  return ref && row.client_name ? { referenceNumber: ref, clientName: String(row.client_name) } : null;
+}
+
+/** The original invoice, only when it is the one this note names and belongs to the same client. */
+function matchingOriginal(row: Row, original: Row | null | undefined): Row | null {
+  if (!original || original.id === row.id || (original.category ?? 'Invoices') !== 'Invoices') return null;
+  if (normName(original.client_name) !== normName(row.client_name)) return null;
+  if (row.credit_note_against_id) return original.id === row.credit_note_against_id ? original : null;
+  return String(original.reference_number ?? '') === againstInvoiceNumber(row) ? original : null;
+}
+
+/** Recipient and tax particulars a manually keyed note lacks, taken from its original invoice. */
+function withOriginalParticulars(row: Row, original: Row | null): Row {
+  if (!original) return row;
+  const out: Row = { ...row };
+  for (const k of ['client_gstin', 'client_address', 'place_of_supply', 'gst_type', 'gst_treatment']) {
+    if (!out[k] && original[k]) out[k] = original[k];
+  }
+  return out;
+}
+
+/** Credit notes are stored negative; the note prints its amounts positive. */
+function positiveFigures(stored: StoredInvoiceFigures): StoredInvoiceFigures {
+  const abs = (v: number) => fromPaise(Math.abs(toPaise(v)));
+  return { ...stored, taxableValue: abs(stored.taxableValue), gstAmount: abs(stored.gstAmount), invoiceTotal: abs(stored.invoiceTotal) };
+}
+
+/** A note prints one line at its taxable value, under the SAC of the original supply. */
+function noteLines(row: Row, stored: StoredInvoiceFigures, original: Row | null): InvoiceItem[] {
+  const sac = String(jsonArray(original?.line_items).find((li) => li.sac)?.sac || DEFAULT_SAC_SECURITY);
+  return [{ ...lumpSumLine(row, stored.taxableValue, null), sac }];
 }
 
 /** Recipient state from the GSTIN's state code, else from the place of supply. */
@@ -437,7 +511,9 @@ export function buildStatementOfAccount(
   const payableP = Math.max(0, dueP + olderP - tdsDueP);
 
   const invNo = String(row.reference_number || '');
-  const rows: StatementRow[] = [{ key: 'invoice', label: `This invoice (${invNo})`, amount: fromPaise(totalP) }];
+  const documentType = noteDocumentType(row);
+  const noun = documentType === 'credit_note' ? 'credit note' : documentType === 'debit_note' ? 'debit note' : 'invoice';
+  const rows: StatementRow[] = [{ key: 'invoice', label: `This ${noun} (${invNo})`, amount: fromPaise(totalP) }];
   if (openingP !== 0) {
     rows.push({ key: 'opening', label: 'Opening balance (earlier dues with no invoice on file)', amount: fromPaise(openingP) });
   }
@@ -450,7 +526,7 @@ export function buildStatementOfAccount(
     rows.push({ key: 'cn', label: 'Less: Credit notes applied', amount: fromPaise(cnP), less: true, note: cnNote });
   }
   if (rows.length > 1) {
-    rows.push({ key: 'balance', label: 'Balance on this invoice', amount: invoiceBalance(ledger), kind: 'balance' });
+    rows.push({ key: 'balance', label: `Balance on this ${noun}`, amount: invoiceBalance(ledger), kind: 'balance' });
   }
   if (older.length > 0) {
     rows.push({ key: 'older', label: 'Previous due on earlier invoices', amount: null, note: 'Still owed on those invoices; settle them together with this one.' });
@@ -487,7 +563,7 @@ export function buildStatementOfAccount(
         : { label: INVOICE_LABELS.amountDue, amount: fromPaise(payableP), words: amountInWords(fromPaise(payableP)) };
   const cancelledOn = formatIstDate(row.cancelled_at);
   const remark = state === 'cancelled'
-    ? `Cancelled${cancelledOn ? ` on ${cancelledOn}` : ''}${row.cancel_reason ? `: ${row.cancel_reason}` : ''}. Nothing is payable against this invoice.`
+    ? `Cancelled${cancelledOn ? ` on ${cancelledOn}` : ''}${row.cancel_reason ? `: ${row.cancel_reason}` : ''}. Nothing is payable against this ${noun}.`
     : null;
   const badge = state === 'cancelled' ? 'Cancelled'
     : state === 'paid' ? 'Paid in full'
@@ -502,7 +578,8 @@ export function buildStatementOfAccount(
     total,
     interest,
     remark,
-    show: state !== 'open' || rows.length > 1 || !!interest,
+    // A credit note carries no payment advice or statement of account.
+    show: documentType !== 'credit_note' && (state !== 'open' || rows.length > 1 || !!interest),
     figures: {
       invoiceTotal: fromPaise(totalP),
       openingBalance: fromPaise(openingP),
@@ -525,6 +602,7 @@ export function buildStatementOfAccount(
  * @param payments  Its receivable_payments rows, any order (reversed rows are ignored).
  * @param carried   receivables rows (select '*') of the older invoices named in
  *                  its previous_balance_breakdown.
+ * @param options   options.original: the original invoice of a credit/debit note.
  */
 export function buildInvoiceViewData(
   row: Record<string, any>,
@@ -534,11 +612,24 @@ export function buildInvoiceViewData(
 ): InvoiceData {
   const notes = String(row?.notes ?? '');
   const pick = (re: RegExp) => notes.match(re)?.[1]?.trim() || '';
-  const stored = storedFigures(row);
+  const documentType = noteDocumentType(row);
+  const isNote = documentType !== 'tax_invoice';
+  const original = isNote ? matchingOriginal(row, options.original) : null;
+  // A note keyed in by hand has no GSTIN, address or GST type of its own.
+  const src = withOriginalParticulars(row, original);
+  const recorded = storedFigures(src);
+  const stored = documentType === 'credit_note' ? positiveFigures(recorded) : recorded;
   const statement = buildStatementOfAccount(row, payments, carried, options);
   const older = olderInvoicesDue(row, carried);
-  const gstin = String(row.client_gstin || pick(/(?:Client )?GSTIN:\s*([0-9A-Za-z]{15})/)).trim().toUpperCase();
-  const placeOfSupply = String(row.place_of_supply || pick(/Place of Supply:\s*([^|]+)/) || DEFAULT_PLACE_OF_SUPPLY);
+  const note: NoteDetails | null = isNote
+    ? {
+        originalInvoiceNo: String(original?.reference_number || '') || againstInvoiceNumber(row),
+        originalInvoiceDate: original ? formatIstDate(original.created_at) || null : null,
+        reason: noteReason(row),
+      }
+    : null;
+  const gstin = String(src.client_gstin || pick(/(?:Client )?GSTIN:\s*([0-9A-Za-z]{15})/)).trim().toUpperCase();
+  const placeOfSupply = String(src.place_of_supply || pick(/Place of Supply:\s*([^|]+)/) || DEFAULT_PLACE_OF_SUPPLY);
   // GenerateInvoiceDialog records the period only in notes ("Billing Period: <from> to <to>").
   const [billedFrom, billedTo] = pick(/Billing Period:\s*([^|]+)/).split(/\s+(?:to|–|-)\s+/);
   const woDate = pick(/Work Order Date:\s*([^|]+)/);
@@ -563,11 +654,11 @@ export function buildInvoiceViewData(
     },
     clientInfo: {
       name: row.client_name || '',
-      address: row.client_address || pick(/(?:Client )?(?:Address|Addr):\s*([^|]+)/),
+      address: src.client_address || pick(/(?:Client )?(?:Address|Addr):\s*([^|]+)/),
       gstin,
       state: clientState(gstin, placeOfSupply),
     },
-    items: documentLines(row, stored),
+    items: isNote ? noteLines(row, stored, original) : documentLines(row, stored),
     taxConfig: {
       gstRate: stored.gstRate,
       taxType: stored.taxType,
@@ -578,10 +669,12 @@ export function buildInvoiceViewData(
     previousEntries: older.map((o) => ({ referenceNumber: o.referenceNumber, date: o.dueDate, amount: o.balance })),
     paymentDetails: {},
     payments: (payments ?? []).filter((p) => p && !p.reversed_at) as PaymentRecord[],
-    gstTreatment: row.gst_treatment || null,
+    gstTreatment: src.gst_treatment || null,
     snapshot: row.invoice_snapshot ?? undefined,
     stored,
     statement,
+    documentType,
+    note,
   };
 }
 
@@ -630,6 +723,8 @@ export function documentFromViewData(data: InvoiceData = {}, opts: ViewDocumentO
     },
     stored: data.stored ?? null,
     statement: data.statement ?? null,
+    documentType: data.documentType ?? 'tax_invoice',
+    note: data.note ?? null,
   };
   const { doc, fromSnapshot } = resolveInvoiceDocument(data.snapshot, input);
   // Callers that pass only taxConfig (no recorded figures) keep the old marking.
@@ -640,13 +735,28 @@ export function documentFromViewData(data: InvoiceData = {}, opts: ViewDocumentO
 }
 
 /**
- * True when downloading this row should issue it and freeze its tax invoice:
- * a tax invoice never issued, never snapshotted and not cancelled. Rows that
- * already carry issued_at without a snapshot are left alone (their original
- * terms are unknown).
+ * True when downloading this row should issue it and freeze its document: a
+ * tax invoice, credit note or debit note never issued, never snapshotted and
+ * not cancelled. Rows that already carry issued_at without a snapshot are left
+ * alone here; scripts/maintenance/freeze-issued-invoices.mts freezes those.
  */
 export function shouldFreezeOnDownload(row: Row): boolean {
-  return row?.category === 'Invoices' && !row.invoice_snapshot && !row.issued_at && row.status !== 'cancelled';
+  return (row?.category === 'Invoices' || row?.category === 'Invoice Adjustments')
+    && !row.invoice_snapshot && !row.issued_at && row.status !== 'cancelled';
+}
+
+/** True for a draft: created, never issued, nothing paid. Drafts are never frozen. */
+function isDraftRow(row: Row): boolean {
+  return row?.status === 'created' && !row.issued_at && toPaise(row.paid_amount) === 0;
+}
+
+/**
+ * True when an issued (or paid) row still has no frozen copy and should get
+ * one from its recorded figures. Used by the freeze-issued-invoices script.
+ */
+export function needsBackfillSnapshot(row: Row): boolean {
+  return (row?.category === 'Invoices' || row?.category === 'Invoice Adjustments')
+    && !row.invoice_snapshot && row.status !== 'cancelled' && !isDraftRow(row);
 }
 
 /** The update that issues a row on first download. Status moves to 'issued' only from 'created'. */

@@ -9,11 +9,14 @@ import {
   formatNumber as num,
   formatMoney as money,
   INVOICE_LABELS as L,
+  NOTE_LABELS as N,
   invoiceCopyLabel,
 } from '@/lib/invoice/calculations';
 import {
   DOCUMENT_LABELS as D,
+  documentHeadings,
   formatServicePeriod,
+  frozenNotice,
   panFromGstin,
   snapshotOf,
   type BankDetails,
@@ -24,6 +27,7 @@ import {
   carriedReferenceNumbers,
   documentFromViewData,
   issuePatch,
+  originalInvoiceLookup,
   shouldFreezeOnDownload,
 } from '@/lib/invoice/document-input';
 import { showSacSummary } from '@/lib/invoice/pdfPagination';
@@ -250,9 +254,11 @@ async function activeBankAccount(admin: ReturnType<typeof getSupabaseServiceClie
  * own records. It goes through the same builder as the screen view
  * (buildInvoiceViewData → documentFromViewData), so the download matches it.
  *
- * The first download by staff of a never-issued invoice issues it: the tax
- * invoice is frozen onto invoice_snapshot and issued_at is set (the database
- * keeps both write-once). Client-portal downloads never issue.
+ * The first download by staff of a never-issued invoice, credit note or debit
+ * note issues it: the document is frozen onto invoice_snapshot and issued_at
+ * is set (the database keeps both write-once). Client-portal downloads never
+ * issue. Credit and debit notes also load their original invoice, whose
+ * number and date they print.
  */
 async function loadInvoiceDocument(receivableId: string, actor: Actor): Promise<LoadResult> {
   const admin = getSupabaseServiceClient();
@@ -265,6 +271,11 @@ async function loadInvoiceDocument(receivableId: string, actor: Actor): Promise<
 
   if (error) return { status: 500, error: `Could not load invoice: ${error.message}` };
   if (!row) return { status: 404, error: 'Invoice not found.' };
+  // Only tax invoices and credit/debit notes are GST documents; other receivables
+  // (event letters, tax refunds, other income) must not print as a tax invoice.
+  if (row.category !== 'Invoices' && row.category !== 'Invoice Adjustments') {
+    return { status: 400, error: 'Only tax invoices and credit/debit notes can be printed.' };
+  }
   if (!canReadInvoice(actor, row.client_name)) {
     return { status: 403, error: 'You are not permitted to view this invoice.' };
   }
@@ -294,8 +305,22 @@ async function loadInvoiceDocument(receivableId: string, actor: Actor): Promise<
     carried = data ?? [];
   }
 
+  // A credit/debit note prints the number and date of its original invoice.
+  // buildInvoiceViewData ignores it unless it is the one named and of the same client.
+  const lookup = originalInvoiceLookup(row);
+  let original: Record<string, any> | null = null;
+  if (lookup) {
+    let q = admin.from('receivables').select('*').eq('category', 'Invoices');
+    q = 'id' in lookup
+      ? q.eq('id', lookup.id)
+      : q.eq('reference_number', lookup.referenceNumber).eq('client_name', lookup.clientName);
+    const { data, error: origErr } = await q.limit(1).maybeSingle();
+    if (origErr) return { status: 500, error: `Could not load the original invoice: ${origErr.message}` };
+    original = data ?? null;
+  }
+
   const bank = await activeBankAccount(admin);
-  let { doc } = documentFromViewData(buildInvoiceViewData(row, payments ?? [], carried), { bank });
+  let { doc } = documentFromViewData(buildInvoiceViewData(row, payments ?? [], carried, { original }), { bank });
 
   // Issue on first staff download. The filters make a concurrent second
   // download a no-op instead of tripping the write-once guard. Best-effort: a
@@ -362,10 +387,19 @@ export async function POST(req: NextRequest) {
     const supplierPan = companyInfo.pan || panFromGstin(companyInfo.gstin);
     const period = formatServicePeriod(meta.servicePeriodStart, meta.servicePeriodEnd);
 
+    // Title and figure labels: TAX INVOICE, CREDIT NOTE or DEBIT NOTE (Rule 53).
+    const H = documentHeadings(model.documentType);
+    const note = model.note;
+    const frozen = frozenNotice(model);
+    const noteRows: [string, string][] = !note ? [] : note.originalInvoiceNo
+      ? [[N.originalInvoice, note.originalInvoiceNo], [N.originalInvoiceDate, note.originalInvoiceDate || '—']]
+      : [[N.originalInvoice, N.originalNotLinked]];
+
     const metaRows: [string, string, string?][] = [
-      ['Invoice No.', invNo, 'big'],
+      [H.numberLabel, invNo, 'big'],
       ['Date', meta.date || '—'],
-      ['Due Date', meta.dueDate || '—'],
+      ...noteRows,
+      ...(H.showDueDate ? ([['Due Date', meta.dueDate || '—']] as [string, string][]) : []),
       ...(period ? ([[L.servicePeriod, period]] as [string, string][]) : []),
       ['Place of Supply', meta.placeOfSupply || '21-Odisha'],
       ...(meta.workOrderNo ? ([['Work Order No.', meta.workOrderNo]] as [string, string][]) : []),
@@ -426,7 +460,8 @@ export async function POST(req: NextRequest) {
 
     const headerBlock = () =>
       ce(View, { key: 'hdr', wrap: false },
-        ce(Text, { style: S.copyMark }, invoiceCopyLabel(meta.copyType)),
+        ce(Text, { style: S.copyMark },
+          frozen ? `${invoiceCopyLabel(meta.copyType)}  \u00B7  ${frozen}` : invoiceCopyLabel(meta.copyType)),
         cancelled ? ce(Text, { style: S.cancelBanner }, D.cancelled) : null,
         ce(View, { style: S.header },
           ce(View, { style: S.brandRow },
@@ -441,7 +476,7 @@ export async function POST(req: NextRequest) {
             ),
           ),
           ce(View, { style: S.titleBox },
-            ce(Text, { style: S.invoiceTitle }, L.documentTitle),
+            ce(Text, { style: S.invoiceTitle }, H.title),
             ce(View, { style: S.taxIdBox },
               ce(View, { style: S.taxIdRow },
                 ce(Text, { style: S.taxIdLabel }, 'GSTIN'),
@@ -490,7 +525,7 @@ export async function POST(req: NextRequest) {
           ),
         ),
         ce(View, { style: S.partyBox },
-          ce(View, { style: S.partyHead }, ce(Text, { style: S.partyHeadText }, L.invoiceDetailsHead)),
+          ce(View, { style: S.partyHead }, ce(Text, { style: S.partyHeadText }, H.detailsHead)),
           ce(View, { style: S.metaGrid },
             ...metaRows.map(([label, value, big], i) =>
               ce(View, { key: label, style: { ...S.metaRow, borderBottomWidth: i === metaRows.length - 1 ? 0 : 0.5 } },
@@ -514,7 +549,7 @@ export async function POST(req: NextRequest) {
 
     const contBar = (pageLabel: string) =>
       ce(View, { key: 'cont', style: S.contBar, wrap: false },
-        ce(Text, { style: S.contTitle }, `${L.documentTitle} · ${invNo}`),
+        ce(Text, { style: S.contTitle }, `${H.title} · ${invNo}`),
         ce(Text, { style: S.contMeta }, `${clientInfo.name || ''}  ·  ${pageLabel}`),
       );
 
@@ -544,23 +579,23 @@ export async function POST(req: NextRequest) {
     const totalsBlock = () =>
       ce(View, { key: 'totals', style: S.totals, wrap: false },
         ce(View, { style: S.tRowSub },
-          ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, ti.taxableLabel || L.taxableValue),
+          ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, ti.taxableLabel || H.taxableValue),
           ce(Text, { style: { fontSize: 9, fontWeight: 700, color: BLACK } }, money(ti.taxableValue)),
         ),
         ...(ti.taxNote
           ? [ce(View, { key: 'note', style: S.tRow }, ce(Text, { style: { ...S.tLabel, fontSize: 7.5 } }, ti.taxNote))]
           : isExempt
-            ? [taxRow('gst', 'GST', 'Exempt / Nil-rated')]
+            ? [taxRow('gst', H.taxHead('GST'), 'Exempt / Nil-rated')]
             : isIGST
-              ? [taxRow('igst', `IGST @ ${ti.igstRate}%`, num(ti.igst))]
-              : [taxRow('cgst', `CGST @ ${ti.cgstRate}%`, num(ti.cgst)), taxRow('sgst', `SGST @ ${ti.sgstRate}%`, num(ti.sgst))]),
+              ? [taxRow('igst', H.taxHead('IGST', ti.igstRate), num(ti.igst))]
+              : [taxRow('cgst', H.taxHead('CGST', ti.cgstRate), num(ti.cgst)), taxRow('sgst', H.taxHead('SGST', ti.sgstRate), num(ti.sgst))]),
         ti.roundOff !== 0 ? ce(View, { style: S.tRow },
           ce(Text, { style: { ...S.tLabel, fontSize: 7.5 } }, 'Round Off'),
           ce(Text, { style: { ...S.tValue, fontSize: 7.5, color: MUTE } }, `${ti.roundOff >= 0 ? '+ ' : '- '}${num(Math.abs(ti.roundOff))}`),
         ) : null,
         ce(View, { style: S.tRowValue },
           ce(View, null,
-            ce(Text, { style: S.tValueLabel }, L.invoiceTotal),
+            ce(Text, { style: S.tValueLabel }, H.totalValue),
             ce(Text, { style: S.tValueNote }, L.invoiceTotalNote.toUpperCase()),
           ),
           ce(Text, { style: S.tValueAmt }, money(ti.invoiceTotal)),
@@ -648,7 +683,8 @@ export async function POST(req: NextRequest) {
               )
             ),
           ) : null,
-          ce(View, { style: { ...S.card, marginTop: showSacSummary(sacSummary.length) ? 10 : 0 } },
+          // Nothing is payable on a credit note, so no bank details.
+          !H.showPaymentDetails ? null : ce(View, { style: { ...S.card, marginTop: showSacSummary(sacSummary.length) ? 10 : 0 } },
             ce(View, { style: S.cardHeadRow },
               ce(View, { style: S.cardAccent }),
               ce(Text, { style: S.cardHead }, L.bankDetails),
@@ -666,7 +702,7 @@ export async function POST(req: NextRequest) {
             ),
           ),
           ce(View, { style: S.words },
-            ce(Text, { style: S.wordsLabel }, L.totalAmountWords),
+            ce(Text, { style: S.wordsLabel }, H.totalAmountWords),
             ce(Text, { style: S.wordsValue }, ti.invoiceTotalWords),
           ),
           // Paid / part-paid status and the receipts now live in the statement
@@ -679,8 +715,9 @@ export async function POST(req: NextRequest) {
     const footerBlock = () =>
       ce(View, { key: 'foot', style: S.footer, wrap: false },
         ce(View, { style: S.termsCol },
-          ce(Text, { style: S.termsHead }, L.termsAndConditions),
-          ce(Text, { style: S.termsText }, model.terms),
+          // Payment terms do not apply to a credit note.
+          H.showPaymentDetails ? ce(Text, { style: S.termsHead }, L.termsAndConditions) : null,
+          H.showPaymentDetails ? ce(Text, { style: S.termsText }, model.terms) : null,
           ce(Text, { style: S.declaration }, model.declaration),
         ),
         ce(View, { style: S.signCol },
@@ -694,12 +731,18 @@ export async function POST(req: NextRequest) {
       );
 
     /* ── Assemble ──────────────────────────────────────────────────────── */
-    const doc = ce(Document, { title: `Invoice ${invNo}`, author: companyInfo.name || 'Safend Secure Solutions' },
+    const docName = model.documentType === 'credit_note' ? 'Credit Note' : model.documentType === 'debit_note' ? 'Debit Note' : 'Invoice';
+    const doc = ce(Document, { title: `${docName} ${invNo}`, author: companyInfo.name || 'Safend Secure Solutions' },
       ce(Page, { size: 'A4', style: S.page },
 
         // Page 1 letterhead
         headerBlock(),
         partiesBlock(),
+        // Credit/debit note: reason (Rule 53).
+        note ? ce(View, { key: 'reason', style: { ...S.card, flexDirection: 'row' }, wrap: false },
+          ce(Text, { style: { ...S.metaLabel, marginRight: 6 } }, N.reason.toUpperCase()),
+          ce(Text, { style: { ...S.metaValue, flex: 1 } }, note.reason || '—'),
+        ) : null,
         hasEInvoice ? eInvoiceBlock() : null,
 
         // Line items — each row is wrap={false} so rows never break internally,
@@ -717,7 +760,7 @@ export async function POST(req: NextRequest) {
         footerBlock(),
 
         // Fixed footer on every page — page number sits on the right of the border line
-        ce(Text, { key: 'pf', style: S.pageFoot, fixed: true }, L.pageFooterNote),
+        ce(Text, { key: 'pf', style: S.pageFoot, fixed: true }, H.pageFooterNote),
         ce(Text, {
           key: 'pn',
           style: S.pageNum,
@@ -733,7 +776,7 @@ export async function POST(req: NextRequest) {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="Invoice_${(meta.invoiceNo || 'draft').replace(/[^A-Za-z0-9._-]/g, '_')}.pdf"`,
+        'Content-Disposition': `attachment; filename="${docName.replace(' ', '')}_${(meta.invoiceNo || 'draft').replace(/[^A-Za-z0-9._-]/g, '_')}.pdf"`,
         'Cache-Control': 'no-store',
       },
     });

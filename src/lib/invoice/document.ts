@@ -32,6 +32,7 @@ import {
   amountInWords,
   formatMoney,
   INVOICE_LABELS,
+  NOTE_LABELS,
   getInvoiceDeclaration,
   isEInvoiceRequired,
   DEFAULT_SAC_SECURITY,
@@ -48,8 +49,23 @@ import {
 import { fromPaise, round2, toPaise } from './ledger';
 import { type RateBasis } from './rateBasis';
 
-/** Bumped when the stored shape changes, so old snapshots stay readable. */
-export const SNAPSHOT_VERSION = 2;
+/**
+ * Bumped when the stored shape changes, so old snapshots stay readable.
+ * 3: documentType, note (credit/debit notes) and the frozenFrom/frozenOn marker.
+ */
+export const SNAPSHOT_VERSION = 3;
+
+/** Which statutory document the model is. Snapshots before version 3 are tax invoices. */
+export type DocumentType = 'tax_invoice' | 'credit_note' | 'debit_note';
+
+/** Rule 53 particulars of a credit or debit note. */
+export interface NoteDetails {
+  /** Serial number of the original tax invoice; null when the note is not linked to one. */
+  originalInvoiceNo: string | null;
+  /** DD/MM/YYYY of the original tax invoice. */
+  originalInvoiceDate: string | null;
+  reason: string | null;
+}
 
 /** Wording shared by the screen view and the PDF. */
 export const DOCUMENT_LABELS = {
@@ -217,6 +233,16 @@ export interface StatementOfAccount {
 export interface InvoiceDocumentModel {
   version: number;
   issuedAt: string;
+  documentType: DocumentType;
+  /** Original invoice and reason; set only on credit and debit notes. */
+  note: NoteDetails | null;
+  /**
+   * 'recorded-figures' when the frozen copy was written after issue from the
+   * figures recorded on the receivable (scripts/maintenance/freeze-issued-invoices.mts).
+   */
+  frozenFrom?: 'recorded-figures' | null;
+  /** YYYY-MM-DD (Asia/Kolkata) the copy was frozen, with frozenFrom. */
+  frozenOn?: string | null;
   supplier: SupplierIdentity;
   recipient: RecipientIdentity;
   meta: InvoiceMeta;
@@ -309,6 +335,10 @@ export interface BuildDocumentInput {
   stored?: StoredInvoiceFigures | null;
   /** Live statement of account. When absent one is derived from taxConfig (older callers). */
   statement?: StatementOfAccount | null;
+  /** Defaults to 'tax_invoice'. */
+  documentType?: DocumentType;
+  /** Original invoice and reason of a credit or debit note. */
+  note?: NoteDetails | null;
 }
 
 /** Lump-sum lines keep their recorded amount; the engine cannot price them. */
@@ -489,9 +519,14 @@ export function buildInvoiceDocument(input: BuildDocumentInput): InvoiceDocument
     );
   }
 
+  const documentType = input.documentType ?? 'tax_invoice';
   return {
     version: SNAPSHOT_VERSION,
     issuedAt: new Date().toISOString(),
+    documentType,
+    note: documentType === 'tax_invoice' ? null : (input.note ?? { originalInvoiceNo: null, originalInvoiceDate: null, reason: null }),
+    frozenFrom: null,
+    frozenOn: null,
     supplier,
     recipient,
     meta: { copyType: 'recipient', ...input.meta },
@@ -576,14 +611,90 @@ export function readSnapshot(raw: unknown): InvoiceSnapshot | null {
     linesRoundOff: ti.linesRoundOff ?? 0,
     linesReconciled: ti.linesReconciled ?? true,
   };
-  return { ...(snap as InvoiceSnapshot), taxInvoice, blockedReasons: snap.blockedReasons ?? [] };
+  // Versions 1 and 2 were always tax invoices and carried no freeze marker.
+  const documentType: DocumentType =
+    snap.documentType === 'credit_note' || snap.documentType === 'debit_note' ? snap.documentType : 'tax_invoice';
+  return {
+    ...(snap as InvoiceSnapshot),
+    documentType,
+    note: documentType === 'tax_invoice' ? null : (snap.note ?? { originalInvoiceNo: null, originalInvoiceDate: null, reason: null }),
+    frozenFrom: snap.frozenFrom ?? null,
+    frozenOn: snap.frozenOn ?? null,
+    taxInvoice,
+    blockedReasons: snap.blockedReasons ?? [],
+  };
 }
 
-/** The frozen copy written to receivables.invoice_snapshot: everything but the live statement. */
-export function snapshotOf(doc: InvoiceDocumentModel, issuedAt: string): InvoiceSnapshot {
+/** Marks a copy frozen after issue from the recorded figures. */
+export interface FreezeMarker {
+  frozenFrom: 'recorded-figures';
+  /** YYYY-MM-DD in Asia/Kolkata. */
+  frozenOn: string;
+}
+
+/**
+ * The frozen copy written to receivables.invoice_snapshot: everything but the
+ * live statement. `marker` is set only when freezing an already-issued row.
+ */
+export function snapshotOf(doc: InvoiceDocumentModel, issuedAt: string, marker?: FreezeMarker): InvoiceSnapshot {
   const { statement: _statement, notices: _notices, ...frozen } = doc;
+  const stamp = marker ?? { frozenFrom: null, frozenOn: null };
   // Round-trip through JSON so only plain data is stored.
-  return JSON.parse(JSON.stringify({ ...frozen, version: SNAPSHOT_VERSION, issuedAt }));
+  return JSON.parse(JSON.stringify({ ...frozen, ...stamp, version: SNAPSHOT_VERSION, issuedAt }));
+}
+
+/** "Frozen on DD/MM/YYYY from the recorded figures", or null for a copy frozen at issue. */
+export function frozenNotice(doc: Pick<InvoiceDocumentModel, 'frozenFrom' | 'frozenOn'>): string | null {
+  if (doc.frozenFrom !== 'recorded-figures') return null;
+  const m = String(doc.frozenOn ?? '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return NOTE_LABELS.frozenFromRecorded(m ? `${m[3]}/${m[2]}/${m[1]}` : String(doc.frozenOn ?? ''));
+}
+
+/** Wording that differs between a tax invoice and a credit or debit note. */
+export interface DocumentHeadings {
+  title: string;
+  detailsHead: string;
+  numberLabel: string;
+  taxableValue: string;
+  /** Label of a tax head row, e.g. "CGST reversed @ 9%". */
+  taxHead: (head: 'CGST' | 'SGST' | 'IGST' | 'GST', rate?: number) => string;
+  totalValue: string;
+  totalAmountWords: string;
+  pageFooterNote: string;
+  /** Bank details, terms and the statement of account: not printed on a credit note. */
+  showPaymentDetails: boolean;
+  showDueDate: boolean;
+}
+
+export function documentHeadings(type: DocumentType | null | undefined): DocumentHeadings {
+  const withRate = (label: string, rate?: number) => (rate === undefined ? label : `${label} @ ${rate}%`);
+  if (type === 'credit_note' || type === 'debit_note') {
+    const n = type === 'credit_note' ? NOTE_LABELS.credit : NOTE_LABELS.debit;
+    return {
+      title: n.documentTitle,
+      detailsHead: n.detailsHead,
+      numberLabel: n.numberLabel,
+      taxableValue: n.taxableValue,
+      taxHead: (head, rate) => withRate(n.taxHead(head), rate),
+      totalValue: n.totalValue,
+      totalAmountWords: n.totalAmountWords,
+      pageFooterNote: n.pageFooterNote,
+      showPaymentDetails: type === 'debit_note',
+      showDueDate: type === 'debit_note',
+    };
+  }
+  return {
+    title: INVOICE_LABELS.documentTitle,
+    detailsHead: INVOICE_LABELS.invoiceDetailsHead,
+    numberLabel: 'Invoice No.',
+    taxableValue: INVOICE_LABELS.taxableValue,
+    taxHead: (head, rate) => withRate(head, rate),
+    totalValue: INVOICE_LABELS.invoiceTotal,
+    totalAmountWords: INVOICE_LABELS.totalAmountWords,
+    pageFooterNote: INVOICE_LABELS.pageFooterNote,
+    showPaymentDetails: true,
+    showDueDate: true,
+  };
 }
 
 /**
