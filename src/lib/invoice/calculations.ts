@@ -451,7 +451,7 @@ export const INVOICE_LABELS = {
   copySupplier: 'DUPLICATE FOR SUPPLIER',
 
   defaultTerms:
-    '1. Interest @ 4% p.m will be charged if the bill is not paid before due date as per contract.\n' +
+    '1. MSME NOTICE (MSMED Act, 2006): Safend Secure Solutions Private Limited is registered as a Micro/Small Enterprise under the MSMED Act, 2006 vide Udyam Registration No. UDYAM-OD-07-0000118. As per Section 15, payment must be made within 45 days of acceptance of invoice (or 15 days if no written agreement exists). In the event of delayed payment, compound interest at three times the RBI bank rate shall be payable under Section 16. Non-payment may result in a complaint on the MSME Samadhaan portal (samadhaan.msme.gov.in). Such interest is not tax-deductible for the buyer u/s 23 of the MSMED Act.\n' +
     '2. Any discrepancy in the bill must be reported to us within 5 days to the above local office.\n' +
     '3. All disputes are subject to Cuttack Jurisdiction only.\n' +
     '4. Cash Payment Pay To Company Authorized Person Only.',
