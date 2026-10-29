@@ -36,7 +36,7 @@ import { addNotification } from '@/services/supabase/NotificationService';
 import { checkAndAssignOverdueCollections } from '@/services/collections/OverdueCollectionService';
 import { type GstType } from '@/lib/tax/gst';
 import { amountDue, amountReceived, invoiceBalance, isOverpaid, isPartlyPaid, outstandingAmount, sumMoney } from '@/lib/invoice/ledger';
-import { buildInvoiceViewData, carriedReferenceNumbers } from '@/lib/invoice/document-input';
+import { buildInvoiceViewData, carriedReferenceNumbers, originalInvoiceLookup } from '@/lib/invoice/document-input';
 import {
   cancelInvoice as cancelInvoiceRpc, deleteDraftInvoice, isDraftInvoice, undoLastReceipt,
 } from '@/services/invoiceLedgerService';
@@ -1113,7 +1113,19 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       if (error) throw new Error(`Could not load the earlier invoices: ${error.message}`);
       carried = data ?? [];
     }
-    return buildInvoiceViewData(entry, payments ?? [], carried);
+    // A credit/debit note prints the number and date of its original invoice.
+    const lookup = originalInvoiceLookup(entry);
+    let original: Record<string, any> | null = null;
+    if (lookup) {
+      let q = supabaseClient.from('receivables').select('*').eq('category', 'Invoices');
+      q = 'id' in lookup
+        ? q.eq('id', lookup.id)
+        : q.eq('reference_number', lookup.referenceNumber).eq('client_name', lookup.clientName);
+      const { data, error } = await q.limit(1).maybeSingle();
+      if (error) throw new Error(`Could not load the original invoice: ${error.message}`);
+      original = data ?? null;
+    }
+    return buildInvoiceViewData(entry, payments ?? [], carried, { original });
   };
 
   /**
@@ -1226,16 +1238,20 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
       }
 
       const blob = await response.blob();
+      const docLabel = entry.category === 'Invoice Adjustments'
+        ? (entry.adjustment_type === 'debit' || (entry.adjustment_type == null && entry.total_amount > 0) ? 'DebitNote' : 'CreditNote')
+        : 'Invoice';
+      const fileName = `${docLabel}_${(entry.reference_number || entry.id.slice(0, 8)).replace(/[\\/:*?"<>|]+/g, '-')}.pdf`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Invoice_${entry.reference_number || entry.id.slice(0, 8)}.pdf`;
+      a.download = fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      toast({ title: 'PDF Downloaded', description: `Invoice_${entry.reference_number || entry.id.slice(0, 8)}.pdf` });
+      toast({ title: 'PDF Downloaded', description: fileName });
       // Downloading marks the invoice "Issued" server-side; refresh so the
       // status badge reflects the new lifecycle stage.
       queryClient.invalidateQueries({ queryKey: ['receivables'] });
@@ -1445,14 +1461,16 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
             <div className="flex items-center gap-2 ml-auto">
               <span className="text-xs text-muted-foreground">{selectedIds.size} selected</span>
               <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => {
-                // One receipt for several invoices of ONE client: recorded against
+                // One receipt for several invoices of ONE work order: recorded against
                 // the newest, with the others ticked so they are paid first.
                 const entries = receivables
                   .filter(r => selectedIds.has(r.id) && r.category === 'Invoices' && amountDue(r) > 0.01)
                   .sort((a, b) => a.created_at.localeCompare(b.created_at));
                 if (entries.length === 0) { toast({ title: 'No selected invoice still owes money', variant: 'destructive' }); return; }
-                if (new Set(entries.map(r => (r.client_name || '').trim().toLowerCase())).size > 1) {
-                  toast({ title: 'Select invoices of one client', description: 'A receipt can only pay invoices of the client who paid it.', variant: 'destructive' });
+                // An invoice without a work order is its own group, so it can only be paid alone.
+                const workOrders = new Set(entries.map(r => r.work_order_id ?? null));
+                if (workOrders.size > 1 || (workOrders.has(null) && entries.length > 1)) {
+                  toast({ title: 'Select invoices of one work order', description: 'A receipt is applied within one work order.', variant: 'destructive' });
                   return;
                 }
                 const target = entries[entries.length - 1];
@@ -1547,7 +1565,7 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                         // Don't open if clicking checkbox, dropdown, or button
                         const target = e.target as HTMLElement;
                         if (target.closest('button') || target.closest('[role="checkbox"]') || target.closest('[data-radix-collection-item]')) return;
-                        if (entry.category === 'Invoices') handleViewInvoice(entry);
+                        if (entry.category === 'Invoices' || entry.category === 'Invoice Adjustments') handleViewInvoice(entry);
                       }}
                     >
                       <TableCell>
@@ -1616,9 +1634,12 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                                 6 actions read as a 2-row × 3-col grid. */}
                             {(() => {
                               const tiles: Array<{ key: string; icon: ReactNode; label: string; onClick: () => void }> = [];
-                              if (entry.category === 'Invoices') {
+                              // Credit and debit notes have their own document (CREDIT NOTE / DEBIT NOTE).
+                              if (entry.category === 'Invoices' || entry.category === 'Invoice Adjustments') {
                                 tiles.push({ key: 'view', icon: <Eye className="h-5 w-5 text-blue-600" />, label: 'View', onClick: () => handleViewInvoice(entry) });
                                 tiles.push({ key: 'download', icon: <Download className="h-5 w-5 text-green-600" />, label: 'Download', onClick: () => handleDownloadInvoice(entry) });
+                              }
+                              if (entry.category === 'Invoices') {
                                 // Issued or paid invoices are frozen; corrections go by cancellation or credit/debit note.
                                 if (isDraftInvoice(entry)) {
                                   tiles.push({ key: 'edit', icon: <Pencil className="h-5 w-5 text-amber-600" />, label: 'Edit Draft', onClick: () => handleEditInvoice(entry) });
@@ -1628,7 +1649,9 @@ export function ManageReceivables({ filter }: ReceivablesProps) {
                                 tiles.push({ key: 'pay', icon: <CheckCircle2 className="h-5 w-5 text-green-600" />, label: 'Record Payment', onClick: () => openReceiveAmount(entry) });
                               }
                               tiles.push({ key: 'duplicate', icon: <Copy className="h-5 w-5 text-indigo-600" />, label: 'Duplicate', onClick: () => handleDuplicate(entry) });
-                              tiles.push({ key: 'print', icon: <Printer className="h-5 w-5 text-blue-600" />, label: 'Print', onClick: () => handleDownloadInvoice(entry) });
+                              if (entry.category === 'Invoices' || entry.category === 'Invoice Adjustments') {
+                                tiles.push({ key: 'print', icon: <Printer className="h-5 w-5 text-blue-600" />, label: 'Print', onClick: () => handleDownloadInvoice(entry) });
+                              }
                               if (entry.category === 'Invoices') {
                                 tiles.push({ key: 'email', icon: <Send className="h-5 w-5 text-teal-600" />, label: 'Send Email', onClick: () => handleEmailInvoice(entry) });
                               }

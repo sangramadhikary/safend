@@ -66,6 +66,18 @@ const { tableData, fromSpy, calledTables } = vi.hoisted(() => {
   return { tableData, fromSpy, calledTables };
 });
 
+// Each property renders the whole form many times; under a full parallel run a
+// single case can take well over the global 30s, so this file allows longer.
+vi.setConfig({ testTimeout: 180_000 });
+
+// The number preview reads receivables (to skip numbers already on file). It is
+// not part of the carry-forward behaviour under test, so it is stubbed; otherwise
+// its query races the "receivables is never queried" assertions under load.
+vi.mock('@/services/invoiceNumberService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/invoiceNumberService')>()),
+  peekNextInvoiceNumber: vi.fn(async () => ({ number: '26270001', fyPrefix: '2627', provisional: true as const })),
+}));
+
 vi.mock('@/integrations/supabase/client', () => ({
   supabaseClient: {
     from: fromSpy,

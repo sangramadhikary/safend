@@ -50,6 +50,13 @@ const { tableData, buildQuery, fromSpy } = vi.hoisted(() => {
   return { tableData, buildQuery, fromSpy };
 });
 
+// The number preview reads receivables; stubbed so it cannot race the
+// assertions about which tables the carry-forward logic queries.
+vi.mock('@/services/invoiceNumberService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/invoiceNumberService')>()),
+  peekNextInvoiceNumber: vi.fn(async () => ({ number: '26270001', fyPrefix: '2627', provisional: true as const })),
+}));
+
 vi.mock('@/integrations/supabase/client', () => ({
   supabaseClient: {
     from: fromSpy,
