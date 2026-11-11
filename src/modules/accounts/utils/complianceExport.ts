@@ -422,14 +422,14 @@ function buildItms(row: Gstr1InvoiceRow, igstOnly = false) {
 
 type HsnRow = {
   num: number; hsn_sc: string; uqc: string; rt: number; qty: number;
-  txval: number; iamt: number; camt: number; samt: number; csamt: number; desc: string; user_desc?: string;
+  txval: number; iamt: number; camt: number; samt: number; csamt: number; desc: string;
 };
 
 /**
  * HSN/SAC summary, split into B2B and B2C tables as the portal requires.
  *
  * Grouped by (SAC, rate). Credit notes are netted off (sign = -1), since the
- * HSN summary reports supplies net of notes. Services use GSTN UQC "OTH" (Others), qty 0.
+ * HSN summary reports supplies net of notes. Services use GSTN UQC "NA" (matching GST Offline Tool v3.2.x), qty 0.
  */
 function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c: HsnRow[] } {
   type Acc = { sac: string; rt: number; txval: number; iamt: number; camt: number; samt: number };
@@ -460,7 +460,7 @@ function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c:
       .map((a, idx) => ({
         num: idx + 1,
         hsn_sc: a.sac,
-        uqc: 'OTH', // Official GSTN UQC master code for services ('NA' is invalid on portal)
+        uqc: 'NA', // GST Returns Offline Tool v3.2.x uses 'NA' for services
         rt: a.rt,
         qty: 0,
         txval: a.txval,
@@ -469,7 +469,6 @@ function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c:
         samt: a.samt,
         csamt: 0,
         desc: SAC_DESCRIPTIONS[a.sac] ?? 'Support services',
-        user_desc: '',
       }));
 
   return { hsn_b2b: toRows(b2b), hsn_b2c: toRows(b2c) };
@@ -667,22 +666,24 @@ export function exportGSTR1_JSON(
   if (hsn.hsn_b2c.length) hsnObj.hsn_b2c = hsn.hsn_b2c;
 
   // ── Documents issued (Table 13), cancelled numbers counted ─────────────
-  const docRange = (doc_num: number, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
+  const docRange = (doc_num: number, doc_typ: string, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
     const s = gstr1DocSummary(list.map(r => r.reference_number), cancelledList.map(d => d.reference_number));
-    return s ? { doc_num, docs: [{ num: 1, ...s }] } : null;
+    return s ? { doc_num, doc_typ, docs: [{ num: 1, ...s }] } : null;
   };
   const isCancelledDebitNote = (d: Gstr1CancelledDoc) =>
     d.category === 'Invoice Adjustments' && (d.adjustment_type === 'debit' || (d.adjustment_type == null && (d.total_amount || 0) > 0));
   const doc_det = [
-    docRange(1, invoices, cancelled.filter(d => d.category === 'Invoices')),
-    docRange(5, notes, cancelled.filter(isCancelledCreditNote)),
-    docRange(6, debitNotes, cancelled.filter(isCancelledDebitNote)),
+    docRange(1, 'Invoices for outward supply', invoices, cancelled.filter(d => d.category === 'Invoices')),
+    docRange(5, 'Credit Note', notes, cancelled.filter(isCancelledCreditNote)),
+    docRange(6, 'Debit Note', debitNotes, cancelled.filter(isCancelledDebitNote)),
   ].filter(Boolean);
 
-  // ── Assemble root payload matching official GST portal schema ─────────
+  // ── Assemble root payload matching official GST Returns Offline Tool schema ───
   const payload: Record<string, unknown> = {
     gstin: supplierGstin,
     fp,
+    version: 'GST3.2.2',
+    hash: 'hash',
   };
   if (b2b.length)   payload.b2b   = b2b;
   if (b2cl.length)  payload.b2cl  = b2cl;
@@ -692,7 +693,7 @@ export function exportGSTR1_JSON(
   if (Object.keys(hsnObj).length) payload.hsn = hsnObj;
   if (doc_det.length) payload.doc_issue = { doc_det };
 
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' });
+  const blob = new Blob([toGstnJson(payload)], { type: 'application/json;charset=utf-8;' });
   triggerDownload(blob, filename);
 }
 
