@@ -122,7 +122,8 @@ export async function fetchWorkOrderOutstandingInvoices(
     .eq('work_order_id', woId)
     .order('created_at', { ascending: true });
 
-  if (error || !data) return [];
+  if (error) throw new Error(`Previous dues could not be loaded: ${error.message}`);
+  if (!data) throw new Error('Previous dues could not be loaded.');
   return computeOutstandingFromRows(data, excludeRef);
 }
 

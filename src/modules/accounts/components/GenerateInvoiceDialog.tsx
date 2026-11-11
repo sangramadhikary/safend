@@ -112,6 +112,15 @@ const SHIFT_KEYS = ['day', 'afternoon', 'night'] as const;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+function requireSingleWorkOrder(posts: OperationalPost[], selectedWorkOrderId: string): string {
+  if (!selectedWorkOrderId) throw new Error('Select a work order before choosing posts.');
+  if (posts.length === 0) throw new Error('Select at least one post.');
+  if (posts.some(post => !post.work_order_id || post.work_order_id !== selectedWorkOrderId)) {
+    throw new Error('All selected posts must belong to the selected work order.');
+  }
+  return selectedWorkOrderId;
+}
+
 function extractBillingRates(post: OperationalPost): Record<string, Partial<Record<string, number>>> {
   const map: Record<string, Partial<Record<string, number>>> = {};
   const record = (key: string, shift: string, rate: number) => {
@@ -161,6 +170,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   const queryClient = useQueryClient();
 
   const [selectedClientName, setSelectedClientName] = useState('');
+  const [selectedWorkOrderId, setSelectedWorkOrderId] = useState('');
   const [selectedPostIds, setSelectedPostIds] = useState<string[]>([]);
   const [billingFrom, setBillingFrom] = useState('');
   const [billingTo, setBillingTo] = useState('');
@@ -176,6 +186,8 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   // Previous outstanding dues carried forward from this work order's unpaid invoices.
   const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
   const [previousDue, setPreviousDue] = useState(0);
+  const [outstandingLoadError, setOutstandingLoadError] = useState<string | null>(null);
+  const [isLoadingOutstanding, setIsLoadingOutstanding] = useState(false);
 
   // Preview the next invoice number on reaching the review step. It is
   // provisional: create_invoice allocates the real number on save.
@@ -183,12 +195,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     if (step === 'review' && !invoiceNumber) {
       peekNextInvoiceNumber().then(({ number }) => setInvoiceNumber(number)).catch(() => {});
     }
-  }, [step]);
-
-  // Clear any carried-forward dues whenever we leave the review step.
-  useEffect(() => {
-    if (step === 'select') { setOutstandingInvoices([]); setPreviousDue(0); }
-  }, [step]);
+  }, [step, invoiceNumber]);
 
   // Fetch active operational posts (clients)
   const { data: posts = [], isLoading: postsLoading } = useQuery<OperationalPost[]>({
@@ -230,15 +237,48 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     return posts.filter(p => (p.client_name || p.post_name) === selectedClientName);
   }, [posts, selectedClientName]);
 
-  // Auto-select all posts when client changes
-  useEffect(() => {
-    setSelectedPostIds(clientPosts.map(p => p.id));
-  }, [selectedClientName, clientPosts.length]);
+  // Work orders represented by the selected client's active posts.
+  const clientWorkOrders = useMemo(() => {
+    const grouped = new Map<string, string[]>();
+    for (const post of clientPosts) {
+      if (!post.work_order_id) continue;
+      const names = grouped.get(post.work_order_id) ?? [];
+      names.push(post.post_name);
+      grouped.set(post.work_order_id, names);
+    }
+    return [...grouped.entries()].map(([id, postNames]) => ({ id, postNames }));
+  }, [clientPosts]);
+
+  // Only posts from the explicitly selected work order can enter one invoice.
+  const workOrderPosts = useMemo(
+    () => clientPosts.filter(post => post.work_order_id === selectedWorkOrderId),
+    [clientPosts, selectedWorkOrderId],
+  );
+
+  const handleClientChange = (clientName: string) => {
+    setSelectedClientName(clientName);
+    setOutstandingInvoices([]);
+    setPreviousDue(0);
+    setOutstandingLoadError(null);
+    const matchingPosts = posts.filter(post => (post.client_name || post.post_name) === clientName);
+    const workOrderIds = [...new Set(matchingPosts.map(post => post.work_order_id).filter((id): id is string => !!id))];
+    const soleWorkOrderId = workOrderIds.length === 1 ? workOrderIds[0] : '';
+    setSelectedWorkOrderId(soleWorkOrderId);
+    setSelectedPostIds(soleWorkOrderId ? matchingPosts.filter(post => post.work_order_id === soleWorkOrderId).map(post => post.id) : []);
+  };
+
+  const handleWorkOrderChange = (workOrderId: string) => {
+    setSelectedWorkOrderId(workOrderId);
+    setSelectedPostIds(clientPosts.filter(post => post.work_order_id === workOrderId).map(post => post.id));
+    setOutstandingInvoices([]);
+    setPreviousDue(0);
+    setOutstandingLoadError(null);
+  };
 
   // The posts that will be included in the invoice (only selected ones)
   const includedPosts = useMemo(() => {
-    return clientPosts.filter(p => selectedPostIds.includes(p.id));
-  }, [clientPosts, selectedPostIds]);
+    return workOrderPosts.filter(p => selectedPostIds.includes(p.id));
+  }, [workOrderPosts, selectedPostIds]);
 
   const togglePostSelection = (postId: string) => {
     setSelectedPostIds(prev =>
@@ -247,7 +287,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   };
 
   const toggleAllPosts = (checked: boolean) => {
-    setSelectedPostIds(checked ? clientPosts.map(p => p.id) : []);
+    setSelectedPostIds(checked ? workOrderPosts.map(p => p.id) : []);
   };
 
   const selectedClientInfo = useMemo(() => uniqueClients.find(c => c.name === selectedClientName), [uniqueClients, selectedClientName]);
@@ -257,18 +297,27 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   // per work order, so we scope to the current work order — never the client's
   // other work orders. (The generated invoice also persists work_order_id below
   // so this scoping works on future runs.)
-  const reviewWorkOrderId = includedPosts[0]?.work_order_id ?? null;
+  const reviewWorkOrderId = selectedWorkOrderId || null;
   useEffect(() => {
     if (step !== 'review' || !reviewWorkOrderId) return;
     let cancelled = false;
 
     (async () => {
+      setIsLoadingOutstanding(true);
+      setOutstandingLoadError(null);
       try {
         const unpaid = await fetchWorkOrderOutstandingInvoices(supabaseClient, reviewWorkOrderId);
         if (cancelled) return;
         setOutstandingInvoices(unpaid);
         setPreviousDue(sumOutstanding(unpaid));
-      } catch { /* non-critical — invoice can still be generated without carry-forward */ }
+      } catch (error) {
+        if (cancelled) return;
+        setOutstandingInvoices([]);
+        setPreviousDue(0);
+        setOutstandingLoadError(error instanceof Error ? error.message : 'Previous dues could not be loaded.');
+      } finally {
+        if (!cancelled) setIsLoadingOutstanding(false);
+      }
     })();
 
     return () => { cancelled = true; };
@@ -281,8 +330,11 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
       return;
     }
 
-    if (includedPosts.length === 0) {
-      toast({ title: 'No Posts Selected', description: 'Please select at least one post to include in the invoice.', variant: 'destructive' });
+    let scopedWorkOrderId: string;
+    try {
+      scopedWorkOrderId = requireSingleWorkOrder(includedPosts, selectedWorkOrderId);
+    } catch (error) {
+      toast({ title: 'Invalid Work Order', description: error instanceof Error ? error.message : 'Select one work order.', variant: 'destructive' });
       return;
     }
 
@@ -295,16 +347,14 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
 
       // The contracted rate basis (how a monthly price becomes a per-duty
       // rate) is a work-order term, so load it with the work order details.
-      const woIds = [...new Set(includedPosts.map(p => p.work_order_id).filter((id): id is string => !!id))];
       const woById: Record<string, WorkOrderTerms> = {};
-      if (woIds.length > 0) {
-        const { data: woRows, error: woError } = await supabaseClient
-          .from('work_orders')
-          .select('id, work_order_id, order_date, rate_basis, basis_days')
-          .in('id', woIds);
-        if (woError) throw new Error(`Failed to load the work order terms: ${woError.message}`);
-        for (const w of (woRows ?? []) as WorkOrderTerms[]) woById[w.id] = w;
-      }
+      const { data: woRows, error: woError } = await supabaseClient
+        .from('work_orders')
+        .select('id, work_order_id, order_date, rate_basis, basis_days')
+        .eq('id', scopedWorkOrderId);
+      if (woError) throw new Error(`Failed to load the work order terms: ${woError.message}`);
+      if (!woRows || woRows.length !== 1) throw new Error('The selected work order no longer exists.');
+      for (const w of woRows as WorkOrderTerms[]) woById[w.id] = w;
       setWorkOrders(woById);
 
       // Fetch attendance for ALL posts of this client in one query
@@ -435,13 +485,15 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
   const createInvoice = useMutation({
     mutationFn: async () => {
       if (!selectedClientName) throw new Error('No client selected.');
+      const woUuid = requireSingleWorkOrder(includedPosts, selectedWorkOrderId);
+      if (isLoadingOutstanding) throw new Error('Wait for previous dues to finish loading.');
+      if (outstandingLoadError) throw new Error(outstandingLoadError);
       if (blockedError) throw new Error(blockedError);
       if (previousDueError) throw new Error(previousDueError);
 
       // Work order display number and date (loaded with the duty data).
-      const woUuid = includedPosts[0]?.work_order_id ?? null;
-      const woDisplayId = (woUuid && workOrders[woUuid]?.work_order_id) || '';
-      const woDate = (woUuid && workOrders[woUuid]?.order_date) || '';
+      const woDisplayId = workOrders[woUuid]?.work_order_id || '';
+      const woDate = workOrders[woUuid]?.order_date || '';
 
       const description = dutySummary
         .map(d => `${d.post_name} - ${d.service_type_label}: ${d.total_duties} duties`)
@@ -531,6 +583,9 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
     setStep('select');
     setDutySummary([]);
     setFetchError(null);
+    setOutstandingInvoices([]);
+    setPreviousDue(0);
+    setOutstandingLoadError(null);
   };
 
   return (
@@ -557,7 +612,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Client Selection</h3>
               <div className="space-y-1">
                 <Label>Select Client *</Label>
-                <Select value={selectedClientName} onValueChange={setSelectedClientName}>
+                <Select value={selectedClientName} onValueChange={handleClientChange}>
                   <SelectTrigger>
                     <SelectValue placeholder={postsLoading ? 'Loading...' : 'Select a client'} />
                   </SelectTrigger>
@@ -592,25 +647,51 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                 </Card>
               )}
 
+              {selectedClientInfo && clientWorkOrders.length > 0 && (
+                <div className="space-y-1">
+                  <Label>Select Work Order *</Label>
+                  <Select value={selectedWorkOrderId} onValueChange={handleWorkOrderChange}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a work order" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {clientWorkOrders.map(workOrder => (
+                        <SelectItem key={workOrder.id} value={workOrder.id}>
+                          {workOrder.postNames.join(', ')}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">Each invoice and its previous dues belong to one work order.</p>
+                </div>
+              )}
+
+              {selectedClientInfo && clientWorkOrders.length === 0 && (
+                <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  This client has no active post linked to a work order. Link the post before generating an invoice.
+                </div>
+              )}
+
               {/* Post Selection with checkboxes */}
-              {clientPosts.length > 0 && (
+              {workOrderPosts.length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label className="text-sm">Select Posts to Include *</Label>
                     <div className="flex items-center gap-2">
                       <Checkbox
                         id="select-all-posts"
-                        checked={selectedPostIds.length === clientPosts.length}
+                        checked={selectedPostIds.length === workOrderPosts.length}
                         onCheckedChange={(checked) => toggleAllPosts(!!checked)}
                       />
                       <label htmlFor="select-all-posts" className="text-xs text-muted-foreground cursor-pointer">
-                        Select All ({clientPosts.length})
+                        Select All ({workOrderPosts.length})
                       </label>
                     </div>
                   </div>
                   <Card className="bg-muted/20">
                     <CardContent className="p-2 max-h-[160px] overflow-y-auto space-y-1">
-                      {clientPosts.map((post) => (
+                      {workOrderPosts.map((post) => (
                         <div
                           key={post.id}
                           className="flex items-center gap-2 p-1.5 rounded hover:bg-muted/50 transition-colors"
@@ -628,7 +709,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
                     </CardContent>
                   </Card>
                   <p className="text-xs text-muted-foreground">
-                    {selectedPostIds.length} of {clientPosts.length} posts selected
+                    {selectedPostIds.length} of {workOrderPosts.length} posts selected
                   </p>
                 </div>
               )}
@@ -661,7 +742,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
               <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
               <Button
                 onClick={handleFetchDutyData}
-                disabled={isFetching || !selectedClientName || !billingFrom || !billingTo || selectedPostIds.length === 0}
+                disabled={isFetching || !selectedClientName || !selectedWorkOrderId || !billingFrom || !billingTo || selectedPostIds.length === 0}
                 className="bg-safend-red hover:bg-safend-red/90 text-white"
               >
                 {isFetching && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
@@ -864,10 +945,10 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
               </div>
             </div>
 
-            {(blockedError || previousDueError) && (
+            {(blockedError || previousDueError || outstandingLoadError) && (
               <div className="flex items-start gap-2 p-3 rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/20 dark:border-red-800">
                 <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 shrink-0" />
-                <p className="text-sm text-red-800 dark:text-red-200">{blockedError || previousDueError}</p>
+                <p className="text-sm text-red-800 dark:text-red-200">{blockedError || previousDueError || outstandingLoadError}</p>
               </div>
             )}
 
@@ -875,7 +956,7 @@ export function GenerateInvoiceDialog({ open, onOpenChange, onSuccess, onBack }:
               <Button variant="outline" onClick={handleReset}>← Back to Selection</Button>
               <Button
                 onClick={() => createInvoice.mutate()}
-                disabled={createInvoice.isPending || !!blockedError || !!previousDueError}
+                disabled={createInvoice.isPending || isLoadingOutstanding || !!blockedError || !!previousDueError || !!outstandingLoadError}
                 className="bg-safend-red hover:bg-safend-red/90 text-white"
               >
                 {createInvoice.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}

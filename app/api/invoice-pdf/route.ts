@@ -8,6 +8,7 @@ import { Document, Page, Text, View, Image, StyleSheet, Font, pdf } from '@react
 import {
   formatNumber as num,
   formatMoney as money,
+  formatPersonCount,
   INVOICE_LABELS as L,
   NOTE_LABELS as N,
   invoiceCopyLabel,
@@ -438,7 +439,7 @@ export async function POST(req: NextRequest) {
         ce(Text, { style: { ...S.td, ...S.cHash, fontWeight: 700, color: MUTE } }, String(idx + 1)),
         ce(View, { style: { ...S.td, ...S.cDesc } },
           ce(Text, { style: S.svcName }, item.service || '—'),
-          item.personnel ? ce(Text, { style: S.svcMeta }, `${item.personnel} ${L.personnelSuffix}`) : null,
+          item.personnel ? ce(Text, { style: S.svcMeta }, formatPersonCount(item.personnel)) : null,
           item.post ? ce(Text, { style: S.svcMeta }, `@ ${item.post}`) : null,
           item.note ? ce(Text, { style: S.svcMeta }, item.note) : null,
         ),

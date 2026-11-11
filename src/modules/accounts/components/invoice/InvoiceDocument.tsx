@@ -38,6 +38,7 @@ import {
   INVOICE_LABELS as L,
   NOTE_LABELS as N,
   formatNumber,
+  formatPersonCount,
   invoiceCopyLabel,
   type InvoiceCopyType,
 } from '@/lib/invoice/calculations';
@@ -267,7 +268,7 @@ export function InvoiceDocument({ doc, copyType, recomputed = false }: Props) {
                     <span className="font-bold text-neutral-900">{line.service}</span>
                     {line.personnel > 0 && (
                       <span className="ml-1.5 text-[7.5pt] text-neutral-500">
-                        {line.personnel} {L.personnelSuffix}
+                        {formatPersonCount(line.personnel)}
                       </span>
                     )}
                     {line.post && <div className="text-[7.5pt] text-neutral-500">@ {line.post}</div>}

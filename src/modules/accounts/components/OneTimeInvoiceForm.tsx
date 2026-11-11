@@ -193,6 +193,9 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   const [tdsRate,    setTdsRate]    = useState('2');
   const [previousDue, setPreviousDue] = useState('');
   const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
+  const [outstandingLoadError, setOutstandingLoadError] = useState<string | null>(null);
+  const [isLoadingOutstanding, setIsLoadingOutstanding] = useState(false);
+  const outstandingRequestId = useRef(0);
   // Keys (outstandingKey) of the listed invoices whose balances the previous due carries.
   const [includedKeys, setIncludedKeys] = useState<string[]>([]);
 
@@ -335,11 +338,17 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
             : rawService.includes('12-Hour') ? '12H' : '8H';
           const hideShiftType = !!li.hideShiftType;
 
-          // "Manpower Supply — <Role>" → base = "Manpower Supply", role = "<Role>"
-          // The dash may be an em dash (—, \u2014) or a regular hyphen.
+          // Legacy invoices stored "Manpower Supply — <Role>". New invoices
+          // store only the designation (for example, "Driver"). Accept both
+          // forms so drafts remain editable without losing their role.
           const dashIdx = withoutShift.indexOf(' \u2014 ');
-          const baseLabel = dashIdx !== -1 ? withoutShift.slice(0, dashIdx).trim() : withoutShift;
-          const roleLabel = dashIdx !== -1 ? withoutShift.slice(dashIdx + 3).trim() : '';
+          const legacyBaseLabel = dashIdx !== -1 ? withoutShift.slice(0, dashIdx).trim() : withoutShift;
+          const legacyRoleLabel = dashIdx !== -1 ? withoutShift.slice(dashIdx + 3).trim() : '';
+          const bareRoleLabel = dashIdx === -1 && MANPOWER_ROLES_BY_CATEGORY.some(group =>
+            group.roles.some(role => role === withoutShift),
+          ) ? withoutShift : '';
+          const baseLabel = bareRoleLabel ? 'Manpower Supply' : legacyBaseLabel;
+          const roleLabel = legacyRoleLabel || bareRoleLabel;
 
           // Match base label against SERVICE_OPTIONS; if unknown treat as custom "Other"
           const knownOption = SERVICE_OPTIONS.find(o => o.label === baseLabel);
@@ -377,15 +386,19 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
   useEffect(() => {
     if (!open || !editEntry || !editEntry.work_order_id || !isDraftInvoice(editEntry)) return;
     let cancelled = false;
+    const requestId = ++outstandingRequestId.current;
     (async () => {
+      setIsLoadingOutstanding(true);
+      setOutstandingLoadError(null);
       try {
         const unpaid = await fetchWorkOrderOutstandingInvoices(
           supabaseClient,
           editEntry.work_order_id,
           editEntry.reference_number || null,
         );
-        if (cancelled) return;
+        if (cancelled || requestId !== outstandingRequestId.current) return;
         setOutstandingInvoices(unpaid);
+        setOutstandingLoadError(null);
         const carried: any[] = Array.isArray(editEntry.previous_balance_breakdown) ? editEntry.previous_balance_breakdown : [];
         const carriesNothing = carried.length === 0 && !(Number(editEntry.opening_balance) > 0);
         // A draft that carries nothing starts like a new invoice: all ticked,
@@ -397,7 +410,13 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
           const total = sumMoney([editEntry.opening_balance, ...ticked.map((inv) => inv.amount)]);
           setPreviousDue(total > 0 ? String(total) : '');
         }
-      } catch { /* non-critical — user can enter the amount manually */ }
+      } catch (error) {
+        if (!cancelled && requestId === outstandingRequestId.current) {
+          setOutstandingLoadError(error instanceof Error ? error.message : 'Previous dues could not be loaded.');
+        }
+      } finally {
+        if (!cancelled && requestId === outstandingRequestId.current) setIsLoadingOutstanding(false);
+      }
     })();
     return () => { cancelled = true; };
   }, [open, editEntry]);
@@ -410,6 +429,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       setPaymentStatus('due'); setGstPercent('18');
       setTdsEnabled(false); setTdsRate('2'); setPreviousDue('');
       setOutstandingInvoices([]); setIncludedKeys([]);
+      setOutstandingLoadError(null); setIsLoadingOutstanding(false);
+      outstandingRequestId.current += 1;
       setCustomerMode('existing'); setSelectedWorkOrderId('');
       setPlaceOfSupply(posLabelFor(DEFAULT_PLACE_OF_SUPPLY));
       setServicePeriodMode('month'); setServicePeriodMonth('');
@@ -580,6 +601,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
 
   // Fill client fields + service lines + fetch outstanding balance when a work order is selected
   const handleSelectWorkOrder = async (woId: string) => {
+    const requestId = ++outstandingRequestId.current;
     setSelectedWorkOrderId(woId);
     const wo = activeWorkOrders.find((w: any) => w.id === woId);
     if (!wo) return;
@@ -649,11 +671,12 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
             const opt = SERVICE_OPTIONS.find(o => o.label === serviceLabel);
             for (const derived of derivedLines) {
               const woPrice = derived.woPricePerMonth > 0 ? String(derived.woPricePerMonth) : '';
+              const manpowerRole = key === 'manpower' ? derived.manpowerRole ?? '' : '';
               builtLines.push({
                 id: crypto.randomUUID(),
                 serviceType: serviceLabel,
                 customService: '',
-                sac: opt?.sac ?? '998525',
+                sac: manpowerRole ? MANPOWER_ROLE_SAC[manpowerRole] ?? '998513' : opt?.sac ?? '998525',
                 location: postName,
                 hideLocation: false,
                 manpower: String(derived.totalManpower),
@@ -661,7 +684,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                 hideWoPrice: false,
                 daysInMonth: String(buildDays),
                 duties: String(derived.duties),
-                manpowerRole: '',
+                manpowerRole,
                 shiftType: derived.shiftType,
                 hideShiftType: false,
               });
@@ -709,6 +732,8 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
     setOutstandingInvoices([]);
     setIncludedKeys([]);
     setPreviousDue('');
+    setOutstandingLoadError(null);
+    setIsLoadingOutstanding(true);
     try {
       const unpaid = await fetchWorkOrderOutstandingInvoices(
         supabaseClient,
@@ -716,11 +741,19 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
         editEntry?.reference_number || null,
       );
 
+      if (requestId !== outstandingRequestId.current) return;
       if (unpaid.length > 0) {
         setOutstandingInvoices(unpaid);
         setIncludedKeys(unpaid.map(outstandingKey));
       }
-    } catch { /* non-critical — user can enter manually */ }
+      setOutstandingLoadError(null);
+    } catch (error) {
+      if (requestId === outstandingRequestId.current) {
+        setOutstandingLoadError(error instanceof Error ? error.message : 'Previous dues could not be loaded.');
+      }
+    } finally {
+      if (requestId === outstandingRequestId.current) setIsLoadingOutstanding(false);
+    }
   };
 
   const { data: bankAccounts = [] } = useQuery<any[]>({
@@ -816,11 +849,14 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
       if (lines.every(l => !l.serviceType)) throw new Error('Add at least one service line.');
       if (invoiceTotal <= 0) throw new Error('The invoice total must be greater than zero.');
       if (previousDueError) throw new Error(previousDueError);
+      const requiresOutstandingCheck = customerMode === 'existing' || (isDraftEdit && !!editEntry?.work_order_id);
+      if (requiresOutstandingCheck && isLoadingOutstanding) throw new Error('Wait for previous dues to finish loading.');
+      if (requiresOutstandingCheck && outstandingLoadError) throw new Error(outstandingLoadError);
 
       const lineItems = lines.filter(l => l.serviceType).map(l => {
         const baseService = l.serviceType === 'Other' ? l.customService : l.serviceType;
         const service = l.serviceType === 'Manpower Supply' && l.manpowerRole
-          ? `Manpower Supply — ${l.manpowerRole}`
+          ? l.manpowerRole
           : baseService;
         // Append shift type to service label so it appears on the invoice
         const serviceLabel = l.hideShiftType ? service : (l.shiftType === '12H' ? `${service} (12-Hour)` : `${service} (8-Hour)`);
@@ -1043,7 +1079,16 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
                 <button
                   key={opt.v}
                   type="button"
-                  onClick={() => { setCustomerMode(opt.v); setSelectedWorkOrderId(''); }}
+                  onClick={() => {
+                    setCustomerMode(opt.v);
+                    setSelectedWorkOrderId('');
+                    setOutstandingInvoices([]);
+                    setIncludedKeys([]);
+                    setPreviousDue('');
+                    outstandingRequestId.current += 1;
+                    setIsLoadingOutstanding(false);
+                    setOutstandingLoadError(null);
+                  }}
                   className={`flex flex-col items-start px-4 py-3 rounded-lg border text-left transition-all ${
                     customerMode === opt.v
                       ? 'border-black bg-black'
@@ -1555,7 +1600,9 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
               </div>
 
               {/* How the previous due will be recorded (not shown for a frozen invoice) */}
-              {readOnly ? null : previousDueError ? (
+              {readOnly ? null : outstandingLoadError ? (
+                <p className="text-[11px] font-medium text-red-600">{outstandingLoadError}</p>
+              ) : previousDueError ? (
                 <p className="text-[11px] font-medium text-red-600">{previousDueError}</p>
               ) : prevDue > 0 && (
                 <p className="text-[11px] text-muted-foreground">
@@ -1763,7 +1810,7 @@ export function OneTimeInvoiceForm({ open, onOpenChange, onSuccess, onBack, edit
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>{readOnly ? 'Close' : 'Cancel'}</Button>
-          <Button onClick={() => createInvoice.mutate()} disabled={createInvoice.isPending || readOnly || !!previousDueError}
+          <Button onClick={() => createInvoice.mutate()} disabled={createInvoice.isPending || readOnly || !!previousDueError || ((customerMode === 'existing' || (isDraftEdit && !!editEntry?.work_order_id)) && (isLoadingOutstanding || !!outstandingLoadError))}
             className="bg-[#D71920] hover:bg-[#D71920]/90 text-white">
             {createInvoice.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             {createInvoice.isPending ? 'Saving...' : editEntry ? 'Save Changes' : paymentStatus === 'paid' ? 'Create & Record Payment' : 'Create Invoice'}

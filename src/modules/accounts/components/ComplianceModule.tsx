@@ -22,11 +22,11 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Plus, Search, Download, IndianRupee, Loader2, FileText, AlertTriangle, CalendarClock } from 'lucide-react';
+import { Plus, Search, Download, IndianRupee, Loader2, FileText, AlertTriangle, CalendarClock, FileSpreadsheet, FileJson } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabaseClient } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV, resolveBuyerGstin, type Gstr1CancelledDoc } from '../utils/complianceExport';
+import { exportToCSV, exportToJSON, exportToExcel, exportToPDF, exportGSTR3B_JSON, exportGSTR3B_CSV, exportGSTR1_JSON, exportGSTR1_CSV, exportGSTR1_OfficialOfflineXLSX, resolveBuyerGstin, type Gstr1CancelledDoc } from '../utils/complianceExport';
 import { exportGSTR1_SalesRegisterXLSX, exportGSTR1_SalesRegisterPDF } from '../utils/gstr1SalesRegister';
 import { SAFEND_SUPPLIER } from '@/lib/invoice/document';
 import { CountUp } from '@/components/dashboard/CountUp';
@@ -682,10 +682,10 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
     }));
   };
 
-  const handleExport = (format: 'csv' | 'xlsx' | 'json' | 'pdf') => {
+  const handleExport = (format: 'csv' | 'xlsx' | 'json' | 'pdf' | 'offline_xlsx') => {
     const dateSuffix = new Date().toISOString().slice(0, 10);
 
-    // ── GSTR-1: portal JSON/CSV, and the CA's sales register as Excel/PDF ─
+    // ── GSTR-1: portal JSON/CSV, official offline Excel, and the CA's sales register ─
     if (activeSection === 'gst' && gstSubTab === 'gstr1') {
       if (gstPeriod === 'all') {
         toast({
@@ -703,7 +703,17 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
       const [y, m] = gstPeriod.split('-');
       const baseFilename = `GSTR1_${SAFEND_SUPPLIER.gstin}_${m}${y}_${dateSuffix}`;
 
-      if (format === 'xlsx' || format === 'pdf') {
+      if (format === 'offline_xlsx') {
+        exportGSTR1_OfficialOfflineXLSX(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER.gstin, `GSTR1_Offline_${SAFEND_SUPPLIER.gstin}_${m}${y}_${dateSuffix}.xlsx`, gstCancelledDocs.filter(inPeriod))
+          .then(() => toast({
+            title: "GSTR-1 Offline Excel exported",
+            description: "Official multi-sheet template ready for the GST Returns Offline Tool.",
+          }))
+          .catch((err) => {
+            console.error('GSTR-1 offline export failed:', err);
+            toast({ title: "Export failed", description: "Could not generate the offline Excel file. Please try again.", variant: "destructive" });
+          });
+      } else if (format === 'xlsx' || format === 'pdf') {
         const run = format === 'xlsx' ? exportGSTR1_SalesRegisterXLSX : exportGSTR1_SalesRegisterPDF;
         run(gstOutwardScoped, gstPeriod, SAFEND_SUPPLIER, `${baseFilename}.${format}`)
           .then(() => toast({
@@ -951,13 +961,49 @@ export function ComplianceModule({ filter }: ComplianceModuleProps) {
                   <Download className="h-4 w-4 mr-2" /> Export
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent>
-                {gstSubTab === 'gstr1' && (
-                  <DropdownMenuItem onClick={() => handleExport('xlsx')}>Excel</DropdownMenuItem>
+              <DropdownMenuContent align="end" className="w-64">
+                {gstSubTab === 'gstr1' ? (
+                  <>
+                    <DropdownMenuItem onClick={() => handleExport('json')}>
+                      <FileJson className="mr-2 h-4 w-4 text-emerald-600" />
+                      <div>
+                        <div className="font-medium text-xs">JSON (GST Portal Upload)</div>
+                        <div className="text-[10px] text-muted-foreground">Upload directly to gst.gov.in</div>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('offline_xlsx')}>
+                      <FileSpreadsheet className="mr-2 h-4 w-4 text-blue-600" />
+                      <div>
+                        <div className="font-medium text-xs">Excel (GST Offline Tool)</div>
+                        <div className="text-[10px] text-muted-foreground">Official multi-sheet offline template</div>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('xlsx')}>
+                      <FileSpreadsheet className="mr-2 h-4 w-4 text-amber-600" />
+                      <div>
+                        <div className="font-medium text-xs">Sales Register (Excel)</div>
+                        <div className="text-[10px] text-muted-foreground">CA internal working sheet</div>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('pdf')}>
+                      <FileText className="mr-2 h-4 w-4 text-rose-600" />
+                      <div>
+                        <div className="font-medium text-xs">Sales Register (PDF)</div>
+                        <div className="text-[10px] text-muted-foreground">Printable monthly register</div>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('csv')}>
+                      <FileText className="mr-2 h-4 w-4 text-muted-foreground" />
+                      <span className="text-xs">Summary CSV</span>
+                    </DropdownMenuItem>
+                  </>
+                ) : (
+                  <>
+                    <DropdownMenuItem onClick={() => handleExport('csv')}>CSV</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('json')}>JSON</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('pdf')}>PDF</DropdownMenuItem>
+                  </>
                 )}
-                <DropdownMenuItem onClick={() => handleExport('csv')}>CSV</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => handleExport('json')}>JSON</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => handleExport('pdf')}>PDF</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

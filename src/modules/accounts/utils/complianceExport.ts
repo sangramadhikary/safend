@@ -218,17 +218,96 @@ function toGstnJson(payload: unknown): string {
   ).replace(/"__GSTN__(-?\d+\.\d{2})__GSTN__"/g, '$1');
 }
 
+export const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+
+export const GST_STATE_MAP: Record<string, string> = {
+  '01': '01-Jammu and Kashmir',
+  '02': '02-Himachal Pradesh',
+  '03': '03-Punjab',
+  '04': '04-Chandigarh',
+  '05': '05-Uttarakhand',
+  '06': '06-Haryana',
+  '07': '07-Delhi',
+  '08': '08-Rajasthan',
+  '09': '09-Uttar Pradesh',
+  '10': '10-Bihar',
+  '11': '11-Sikkim',
+  '12': '12-Arunachal Pradesh',
+  '13': '13-Nagaland',
+  '14': '14-Manipur',
+  '15': '15-Mizoram',
+  '16': '16-Tripura',
+  '17': '17-Meghalaya',
+  '18': '18-Assam',
+  '19': '19-West Bengal',
+  '20': '20-Jharkhand',
+  '21': '21-Odisha',
+  '22': '22-Chhattisgarh',
+  '23': '23-Madhya Pradesh',
+  '24': '24-Gujarat',
+  '25': '25-Daman and Diu',
+  '26': '26-Dadra and Nagar Haveli',
+  '27': '27-Maharashtra',
+  '28': '28-Andhra Pradesh',
+  '29': '29-Karnataka',
+  '30': '30-Goa',
+  '31': '31-Lakshadweep',
+  '32': '32-Kerala',
+  '33': '33-Tamil Nadu',
+  '34': '34-Puducherry',
+  '35': '35-Andaman and Nicobar Islands',
+  '36': '36-Telangana',
+  '37': '37-Andhra Pradesh (New)',
+  '38': '38-Ladakh',
+  '97': '97-Other Territory',
+};
+
+export function cleanGstin(candidate?: string | null): string | null {
+  if (!candidate) return null;
+  const clean = candidate.trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
+  return GSTIN_REGEX.test(clean) ? clean : null;
+}
+
 /**
- * Buyer GSTIN for a receivable. The `client_gstin` column wins; otherwise it is
- * read from the notes blob, where the invoice forms have historically written
- * it as "GSTIN: …" (one-time / imported) or "Client GSTIN: …" (generated).
- * Returns null for unregistered buyers.
+ * Buyer GSTIN for a receivable. Validates strictly against standard 15-char GSTIN format.
+ * Checks the `client_gstin` column, `invoice_snapshot.recipient.gstin`, and `notes`.
+ * Unregistered indicators (e.g. "NO_GST:...", "URD", "N/A") return null.
  */
-export function resolveBuyerGstin(row: { client_gstin?: string | null; notes?: string | null }): string | null {
-  const col = (row.client_gstin || '').trim().toUpperCase();
+export function resolveBuyerGstin(row: {
+  client_gstin?: string | null;
+  notes?: string | null;
+  invoice_snapshot?: any;
+}): string | null {
+  // 1. Check direct client_gstin column
+  const col = cleanGstin(row.client_gstin);
   if (col) return col;
-  const m = typeof row.notes === 'string' ? row.notes.match(/(?:Client\s+)?GSTIN:\s*([0-9A-Za-z]{15})\b/i) : null;
-  return m ? m[1].toUpperCase() : null;
+
+  // 2. Check frozen invoice snapshot recipient GSTIN
+  const snap = cleanGstin(row.invoice_snapshot?.recipient?.gstin);
+  if (snap) return snap;
+
+  // 3. Check notes for 15-character GSTIN
+  if (typeof row.notes === 'string') {
+    const m = row.notes.match(/(?:Client\s+)?GSTIN:\s*([0-9A-Za-z]{15})\b/i);
+    if (m) {
+      const fromNotes = cleanGstin(m[1]);
+      if (fromNotes) return fromNotes;
+    }
+  }
+
+  return null;
+}
+
+/** Resolve Place of Supply (POS) 2-digit state code. */
+export function resolvePos(row: Gstr1InvoiceRow, supplierState: string): string {
+  const buyerGstin = resolveBuyerGstin(row);
+  if (buyerGstin) return buyerGstin.slice(0, 2);
+
+  const posRaw = (row as any).place_of_supply || (row as any).invoice_snapshot?.meta?.placeOfSupply || '';
+  const m = String(posRaw).trim().match(/^(\d{2})\b/);
+  if (m) return m[1];
+
+  return supplierState;
 }
 
 export function isInterStateRow(row: Gstr1InvoiceRow): boolean {
@@ -343,14 +422,14 @@ function buildItms(row: Gstr1InvoiceRow, igstOnly = false) {
 
 type HsnRow = {
   num: number; hsn_sc: string; uqc: string; rt: number; qty: number;
-  txval: number; iamt: number; camt: number; samt: number; csamt: number; desc: string;
+  txval: number; iamt: number; camt: number; samt: number; csamt: number; desc: string; user_desc?: string;
 };
 
 /**
  * HSN/SAC summary, split into B2B and B2C tables as the portal requires.
  *
  * Grouped by (SAC, rate). Credit notes are netted off (sign = -1), since the
- * HSN summary reports supplies net of notes. Services use UQC "NA", qty 0.
+ * HSN summary reports supplies net of notes. Services use GSTN UQC "OTH" (Others), qty 0.
  */
 function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c: HsnRow[] } {
   type Acc = { sac: string; rt: number; txval: number; iamt: number; camt: number; samt: number };
@@ -359,7 +438,8 @@ function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c:
 
   for (const row of rows) {
     const sign = (row.gst_amount || 0) < 0 || (row.amount || 0) < 0 ? -1 : 1;
-    const target = row.client_gstin?.trim() ? b2b : b2c;
+    const isB2B = !!resolveBuyerGstin(row);
+    const target = isB2B ? b2b : b2c;
     const inter = isInterStateRow(row);
     for (const a of allocateInvoice(row)) {
       const key = `${a.sac}|${a.rt}`;
@@ -380,7 +460,7 @@ function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c:
       .map((a, idx) => ({
         num: idx + 1,
         hsn_sc: a.sac,
-        uqc: 'NA',
+        uqc: 'OTH', // Official GSTN UQC master code for services ('NA' is invalid on portal)
         rt: a.rt,
         qty: 0,
         txval: a.txval,
@@ -389,6 +469,7 @@ function buildHsnSummary(rows: Gstr1InvoiceRow[]): { hsn_b2b: HsnRow[]; hsn_b2c:
         samt: a.samt,
         csamt: 0,
         desc: SAC_DESCRIPTIONS[a.sac] ?? 'Support services',
+        user_desc: '',
       }));
 
   return { hsn_b2b: toRows(b2b), hsn_b2c: toRows(b2c) };
@@ -465,22 +546,24 @@ export function exportGSTR1_JSON(
   const [year, month] = periodKey.split('-');
   const fp = `${month}${year}`; // MMYYYY
   const supplierState = stateCodeFromGstin(supplierGstin);
-  const docNo = (row: Gstr1InvoiceRow) => (row.reference_number || row.id).trim();
+  const docNo = (row: Gstr1InvoiceRow) => {
+    const raw = (row.reference_number || row.id || '').trim();
+    return raw.replace(/[^A-Za-z0-9\/-]/g, '').slice(0, 16);
+  };
 
   const isCredit = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'credit_note';
   const isDebit  = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'debit_note';
-  const isNote   = isCredit;
   const invoices = rows.filter((r) => gstr1DocKind(r) === 'invoice');
   const notes    = rows.filter(isCredit);
   const debitNotes = rows.filter(isDebit);
-  const isB2B    = (r: Gstr1InvoiceRow) => !!r.client_gstin?.trim();
+  const isB2B    = (r: Gstr1InvoiceRow) => !!resolveBuyerGstin(r);
   const isB2CL   = (r: Gstr1InvoiceRow) =>
     !isB2B(r) && isInterStateRow(r) && Math.abs(r.total_amount || 0) > B2CL_THRESHOLD;
 
   // ── B2B (Table 4) — grouped by buyer GSTIN ─────────────────────────────
   const b2bMap = new Map<string, Gstr1InvoiceRow[]>();
   for (const row of invoices.filter(isB2B)) {
-    const ctin = row.client_gstin!.trim().toUpperCase();
+    const ctin = resolveBuyerGstin(row)!;
     b2bMap.set(ctin, [...(b2bMap.get(ctin) ?? []), row]);
   }
   const b2b = Array.from(b2bMap.entries()).map(([ctin, invs]) => ({
@@ -489,19 +572,18 @@ export function exportGSTR1_JSON(
       inum:    docNo(row),
       idt:     toGstnDate(row.created_at),
       val:     r2(Math.abs(row.total_amount || 0)),
-      pos:     stateCodeFromGstin(row.client_gstin), // buyer's registered state
+      pos:     ctin.slice(0, 2),
+      rchrg:   row.gst_treatment === 'rcm' ? 'Y' : 'N',
       inv_typ: 'R',
       itms:    buildItms(row),
-      rchrg:   row.gst_treatment === 'rcm' ? 'Y' : 'N',
     })),
   }));
 
   // ── B2CL (Table 5) — unregistered, inter-state, value > ₹1 lakh ────────
   const b2clMap = new Map<string, Gstr1InvoiceRow[]>();
   for (const row of invoices.filter(isB2CL)) {
-    // Buyer state is unknown for unregistered buyers; the supplier state is
-    // the only value available. The CA must correct POS if it differs.
-    b2clMap.set(supplierState, [...(b2clMap.get(supplierState) ?? []), row]);
+    const pos = resolvePos(row, supplierState);
+    b2clMap.set(pos, [...(b2clMap.get(pos) ?? []), row]);
   }
   const b2cl = Array.from(b2clMap.entries()).map(([pos, invs]) => ({
     pos,
@@ -521,9 +603,10 @@ export function exportGSTR1_JSON(
     const sign = kind === 'credit_note' ? -1 : 1;
     const inter = isInterStateRow(row);
     const sply_ty = inter ? 'INTER' : 'INTRA';
+    const pos = resolvePos(row, supplierState);
     for (const a of allocateInvoice(row)) {
-      const key = `${sply_ty}|${supplierState}|${a.rt}`;
-      const g = b2csMap.get(key) ?? { sply_ty, pos: supplierState, rt: a.rt, txval: 0, iamt: 0, camt: 0, samt: 0 };
+      const key = `${sply_ty}|${pos}|${a.rt}`;
+      const g = b2csMap.get(key) ?? { sply_ty, pos, rt: a.rt, txval: 0, iamt: 0, camt: 0, samt: 0 };
       const { iamt, camt, samt } = splitTax(a.tax, inter);
       g.txval = r2(g.txval + sign * a.txval);
       g.iamt  = r2(g.iamt  + sign * iamt);
@@ -546,20 +629,20 @@ export function exportGSTR1_JSON(
       csamt:   0,
     }));
 
-  // ── CDNR (Table 9B) — credit notes to registered buyers ────────────────
+  // ── CDNR (Table 9B) — credit & debit notes to registered buyers ─────────
   const cdnrMap = new Map<string, Gstr1InvoiceRow[]>();
-  for (const row of notes.filter(isB2B)) {
-    const ctin = row.client_gstin!.trim().toUpperCase();
+  for (const row of [...notes, ...debitNotes].filter(isB2B)) {
+    const ctin = resolveBuyerGstin(row)!;
     cdnrMap.set(ctin, [...(cdnrMap.get(ctin) ?? []), row]);
   }
   const cdnr = Array.from(cdnrMap.entries()).map(([ctin, nts]) => ({
     ctin,
     nt: nts.map(row => ({
-      ntty:    'C',
+      ntty:    gstr1DocKind(row) === 'debit_note' ? 'D' : 'C',
       nt_num:  docNo(row),
       nt_dt:   toGstnDate(row.created_at),
       val:     r2(Math.abs(row.total_amount || 0)),
-      pos:     stateCodeFromGstin(row.client_gstin),
+      pos:     ctin.slice(0, 2),
       rchrg:   row.gst_treatment === 'rcm' ? 'Y' : 'N',
       inv_typ: 'R',
       itms:    buildItms(row),
@@ -573,63 +656,319 @@ export function exportGSTR1_JSON(
     nt_num: docNo(row),
     nt_dt:  toGstnDate(row.created_at),
     val:    r2(Math.abs(row.total_amount || 0)),
-    pos:    supplierState,
+    pos:    resolvePos(row, supplierState),
     itms:   buildItms(row, true),
-  }));
-
-  // ── Debit notes (Table 9C) — to registered buyers ────────────────────────
-  const cdnbMap = new Map<string, Gstr1InvoiceRow[]>();
-  for (const row of debitNotes.filter(isB2B)) {
-    const ctin = row.client_gstin!.trim().toUpperCase();
-    cdnbMap.set(ctin, [...(cdnbMap.get(ctin) ?? []), row]);
-  }
-  const cdnb = Array.from(cdnbMap.entries()).map(([ctin, nts]) => ({
-    ctin,
-    nt: nts.map(row => ({
-      ntty:    'D',
-      nt_num:  docNo(row),
-      nt_dt:   toGstnDate(row.created_at),
-      val:     r2(Math.abs(row.total_amount || 0)),
-      pos:     stateCodeFromGstin(row.client_gstin),
-      rchrg:   row.gst_treatment === 'rcm' ? 'Y' : 'N',
-      inv_typ: 'R',
-      itms:    buildItms(row),
-    })),
   }));
 
   // ── HSN summary (Table 12) — split B2B / B2C ───────────────────────────
   const hsn = buildHsnSummary(rows);
+  const hsnObj: Record<string, HsnRow[]> = {};
+  if (hsn.hsn_b2b.length) hsnObj.hsn_b2b = hsn.hsn_b2b;
+  if (hsn.hsn_b2c.length) hsnObj.hsn_b2c = hsn.hsn_b2c;
 
   // ── Documents issued (Table 13), cancelled numbers counted ─────────────
-  const docRange = (doc_num: number, doc_typ: string, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
+  const docRange = (doc_num: number, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
     const s = gstr1DocSummary(list.map(r => r.reference_number), cancelledList.map(d => d.reference_number));
-    return s ? { doc_num, doc_typ, docs: [{ num: 1, ...s }] } : null;
+    return s ? { doc_num, docs: [{ num: 1, ...s }] } : null;
   };
   const isCancelledDebitNote = (d: Gstr1CancelledDoc) =>
     d.category === 'Invoice Adjustments' && (d.adjustment_type === 'debit' || (d.adjustment_type == null && (d.total_amount || 0) > 0));
   const doc_det = [
-    docRange(1, 'Invoices for outward supply', invoices, cancelled.filter(d => d.category === 'Invoices')),
-    docRange(5, 'Credit Note', notes, cancelled.filter(isCancelledCreditNote)),
-    docRange(6, 'Debit Note', debitNotes, cancelled.filter(isCancelledDebitNote)),
+    docRange(1, invoices, cancelled.filter(d => d.category === 'Invoices')),
+    docRange(5, notes, cancelled.filter(isCancelledCreditNote)),
+    docRange(6, debitNotes, cancelled.filter(isCancelledDebitNote)),
   ].filter(Boolean);
 
-  // ── Assemble in the same key order as the GST offline tool ─────────────
+  // ── Assemble root payload matching official GST portal schema ─────────
   const payload: Record<string, unknown> = {
     gstin: supplierGstin,
     fp,
-    version: 'GST3.2.2',
-    hash: 'hash',
   };
   if (b2b.length)   payload.b2b   = b2b;
   if (b2cl.length)  payload.b2cl  = b2cl;
   if (b2cs.length)  payload.b2cs  = b2cs;
   if (cdnr.length)  payload.cdnr  = cdnr;
   if (cdnur.length) payload.cdnur = cdnur;
-  if (cdnb.length)  payload.cdnur_b2b = cdnb;
-  if (hsn.hsn_b2b.length || hsn.hsn_b2c.length) payload.hsn = hsn;
+  if (Object.keys(hsnObj).length) payload.hsn = hsnObj;
   if (doc_det.length) payload.doc_issue = { doc_det };
 
-  const blob = new Blob([toGstnJson(payload)], { type: 'application/json;charset=utf-8;' });
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' });
+  triggerDownload(blob, filename);
+}
+
+/**
+ * Generates the official multi-sheet Excel Workbook (.xlsx) matching
+ * the GST Returns Offline Tool template (sheets: b2b, b2cl, b2cs, cdnr, cdnur, hsn, docs).
+ */
+export async function exportGSTR1_OfficialOfflineXLSX(
+  rows: Gstr1InvoiceRow[],
+  periodKey: string,
+  supplierGstin: string,
+  filename: string,
+  cancelled: Gstr1CancelledDoc[] = [],
+): Promise<void> {
+  const mod: any = await import('exceljs');
+  const ExcelJS = mod.default ?? mod;
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'GST Returns Offline Tool';
+  wb.created = new Date();
+
+  const supplierState = stateCodeFromGstin(supplierGstin);
+  const docNo = (row: Gstr1InvoiceRow) => {
+    const raw = (row.reference_number || row.id || '').trim();
+    return raw.replace(/[^A-Za-z0-9\/-]/g, '').slice(0, 16);
+  };
+  const isCredit = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'credit_note';
+  const isDebit = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'debit_note';
+  const invoices = rows.filter((r) => gstr1DocKind(r) === 'invoice');
+  const notes = rows.filter(isCredit);
+  const debitNotes = rows.filter(isDebit);
+  const isB2B = (r: Gstr1InvoiceRow) => !!resolveBuyerGstin(r);
+  const isB2CL = (r: Gstr1InvoiceRow) => !isB2B(r) && isInterStateRow(r) && Math.abs(r.total_amount || 0) > B2CL_THRESHOLD;
+
+  const posLabel = (pos: string) => GST_STATE_MAP[pos] ?? `${pos}-Other`;
+
+  // 1. b2b sheet
+  const wsB2B = wb.addWorksheet('b2b');
+  wsB2B.addRow([
+    'GSTIN/UIN of Recipient',
+    'Receiver Name',
+    'Invoice Number',
+    'Invoice Date',
+    'Invoice Value',
+    'Place Of Supply',
+    'Reverse Charge',
+    'Applicable % of Tax Rate',
+    'Invoice Type',
+    'E-Commerce GSTIN',
+    'Rate',
+    'Taxable Value',
+    'Cess Amount',
+  ]);
+  for (const row of invoices.filter(isB2B)) {
+    const ctin = resolveBuyerGstin(row)!;
+    const invNo = docNo(row);
+    const invDate = toGstnDate(row.created_at);
+    const invVal = r2(Math.abs(row.total_amount || 0));
+    const pos = posLabel(ctin.slice(0, 2));
+    const rchrg = row.gst_treatment === 'rcm' ? 'Y' : 'N';
+    for (const item of buildItms(row)) {
+      wsB2B.addRow([
+        ctin,
+        row.client_name || '',
+        invNo,
+        invDate,
+        invVal,
+        pos,
+        rchrg,
+        '',
+        'Regular',
+        '',
+        item.itm_det.rt,
+        item.itm_det.txval,
+        0,
+      ]);
+    }
+  }
+
+  // 2. b2cl sheet
+  const wsB2CL = wb.addWorksheet('b2cl');
+  wsB2CL.addRow([
+    'Invoice Number',
+    'Invoice Date',
+    'Invoice Value',
+    'Place Of Supply',
+    'Applicable % of Tax Rate',
+    'Rate',
+    'Taxable Value',
+    'Cess Amount',
+    'E-Commerce GSTIN',
+  ]);
+  for (const row of invoices.filter(isB2CL)) {
+    const invNo = docNo(row);
+    const invDate = toGstnDate(row.created_at);
+    const invVal = r2(Math.abs(row.total_amount || 0));
+    const pos = posLabel(resolvePos(row, supplierState));
+    for (const item of buildItms(row, true)) {
+      wsB2CL.addRow([
+        invNo,
+        invDate,
+        invVal,
+        pos,
+        '',
+        item.itm_det.rt,
+        item.itm_det.txval,
+        0,
+        '',
+      ]);
+    }
+  }
+
+  // 3. b2cs sheet
+  const wsB2CS = wb.addWorksheet('b2cs');
+  wsB2CS.addRow([
+    'Type',
+    'Place Of Supply',
+    'Applicable % of Tax Rate',
+    'Rate',
+    'Taxable Value',
+    'Cess Amount',
+    'E-Commerce GSTIN',
+  ]);
+  const b2csMap = new Map<string, { pos: string; rt: number; txval: number }>();
+  for (const row of rows.filter((r) => !isB2B(r) && !isB2CL(r))) {
+    const sign = gstr1DocKind(row) === 'credit_note' ? -1 : 1;
+    const pos = posLabel(resolvePos(row, supplierState));
+    for (const a of allocateInvoice(row)) {
+      const key = `${pos}|${a.rt}`;
+      const g = b2csMap.get(key) ?? { pos, rt: a.rt, txval: 0 };
+      g.txval = r2(g.txval + sign * a.txval);
+      b2csMap.set(key, g);
+    }
+  }
+  for (const g of b2csMap.values()) {
+    if (g.txval !== 0) {
+      wsB2CS.addRow(['OE', g.pos, '', g.rt, g.txval, 0, '']);
+    }
+  }
+
+  // 4. cdnr sheet
+  const wsCDNR = wb.addWorksheet('cdnr');
+  wsCDNR.addRow([
+    'GSTIN/UIN of Recipient',
+    'Receiver Name',
+    'Note Number',
+    'Note Date',
+    'Note Type',
+    'Place Of Supply',
+    'Reverse Charge',
+    'Note Supply Type',
+    'Note Value',
+    'Applicable % of Tax Rate',
+    'Rate',
+    'Taxable Value',
+    'Cess Amount',
+  ]);
+  for (const row of [...notes, ...debitNotes].filter(isB2B)) {
+    const ctin = resolveBuyerGstin(row)!;
+    const noteNo = docNo(row);
+    const noteDate = toGstnDate(row.created_at);
+    const noteType = gstr1DocKind(row) === 'debit_note' ? 'D' : 'C';
+    const pos = posLabel(ctin.slice(0, 2));
+    const rchrg = row.gst_treatment === 'rcm' ? 'Y' : 'N';
+    const noteVal = r2(Math.abs(row.total_amount || 0));
+    for (const item of buildItms(row)) {
+      wsCDNR.addRow([
+        ctin,
+        row.client_name || '',
+        noteNo,
+        noteDate,
+        noteType,
+        pos,
+        rchrg,
+        'Regular',
+        noteVal,
+        '',
+        item.itm_det.rt,
+        item.itm_det.txval,
+        0,
+      ]);
+    }
+  }
+
+  // 5. cdnur sheet
+  const wsCDNUR = wb.addWorksheet('cdnur');
+  wsCDNUR.addRow([
+    'UR Type',
+    'Note Number',
+    'Note Date',
+    'Note Type',
+    'Place Of Supply',
+    'Note Value',
+    'Applicable % of Tax Rate',
+    'Rate',
+    'Taxable Value',
+    'Cess Amount',
+  ]);
+  for (const row of notes.filter(isB2CL)) {
+    const noteNo = docNo(row);
+    const noteDate = toGstnDate(row.created_at);
+    const pos = posLabel(resolvePos(row, supplierState));
+    const noteVal = r2(Math.abs(row.total_amount || 0));
+    for (const item of buildItms(row, true)) {
+      wsCDNUR.addRow([
+        'B2CL',
+        noteNo,
+        noteDate,
+        'C',
+        pos,
+        noteVal,
+        '',
+        item.itm_det.rt,
+        item.itm_det.txval,
+        0,
+      ]);
+    }
+  }
+
+  // 6. hsn sheet
+  const wsHSN = wb.addWorksheet('hsn');
+  wsHSN.addRow([
+    'HSN',
+    'Description',
+    'UQC',
+    'Total Quantity',
+    'Total Value',
+    'Rate',
+    'Taxable Value',
+    'Integrated Tax Amount',
+    'Central Tax Amount',
+    'State/UT Tax Amount',
+    'Cess Amount',
+  ]);
+  const hsn = buildHsnSummary(rows);
+  const allHsnRows = [...hsn.hsn_b2b, ...hsn.hsn_b2c];
+  for (const h of allHsnRows) {
+    const totalVal = r2(h.txval + h.iamt + h.camt + h.samt);
+    wsHSN.addRow([
+      h.hsn_sc,
+      h.desc,
+      h.uqc,
+      h.qty,
+      totalVal,
+      h.rt,
+      h.txval,
+      h.iamt,
+      h.camt,
+      h.samt,
+      h.csamt,
+    ]);
+  }
+
+  // 7. docs sheet
+  const wsDOCS = wb.addWorksheet('docs');
+  wsDOCS.addRow([
+    'Nature of Document',
+    'Sr. No. From',
+    'Sr. No. To',
+    'Total Number',
+    'Cancelled',
+  ]);
+  const addDocRow = (label: string, list: Gstr1InvoiceRow[], cancelledList: Gstr1CancelledDoc[]) => {
+    const s = gstr1DocSummary(list.map((r) => r.reference_number), cancelledList.map((d) => d.reference_number));
+    if (s) {
+      wsDOCS.addRow([label, s.from, s.to, s.totnum, s.cancel]);
+    }
+  };
+  const isCancelledDebit = (d: Gstr1CancelledDoc) =>
+    d.category === 'Invoice Adjustments' && (d.adjustment_type === 'debit' || (d.adjustment_type == null && (d.total_amount || 0) > 0));
+  addDocRow('Invoices for outward supply', invoices, cancelled.filter((d) => d.category === 'Invoices'));
+  addDocRow('Credit Note', notes, cancelled.filter(isCancelledCreditNote));
+  addDocRow('Debit Note', debitNotes, cancelled.filter(isCancelledDebit));
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   triggerDownload(blob, filename);
 }
 
@@ -660,7 +999,7 @@ export function exportGSTR1_CSV(
   const isCredit = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'credit_note';
   const isDebit  = (r: Gstr1InvoiceRow) => gstr1DocKind(r) === 'debit_note';
   const isNote   = isCredit;
-  const isB2B  = (r: Gstr1InvoiceRow) => !!r.client_gstin?.trim();
+  const isB2B  = (r: Gstr1InvoiceRow) => !!resolveBuyerGstin(r);
   const isB2CL = (r: Gstr1InvoiceRow) =>
     !isB2B(r) && isInterStateRow(r) && Math.abs(r.total_amount || 0) > B2CL_THRESHOLD;
   const supplierState = stateCodeFromGstin(supplierGstin);
@@ -682,13 +1021,14 @@ export function exportGSTR1_CSV(
   lines.push('GSTIN/UIN of Recipient,Receiver Name,Invoice Number,Invoice Date,Invoice Value,Place Of Supply,Reverse Charge,Invoice Type,Rate,Taxable Value,Integrated Tax,Central Tax,State/UT Tax,Cess Amount');
   const b2bRows = invoices.filter(isB2B);
   for (const row of b2bRows) {
+    const ctin = resolveBuyerGstin(row)!;
     lines.push(...itemLines(row, [
-      escapeCSV(row.client_gstin!.trim().toUpperCase()),
+      escapeCSV(ctin),
       escapeCSV(row.client_name || ''),
       escapeCSV(row.reference_number || row.id),
       toGstnDate(row.created_at),
       f2(Math.abs(row.total_amount || 0)),
-      stateCodeFromGstin(row.client_gstin),
+      ctin.slice(0, 2),
       row.gst_treatment === 'rcm' ? 'Y' : 'N',
       'Regular B2B',
     ]));
@@ -742,14 +1082,15 @@ export function exportGSTR1_CSV(
   lines.push('GSTIN/UIN of Recipient,Receiver Name,Note Number,Note Date,Note Type,Note Value,Place Of Supply,Reverse Charge,Note Supply Type,Rate,Taxable Value,Integrated Tax,Central Tax,State/UT Tax,Cess Amount');
   const cdnrRows = notes.filter(isB2B);
   for (const row of cdnrRows) {
+    const ctin = resolveBuyerGstin(row)!;
     lines.push(...itemLines(row, [
-      escapeCSV(row.client_gstin!.trim().toUpperCase()),
+      escapeCSV(ctin),
       escapeCSV(row.client_name || ''),
       escapeCSV(row.reference_number || row.id),
       toGstnDate(row.created_at),
       'C',
       f2(Math.abs(row.total_amount || 0)),
-      stateCodeFromGstin(row.client_gstin),
+      ctin.slice(0, 2),
       row.gst_treatment === 'rcm' ? 'Y' : 'N',
       'Regular B2B',
     ]));
@@ -779,14 +1120,15 @@ export function exportGSTR1_CSV(
     lines.push('Table 9C — Debit Notes to Registered Buyers');
     lines.push('GSTIN/UIN of Recipient,Receiver Name,Note Number,Note Date,Note Type,Note Value,Place Of Supply,Reverse Charge,Note Supply Type,Rate,Taxable Value,Integrated Tax,Central Tax,State/UT Tax,Cess Amount');
     for (const row of debitNotes.filter(isB2B)) {
+      const ctin = resolveBuyerGstin(row)!;
       lines.push(...itemLines(row, [
-        escapeCSV(row.client_gstin!.trim().toUpperCase()),
+        escapeCSV(ctin),
         escapeCSV(row.client_name || ''),
         escapeCSV(row.reference_number || row.id),
         toGstnDate(row.created_at),
         'Debit Note',
         f2(Math.abs(row.total_amount || 0)),
-        stateCodeFromGstin(row.client_gstin),
+        ctin.slice(0, 2),
         row.gst_treatment === 'rcm' ? 'Y' : 'N',
         'Regular',
       ]));

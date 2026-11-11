@@ -403,6 +403,11 @@ export function formatMoney(n: number): string {
   return `\u20B9${formatNumber(n)}`;
 }
 
+/** Format deployed headcount using quantity-aware invoice wording. */
+export function formatPersonCount(quantity: number): string {
+  return `${quantity} ${quantity === 1 ? 'Person' : 'Persons'}`;
+}
+
 /** Shared display copy so the screen view and PDF cannot word things differently. */
 export const INVOICE_LABELS = {
   documentTitle: 'TAX INVOICE',
@@ -410,7 +415,6 @@ export const INVOICE_LABELS = {
   invoiceDetailsHead: 'INVOICE DETAILS',
   serviceAndPost: 'SERVICE & POST',
   duties: 'DUTIES',
-  personnelSuffix: 'Personnel',
   taxableValue: 'Taxable Value',
   invoiceTotal: 'Invoice Value',
   invoiceTotalNote: 'for GST purposes',

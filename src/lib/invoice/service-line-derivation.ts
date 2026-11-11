@@ -43,6 +43,8 @@ interface Shift {
 
 export interface ServiceInstanceLike {
   shiftType?: '8H' | '12H' | string;
+  /** Designation for manpower instances, such as Driver or Housekeeping. */
+  manpowerRole?: string;
   shifts?: {
     day?: Shift;
     afternoon?: Shift;
@@ -51,6 +53,8 @@ export interface ServiceInstanceLike {
 }
 
 export interface DerivedServiceLine {
+  /** Designation retained from a manpower service instance. */
+  manpowerRole?: string;
   /** Total personnel across all enabled shifts on this instance. */
   totalManpower: number;
   /** Shift type for this line ('12H' or '8H'). */
@@ -155,7 +159,11 @@ export function deriveServiceLines(
   const out: DerivedServiceLine[] = [];
 
   for (const inst of instances) {
-    const shiftType: '8H' | '12H' = inst?.shiftType === '12H' ? '12H' : fallbackShiftType;
+    const shiftType: '8H' | '12H' = inst?.shiftType === '12H'
+      ? '12H'
+      : inst?.shiftType === '8H'
+        ? '8H'
+        : fallbackShiftType;
     const s = inst?.shifts || {};
 
     let manpower = 0;
@@ -189,6 +197,7 @@ export function deriveServiceLines(
     );
 
     out.push({
+      manpowerRole: typeof inst.manpowerRole === 'string' ? inst.manpowerRole.trim() || undefined : undefined,
       totalManpower: manpower,
       shiftType,
       woPricePerMonth: perPersonnelMonthly > 0 ? Math.round(perPersonnelMonthly) : 0,
